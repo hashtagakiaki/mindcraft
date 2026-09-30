@@ -489,9 +489,11 @@ export class Agent {
             this.bot.clearControlStates();
             this.bot.pathfinder.stop(); // clear any lingering pathfinder
             this.bot.modes.unPauseAll();
-            setTimeout(() => {
+            if (this._idleResumeTimer) return;
+            this._idleResumeTimer = setTimeout(() => {
+                this._idleResumeTimer = null;
                 if (this.isIdle()) {
-                    this.actions.resumeAction();
+                    this.actions.resumeAction().catch(error => console.error('Resume action failed:', error));
                 }
             }, 1000);
         });

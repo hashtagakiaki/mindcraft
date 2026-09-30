@@ -17,6 +17,8 @@ export class NPCContoller {
         this.build_goal = new BuildGoal(agent);
         this.constructions = {};
         this.last_goals = {};
+        this.idleTimer = null;
+        this.idleExecution = null;
     }
 
     getBuiltPositions() {
@@ -67,15 +69,19 @@ export class NPCContoller {
 
         this.agent.bot.on('idle', async () => {
             if (this.data.goals.length === 0 && !this.data.curr_goal) return;
+            if (this.idleTimer || this.idleExecution) return;
             // Wait a while for inputs before acting independently
-            await new Promise((resolve) => setTimeout(resolve, 5000));
-            if (!this.agent.isIdle()) return;
-
-            // Persue goal
-            if (!this.agent.actions.resume_func) {
-                this.executeNext();
-                this.agent.history.save();
-            }
+            this.idleTimer = setTimeout(async () => {
+                this.idleTimer = null;
+                if (!this.agent.isIdle() || this.agent.actions.resume_func) return;
+                this.idleExecution = (async () => {
+                    await this.executeNext();
+                    await this.agent.history.save();
+                })();
+                try { await this.idleExecution; }
+                catch (error) { console.error('NPC idle execution failed:', error); }
+                finally { this.idleExecution = null; }
+            }, 5000);
         });
     }
 

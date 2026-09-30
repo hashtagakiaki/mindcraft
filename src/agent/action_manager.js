@@ -9,10 +9,13 @@ export class ActionManager {
         this.resume_name = '';
         this.last_action_time = 0;
         this.recent_action_counter = 0;
+        this.transition = Promise.resolve();
+        this.actionId = 0;
+        this.timeoutEscalations = new Map();
     }
 
-    async resumeAction(actionFn, timeout) {
-        return this._executeResume(actionFn, timeout);
+    async resumeAction(actionLabel, actionFn, timeout) {
+        return this._executeResume(actionLabel, actionFn, timeout);
     }
 
     async runAction(actionLabel, actionFn, { timeout, resume = false } = {}) {
@@ -44,8 +47,8 @@ export class ActionManager {
     async _executeResume(actionLabel = null, actionFn = null, timeout = 10) {
         const new_resume = actionFn != null;
         if (new_resume) { // start new resume
+            if (actionLabel == null) throw new Error('actionLabel is required for new resume');
             this.resume_func = actionFn;
-            assert(actionLabel != null, 'actionLabel is required for new resume');
             this.resume_name = actionLabel;
         }
         if (this.resume_func != null && (this.agent.isIdle() || new_resume) && (!this.agent.self_prompter.isActive() || new_resume)) {
@@ -59,7 +62,8 @@ export class ActionManager {
     }
 
     async _executeAction(actionLabel, actionFn, timeout = 10) {
-        let TIMEOUT;
+        let timeoutHandle;
+        let actionId;
         try {
             if (this.last_action_time > 0) {
                 let time_diff = Date.now() - this.last_action_time;
@@ -82,39 +86,38 @@ export class ActionManager {
             this.last_action_time = Date.now();
             console.log('executing code...\n');
 
-            // await current action to finish (executing=false), with 10 seconds timeout
-            // also tell agent.bot to stop various actions
-            if (this.executing) {
-                console.log(`action "${actionLabel}" trying to interrupt current action "${this.currentActionLabel}"`);
-            }
-            await this.stop();
-
-            // clear bot logs and reset interrupt code
-            this.agent.clearBotLogs();
-
-            this.executing = true;
-            this.currentActionLabel = actionLabel;
-            this.currentActionFn = actionFn;
-
-            // timeout in minutes
-            if (timeout > 0) {
-                TIMEOUT = this._startTimeout(timeout);
+            // Serialize transitions only. The action body remains outside the
+            // transition chain so a later action can interrupt it.
+            let releaseTransition;
+            const previousTransition = this.transition;
+            this.transition = new Promise(resolve => { releaseTransition = resolve; });
+            await previousTransition;
+            try {
+                if (this.executing) {
+                    console.log(`action "${actionLabel}" trying to interrupt current action "${this.currentActionLabel}"`);
+                }
+                await this.stop();
+                this.agent.clearBotLogs();
+                this.timedout = false;
+                this.executing = true;
+                actionId = ++this.actionId;
+                this.currentActionLabel = actionLabel;
+                this.currentActionFn = actionFn;
+                if (timeout > 0) timeoutHandle = this._startTimeout(timeout, actionId);
+            } finally {
+                releaseTransition();
             }
 
             // start the action
             await actionFn();
 
             // mark action as finished + cleanup
-            this.executing = false;
-            this.currentActionLabel = '';
-            this.currentActionFn = null;
-            clearTimeout(TIMEOUT);
-
             // get bot activity summary
             let output = this.getBotOutputSummary();
             let interrupted = this.agent.bot.interrupt_code;
             let timedout = this.timedout;
             this.agent.clearBotLogs();
+            this._finishAction(actionId, timeoutHandle);
 
             // if not interrupted and not generating, emit idle event
             if (!interrupted) {
@@ -124,10 +127,7 @@ export class ActionManager {
             // return action status report
             return { success: true, message: output, interrupted, timedout };
         } catch (err) {
-            this.executing = false;
-            this.currentActionLabel = '';
-            this.currentActionFn = null;
-            clearTimeout(TIMEOUT);
+            this._finishAction(actionId, timeoutHandle);
             this.cancelResume();
             console.error("Code execution triggered catch:", err);
             // Log the full stack trace
@@ -165,12 +165,30 @@ export class ActionManager {
         return output;
     }
 
-    _startTimeout(TIMEOUT_MINS = 10) {
+    _finishAction(actionId, timeoutHandle) {
+        clearTimeout(timeoutHandle);
+        clearTimeout(this.timeoutEscalations.get(actionId));
+        this.timeoutEscalations.delete(actionId);
+        if (this.actionId !== actionId) return;
+        this.executing = false;
+        this.currentActionLabel = '';
+        this.currentActionFn = null;
+    }
+
+    _startTimeout(TIMEOUT_MINS = 10, actionId = this.actionId) {
         return setTimeout(async () => {
+            if (!this.executing || this.actionId !== actionId) return;
             console.warn(`Code execution timed out after ${TIMEOUT_MINS} minutes. Attempting force stop.`);
             this.timedout = true;
             this.agent.history.add('system', `Code execution timed out after ${TIMEOUT_MINS} minutes. Attempting force stop.`);
-            await this.stop(); // last attempt to stop
+            this.agent.requestInterrupt();
+            const escalation = setTimeout(() => {
+                this.timeoutEscalations.delete(actionId);
+                if (this.executing && this.actionId === actionId) {
+                    this.agent.cleanKill('Code execution refused stop after 10 seconds. Killing process.');
+                }
+            }, 10000);
+            this.timeoutEscalations.set(actionId, escalation);
         }, TIMEOUT_MINS * 60 * 1000);
     }
 
