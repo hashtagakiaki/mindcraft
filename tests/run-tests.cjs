@@ -167,7 +167,8 @@ function makeBot(scenario) {
   const listeners = new Map()
   const bot = {
     output: '',
-    entity: { position: { x: 0, y: 0, z: 0, distanceTo: () => 0 } },
+    entity: { id: 42, position: { x: 0, y: 0, z: 0, distanceTo: () => 0 } },
+    registry: { itemsByName: { wheat: { id: 100 }, wheat_seeds: { id: 101 }, carrot: { id: 102 }, potato: { id: 103 }, beetroot: { id: 104 }, beetroot_seeds: { id: 105 } } },
     modes: { isOn: mode => mode === 'cheat' && scenario.cheat !== false },
     inventory: { items: () => items, slots: items },
     armorManager: { equipAll() {} },
@@ -177,13 +178,28 @@ function makeBot(scenario) {
       listeners.set(event, eventListeners)
     },
     removeListener(event, listener) { listeners.get(event)?.delete(listener) },
+    listenerCount(event) { return listeners.get(event)?.size || 0 },
+    emit(event, ...args) { for (const listener of listeners.get(event) || []) listener(...args) },
     async equip(item) { this.heldItem = item },
     blockAt(position) {
       if (position.y === 1) return scenario.planted?.get(`${position.x},${position.y},${position.z}`) || { name: 'air', position }
       if (scenario.explicitChest && position.x === scenario.explicitChest.position.x && position.y === scenario.explicitChest.position.y && position.z === scenario.explicitChest.position.z) return scenario.explicitChest
-      return { name: 'farmland', position }
+      return { name: scenario.baseBlockName || 'farmland', position }
     },
-    chat() {},
+    chat(message) {
+      if (!message.startsWith('/setblock ')) return
+      scenario.setblockCommands ??= []
+      scenario.setblockCommands.push(message)
+      const [, x, y, z, name] = message.split(' ')
+      const position = { x: Number(x), y: Number(y), z: Number(z) }
+      const emitUpdate = () => {
+        const isTargetFarmland = position.x === 30 && position.y === 0 && position.z === 2 && name === 'farmland'
+        const actualName = scenario.setblockMode === 'wrong' && isTargetFarmland ? 'dirt' : name.split('[')[0]
+        bot.emit('blockUpdate', { name: 'air', position }, { name: actualName, position })
+      }
+      if (scenario.setblockMode === 'delayed') setTimeout(emitUpdate, 15)
+      else if (scenario.setblockMode !== 'absent' && !(scenario.setblockMode === 'cropAbsent' && position.x === 30 && position.y === 1 && position.z === 2 && name === 'wheat')) emitUpdate()
+    },
     async activateBlock(block) {
       scenario.activations.push(block.position.x)
       if (this.heldItem?.name === 'wheat_seeds' && !scenario.noPlant) {
@@ -202,6 +218,26 @@ function makeBot(scenario) {
         const found = items.find(item => item.name === name)
         if (found) found.count += count
         else items.push({ name, type: name, count })
+      }
+      const emitHarvestSignals = () => {
+        const dropName = scenario.harvestMode === 'wrong' ? 'carrot' : produce[0][0]
+        const entity = {
+          id: Math.random(),
+          position: { ...crop.position, distanceTo(other) { return Math.hypot(this.x + 0.5 - other.x, this.y + 0.5 - other.y, this.z + 0.5 - other.z) } },
+          getDroppedItem() { return { type: bot.registry.itemsByName[dropName]?.id } }
+        }
+        bot.emit('itemDrop', entity)
+        bot.emit('playerCollect', bot.entity, entity)
+        bot.emit('blockUpdate', crop, { name: 'air', type: 0, position: crop.position })
+      }
+      if (scenario.harvestMode === 'interrupt') bot.interrupt_code = true
+      else if (scenario.harvestMode === 'delayed') setTimeout(emitHarvestSignals, 15)
+      else if (scenario.harvestMode !== 'absent' && scenario.harvestMode !== 'wrong') emitHarvestSignals()
+      else if (scenario.harvestMode === 'wrong') {
+        const entity = { id: Math.random(), position: { ...crop.position, distanceTo(other) { return Math.hypot(this.x + 0.5 - other.x, this.y + 0.5 - other.y, this.z + 0.5 - other.z) } }, getDroppedItem() { return { type: bot.registry.itemsByName.carrot.id } } }
+        bot.emit('itemDrop', entity)
+        bot.emit('playerCollect', bot.entity, entity)
+        bot.emit('blockUpdate', crop, { name: 'air', type: 0, position: crop.position })
       }
     },
     async openContainer(chest) {
@@ -239,7 +275,38 @@ async function testFarm(root) {
   assert.equal(scenario.closed, 1)
   assert.deepEqual(scenario.deposits, [{ type: 'wheat', count: 1 }, { type: 'wheat_seeds', count: 1 }])
   assert.equal(bot.inventory.items().find(item => item.name === 'wheat_seeds').count, 1)
+
+  const occupiedFarmScenario = {
+    crops: [], farmland: [], items: [{ name: 'wheat_seeds', type: 'wheat_seeds', count: 1 }],
+    opened: [], deposits: [], closed: 0, activations: [], planted: new Map(), cheat: false
+  }
+  occupiedFarmScenario.planted.set('21,1,0', { name: 'carrots', position: { x: 21, y: 1, z: 0 } })
+  globalThis.farmScenario = occupiedFarmScenario
+  bot = makeBot(occupiedFarmScenario)
+  assert.equal(await tillAndSow(bot, 21, 0, 0, 'wheat'), false, 'existing different crop is not successful wheat planting')
+  occupiedFarmScenario.planted.set('21,1,0', { name: 'wheat', position: { x: 21, y: 1, z: 0 } })
+  bot = makeBot(occupiedFarmScenario)
+  assert.equal(await tillAndSow(bot, 21, 0, 0, 'wheat'), true, 'existing requested crop satisfies planting')
   assert.equal(scenario.crops[1].diggable, true, 'unripe crops remain untouched')
+  for (const harvestMode of ['delayed', 'absent', 'wrong', 'interrupt']) {
+    const confirmationScenario = {
+      crops: [block('wheat', 7)], farmland: [], items: [{ name: 'wheat', type: 100, count: 5 }],
+      nearestChest: nearChest, opened: [], deposits: [], closed: 0, activations: [], planted: new Map(),
+      cheat: true, harvestMode
+    }
+    globalThis.farmScenario = confirmationScenario
+    const confirmationBot = makeBot(confirmationScenario)
+    result = await tendNearbyFarm(confirmationBot, 32, 0)
+    assert.equal(result.harvested, harvestMode === 'delayed' ? 1 : 0, `${harvestMode} harvest confirmation`)
+    if (harvestMode !== 'delayed') {
+      assert.equal(result.stored, 0, 'failed harvest leaves pre-existing crop inventory unstored')
+      assert.deepEqual(confirmationScenario.opened, [], 'failed harvest does not open chest')
+    }
+    assert.equal(confirmationBot.listenerCount('itemDrop'), 0)
+    assert.equal(confirmationBot.listenerCount('playerCollect'), 0)
+    assert.equal(confirmationBot.listenerCount('blockUpdate'), 0)
+  }
+  globalThis.farmScenario = scenario
 
   scenario.crops = []
   scenario.farmland = [block('farmland', null, 11), block('farmland', null, 12)]
@@ -306,6 +373,24 @@ async function testFarm(root) {
   bot = makeBot(plantingScenario)
   assert.equal(await tillAndSow(bot, 20, 0, 0, 'wheat'), false, 'planting returns false without a block update')
   assert.match(bot.output, /Could not confirm planting wheat_seeds/)
+  assert.equal(bot.listenerCount('blockUpdate'), 0, 'plant listener is removed after timeout')
+
+  const cheatPlantingScenario = { crops: [], farmland: [], items: [], opened: [], deposits: [], closed: 0, activations: [], planted: new Map(), cheat: true }
+  globalThis.farmScenario = cheatPlantingScenario
+  bot = makeBot(cheatPlantingScenario)
+  assert.equal(await tillAndSow(bot, 30, 0, 2, 'wheat'), true, 'cheat planting waits for authoritative farmland and crop updates')
+  assert.deepEqual(cheatPlantingScenario.setblockCommands.filter(command => command.endsWith(' farmland') || command.endsWith(' wheat')).map(command => command.split(' ').at(-1)), ['wheat'], 'existing farmland is accepted and requested crop is still confirmed')
+  assert.equal(bot.listenerCount('blockUpdate'), 0)
+  for (const setblockMode of ['absent', 'wrong', 'cropAbsent', 'delayed']) {
+    const scenario = { crops: [], farmland: [], items: [], opened: [], deposits: [], closed: 0, activations: [], planted: new Map(), cheat: true, baseBlockName: 'dirt', setblockMode }
+    globalThis.farmScenario = scenario
+    bot = makeBot(scenario)
+    assert.equal(await tillAndSow(bot, 30, 0, 2, 'wheat'), setblockMode === 'delayed', `${setblockMode} cheat planting update handling`)
+    assert.equal(bot.listenerCount('blockUpdate'), 0)
+    if (setblockMode === 'absent' || setblockMode === 'wrong') {
+      assert.equal(scenario.setblockCommands.filter(command => command.endsWith(' wheat')).length, 0, 'crop placement waits until farmland is confirmed')
+    }
+  }
 
   const docs = getSkillDocs()
   assert.ok(docs.some(doc => doc.startsWith('skills.tendNearbyFarm\n') && doc.includes('seedReserve')))

@@ -9,6 +9,7 @@ const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_
 const useDelay = blockPlaceDelay > 0;
 const COLLECT_DROP_RADIUS = 0.5;
 const PLANT_CONFIRM_TIMEOUT_MS = 2000;
+const HARVEST_CONFIRM_TIMEOUT_MS = 2000;
 const CROPS = {
     wheat: { mature: 7, seed: 'wheat_seeds', produce: ['wheat'] },
     carrots: { mature: 7, seed: 'carrot', produce: ['carrot'] },
@@ -18,6 +19,87 @@ const CROPS = {
 
 export function log(bot, message) {
     bot.output += message + '\n';
+}
+
+function itemIdsForNames(bot, itemNames) {
+    return new Set(itemNames.map(name => bot.registry?.itemsByName?.[name]?.id).filter(Number.isInteger));
+}
+
+function trackBlockCollection(bot, block, expectedItemIds) {
+    const trackedDrops = new Set();
+    let collectedTargetDrop = false;
+    let targetAirObserved = false;
+    const onItemDrop = entity => {
+        const center = block.position.offset(0.5, 0.5, 0.5);
+        if (!entity.position?.distanceTo || entity.position.distanceTo(center) > COLLECT_DROP_RADIUS) return;
+        const item = entity.getDroppedItem?.();
+        if (item?.type != null && expectedItemIds.has(item.type) && entity.id != null) trackedDrops.add(entity.id);
+    };
+    const onPlayerCollect = (collector, entity) => {
+        if (bot.entity?.id == null || collector?.id !== bot.entity.id || entity?.id == null || !trackedDrops.has(entity.id)) return;
+        collectedTargetDrop = true;
+    };
+    const onBlockUpdate = (oldBlock, newBlock) => {
+        if (oldBlock?.position?.x === block.position.x && oldBlock.position.y === block.position.y &&
+            oldBlock.position.z === block.position.z && (newBlock?.type === 0 || newBlock?.name === 'air')) targetAirObserved = true;
+    };
+    bot.on('itemDrop', onItemDrop);
+    bot.on('playerCollect', onPlayerCollect);
+    bot.on('blockUpdate', onBlockUpdate);
+    return {
+        async wait(timeoutMs) {
+            const startedAt = Date.now();
+            while (!bot.interrupt_code && Date.now() - startedAt < timeoutMs) {
+                const currentBlock = bot.blockAt?.(block.position);
+                const targetAir = targetAirObserved || currentBlock?.type === 0 || currentBlock?.name === 'air';
+                if (collectedTargetDrop && targetAir) return true;
+                await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            return false;
+        },
+        cleanup() {
+            bot.removeListener('itemDrop', onItemDrop);
+            bot.removeListener('playerCollect', onPlayerCollect);
+            bot.removeListener('blockUpdate', onBlockUpdate);
+        }
+    };
+}
+
+function waitForBlockUpdate(bot, position, predicate, timeoutMs = PLANT_CONFIRM_TIMEOUT_MS) {
+    let timer;
+    let interruptTimer;
+    let onBlockUpdate;
+    let finish;
+    const promise = new Promise(resolve => {
+        let settled = false;
+        finish = value => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            clearInterval(interruptTimer);
+            if (onBlockUpdate) bot.removeListener('blockUpdate', onBlockUpdate);
+            resolve(value);
+        };
+        onBlockUpdate = (_oldBlock, newBlock) => {
+            const samePosition = newBlock?.position?.x === position.x &&
+                newBlock.position.y === position.y && newBlock.position.z === position.z;
+            if (samePosition && predicate(newBlock)) finish(true);
+        };
+        bot.on('blockUpdate', onBlockUpdate);
+        timer = setTimeout(() => finish(false), timeoutMs);
+        interruptTimer = setInterval(() => { if (bot.interrupt_code) finish(false); }, 25);
+    });
+    return { promise, cleanup: () => finish?.(false) };
+}
+
+async function performAndConfirmBlockUpdate(bot, position, expectedName, action) {
+    const update = waitForBlockUpdate(bot, position, block => block?.name === expectedName);
+    try {
+        if (!await action()) return false;
+        return await update.promise;
+    } finally {
+        update.cleanup();
+    }
 }
 
 async function autoLight(bot) {
@@ -508,48 +590,21 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             return false;
         }
         const expectedItemIds = new Set();
-        const addItemId = id => {
-            if (Number.isInteger(id)) expectedItemIds.add(id);
-        };
         for (const drop of block.drops ?? []) {
             const id = typeof drop === 'number' ? drop : typeof drop.drop === 'number' ? drop.drop : drop.drop?.id;
-            if (id != null) addItemId(id);
+            if (Number.isInteger(id)) expectedItemIds.add(id);
         }
         const silkTouch = bot.heldItem?.enchants?.some(enchant => enchant.name === 'silk_touch' && enchant.lvl > 0);
         if (silkTouch) {
             const blockItemId = bot.registry?.itemsByName?.[block.name]?.id;
             if (blockItemId != null) {
                 expectedItemIds.clear();
-                addItemId(blockItemId);
+                expectedItemIds.add(blockItemId);
             }
         }
         const crop = CROPS[block.name];
-        for (const itemName of [...(crop?.produce ?? []), ...(crop ? [crop.seed] : [])]) {
-            const cropItemId = bot.registry?.itemsByName?.[itemName]?.id;
-            if (cropItemId != null) addItemId(cropItemId);
-        }
-        const trackedDrops = new Map();
-        let collectedTargetDrop = false;
-        let targetAirObserved = false;
-        const onItemDrop = entity => {
-            const center = block.position.offset(0.5, 0.5, 0.5);
-            if (!entity.position?.distanceTo || entity.position.distanceTo(center) > COLLECT_DROP_RADIUS) return;
-            const item = entity.getDroppedItem?.();
-            if (item?.type != null && expectedItemIds.has(item.type) && entity.id != null) trackedDrops.set(entity.id, item.type);
-        };
-        const onPlayerCollect = (collector, entity) => {
-            if (bot.entity?.id == null || collector?.id !== bot.entity.id || entity?.id == null || !trackedDrops.has(entity.id)) return;
-            collectedTargetDrop = true;
-        };
-        const onBlockUpdate = (oldBlock, newBlock) => {
-            if (oldBlock?.position?.x === block.position.x && oldBlock.position.y === block.position.y &&
-                oldBlock.position.z === block.position.z && newBlock?.type === 0) targetAirObserved = true;
-        };
-        if (!isLiquid) {
-            bot.on('itemDrop', onItemDrop);
-            bot.on('playerCollect', onPlayerCollect);
-            bot.on('blockUpdate', onBlockUpdate);
-        }
+        for (const id of itemIdsForNames(bot, [...(crop?.produce ?? []), ...(crop ? [crop.seed] : [])])) expectedItemIds.add(id);
+        const collectionTracker = !isLiquid ? trackBlockCollection(bot, block, expectedItemIds) : null;
         try {
             let success = false;
             if (isLiquid) {
@@ -567,8 +622,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                 success = true;
             }
             if (success && !isLiquid) {
-                const currentBlock = bot.blockAt(block.position);
-                success = collectedTargetDrop && (targetAirObserved || currentBlock?.type === 0 || currentBlock?.name === 'air');
+                success = await collectionTracker.wait(HARVEST_CONFIRM_TIMEOUT_MS);
                 if (!success) log(bot, `Mined ${block.name}, but its target drop pickup or server block-air update was not confirmed.`);
             }
             if (success)
@@ -586,11 +640,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             }
         }
         finally {
-            if (!isLiquid) {
-                bot.removeListener('itemDrop', onItemDrop);
-                bot.removeListener('playerCollect', onPlayerCollect);
-                bot.removeListener('blockUpdate', onBlockUpdate);
-            }
+            collectionTracker?.cleanup();
         }
         
         if (bot.interrupt_code)
@@ -1681,8 +1731,19 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
     log(bot, `Planting ${requestedPlant} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
 
     if (bot.modes.isOn('cheat')) {
-        placeBlock(bot, 'farmland', x, y, z);
-        if (plantingItem) placeBlock(bot, cropName ?? plantingItem, x, y+1, z);
+        if (block.name !== 'farmland' && !await performAndConfirmBlockUpdate(bot, pos, 'farmland', () => placeBlock(bot, 'farmland', x, y, z))) {
+            log(bot, `Could not confirm farmland at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
+            return false;
+        }
+        if (plantingItem) {
+            const desiredCrop = cropName ?? plantingItem;
+            const cropPosition = pos.offset(0, 1, 0);
+            if (bot.blockAt(cropPosition)?.name !== desiredCrop &&
+                !await performAndConfirmBlockUpdate(bot, cropPosition, desiredCrop, () => placeBlock(bot, desiredCrop, x, y+1, z))) {
+                log(bot, `Could not confirm planting ${plantingItem} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
+                return false;
+            }
+        }
         return true;
     }
 
@@ -1693,8 +1754,12 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
     let above = bot.blockAt(new Vec3(x, y+1, z));
     if (above.name !== 'air') {
         if (block.name === 'farmland') {
-            log(bot, `Land is already farmed with ${above.name}.`);
-            return true;
+            if (!plantingItem || (cropName && above.name === cropName)) {
+                log(bot, `Land is already farmed with ${above.name}.`);
+                return true;
+            }
+            log(bot, `Land is already farmed with ${above.name}, not ${requestedPlant}.`);
+            return false;
         }
         let broken = await breakBlockAt(bot, x, y+1, z);
         if (!broken) {
@@ -1727,35 +1792,15 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
         }
 
         const cropPosition = pos.offset(0, 1, 0);
-        let timer;
-        let onBlockUpdate;
-        const confirmed = new Promise(resolve => {
-            let settled = false;
-            const finish = value => {
-                if (settled) return;
-                settled = true;
-                clearTimeout(timer);
-                if (onBlockUpdate) bot.removeListener('blockUpdate', onBlockUpdate);
-                resolve(value);
-            };
-            onBlockUpdate = (_oldBlock, newBlock) => {
-                const samePosition = newBlock?.position?.x === cropPosition.x &&
-                    newBlock.position.y === cropPosition.y && newBlock.position.z === cropPosition.z;
-                const expectedCrop = cropName ? newBlock?.name === cropName : newBlock?.name !== 'air';
-                if (samePosition && expectedCrop) finish(true);
-            };
-            bot.on('blockUpdate', onBlockUpdate);
-            timer = setTimeout(() => finish(false), PLANT_CONFIRM_TIMEOUT_MS);
-        });
+        const update = waitForBlockUpdate(bot, cropPosition, newBlock => cropName ? newBlock?.name === cropName : newBlock?.name !== 'air');
         try {
             await bot.activateBlock(block);
-            if (!await confirmed) {
+            if (!await update.promise) {
                 log(bot, `Could not confirm planting ${plantingItem} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
                 return false;
             }
         } finally {
-            clearTimeout(timer);
-            bot.removeListener('blockUpdate', onBlockUpdate);
+            update.cleanup();
         }
         log(bot, `Planted ${plantingItem} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
     }
@@ -2228,10 +2273,21 @@ export async function tendNearbyFarm(bot, radius = 32, seedReserve = 1, chestPos
         const age = cropBlock.getProperties?.().age;
         if (!crop || age == null || Number(age) < crop.mature) continue;
         if (!cropBlock.diggable) continue;
-        for (const item of crop.produce) harvestedItems.add(item);
-        harvestedItems.add(crop.seed);
-        await bot.dig(cropBlock);
-        harvested++;
+        const expectedDropIds = itemIdsForNames(bot, [...crop.produce, crop.seed]);
+        const collectionTracker = trackBlockCollection(bot, cropBlock, expectedDropIds);
+        try {
+            await bot.dig(cropBlock);
+            if (await collectionTracker.wait(HARVEST_CONFIRM_TIMEOUT_MS)) {
+                for (const item of crop.produce) harvestedItems.add(item);
+                harvestedItems.add(crop.seed);
+                harvested++;
+            } else {
+                log(bot, `Could not confirm harvest of ${cropBlock.name}; crop items were not marked for storage.`);
+            }
+        } finally {
+            collectionTracker.cleanup();
+        }
+        if (bot.interrupt_code) break;
     }
 
     const farmland = world.getNearestBlocks(bot, 'farmland', radius, 512)
