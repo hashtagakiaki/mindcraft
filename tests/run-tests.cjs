@@ -69,11 +69,11 @@ export function getNearestBlocksWhere(bot, predicate) { return (bot.navigation.b
 export function getNearestEntityWhere(bot, predicate) { return (bot.navigation.entities || []).find(predicate) || null; }
 export function isEntityType(name) { return name === 'cow'; }
 export function shouldPlaceTorch() { return false; }
-export function getNearbyEntities() { return []; }
+export function getNearbyEntities(bot) { return bot.navigation.entities || []; }
 export function getPosition(bot) { return bot.entity.position; }
 `)
   await write(root, 'node_modules/vec3/package.json', '{"type":"module","exports":"./index.js"}')
-  await write(root, 'node_modules/vec3/index.js', 'export default function Vec3(x, y, z) { return { x, y, z }; }')
+  await write(root, 'node_modules/vec3/index.js', 'export default function Vec3(x, y, z) { return { x, y, z, plus(v) { return Vec3(x + v.x, y + v.y, z + v.z); }, offset(dx, dy, dz) { return Vec3(x + dx, y + dy, z + dz); }, distanceTo(v) { return Math.hypot(x - v.x, y - v.y, z - v.z); }, equals(v) { return x === v.x && y === v.y && z === v.z; }, toString() { return `(${x}, ${y}, ${z})`; } }; }')
   await write(root, 'node_modules/mineflayer-pathfinder/package.json', '{"type":"module","exports":"./index.js"}')
   await write(root, 'node_modules/mineflayer-pathfinder/index.js', 'export default { goals: { GoalNear: class {}, GoalFollow: class {}, GoalInvert: class {} }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } } };')
 }
@@ -415,6 +415,7 @@ async function main() {
     const farmRoot = path.join(temp, 'farm-fixture')
     await testFarm(farmRoot)
     await testNavigation(path.join(temp, 'navigation-fixture'))
+    execFileSync(node, [path.join(__dirname, 'interaction_confirmation.test.cjs'), path.join(temp, 'navigation-fixture')], { stdio: 'inherit' })
     execFileSync(node, [path.join(__dirname, 'mining_integration.test.cjs'), farmRoot], { stdio: 'inherit' })
   } finally {
     await rm(temp, { recursive: true, force: true })

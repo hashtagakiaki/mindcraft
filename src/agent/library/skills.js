@@ -10,6 +10,8 @@ const useDelay = blockPlaceDelay > 0;
 const COLLECT_DROP_RADIUS = 0.5;
 const PLANT_CONFIRM_TIMEOUT_MS = 2000;
 const HARVEST_CONFIRM_TIMEOUT_MS = 2000;
+const INTERACTION_CONFIRM_TIMEOUT_MS = 2000;
+const COMBAT_CHECK_INTERVAL_MS = 100;
 const CROPS = {
     wheat: { mature: 7, seed: 'wheat_seeds', produce: ['wheat'] },
     carrots: { mature: 7, seed: 'carrot', produce: ['carrot'] },
@@ -100,6 +102,25 @@ async function performAndConfirmBlockUpdate(bot, position, expectedName, action)
     } finally {
         update.cleanup();
     }
+}
+
+function inventoryItemCount(bot, name) {
+    return bot.inventory.items().filter(item => item?.name === name).reduce((total, item) => total + item.count, 0);
+}
+
+function trackBucketInventoryChange(bot, inputName, outputName) {
+    const beforeInput = inventoryItemCount(bot, inputName);
+    const beforeOutput = inventoryItemCount(bot, outputName);
+    return {
+        async wait() {
+            const startedAt = Date.now();
+            while (!bot.interrupt_code && Date.now() - startedAt < INTERACTION_CONFIRM_TIMEOUT_MS) {
+                if (inventoryItemCount(bot, inputName) < beforeInput && inventoryItemCount(bot, outputName) > beforeOutput) return true;
+                await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            return false;
+        }
+    };
 }
 
 async function autoLight(bot) {
@@ -445,23 +466,40 @@ export async function attackEntity(bot, entity, kill=true) {
     if (!kill) {
         if (bot.entity.position.distanceTo(pos) > 5) {
             console.log('moving to mob...')
-            await goToPosition(bot, pos.x, pos.y, pos.z);
+            if (!await goToPosition(bot, pos.x, pos.y, pos.z)) return false;
         }
         console.log('attacking mob...')
         await bot.attack(entity);
+        return true;
     }
     else {
-        bot.pvp.attack(entity);
-        while (world.getNearbyEntities(bot, 24).includes(entity)) {
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            if (bot.interrupt_code) {
+        let targetDied = false;
+        let targetGone = false;
+        const onEntityDead = deadEntity => { if (entity.id != null && deadEntity?.id === entity.id) targetDied = true; };
+        const onEntityGone = goneEntity => { if (entity.id != null && goneEntity?.id === entity.id) targetGone = true; };
+        bot.on('entityDead', onEntityDead);
+        bot.on('entityGone', onEntityGone);
+        try {
+            bot.pvp.attack(entity);
+            while (!targetDied && !targetGone && !bot.interrupt_code) {
+                if (!world.getNearbyEntities(bot, 24).some(nearby => nearby.id === entity.id)) break;
+                await new Promise(resolve => setTimeout(resolve, COMBAT_CHECK_INTERVAL_MS));
+            }
+            if (!targetDied) return false;
+            log(bot, `Successfully killed ${entity.name}.`);
+            await pickupNearbyItems(bot);
+            return true;
+        } catch (err) {
+            log(bot, `Failed to kill ${entity.name}: ${err.message}.`);
+            return false;
+        } finally {
+            try {
                 bot.pvp.stop();
-                return false;
+            } finally {
+                bot.removeListener('entityDead', onEntityDead);
+                bot.removeListener('entityGone', onEntityGone);
             }
         }
-        log(bot, `Successfully killed ${entity.name}.`);
-        await pickupNearbyItems(bot);
-        return true;
     }
 }
 
@@ -894,7 +932,17 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
     // will throw error if an entity is in the way, and sometimes even if the block was placed
     try {
         if (item_name.includes('bucket')) {
-            await useToolOnBlock(bot, item_name, buildOffBlock);
+            const expectedFluid = item_name === 'water_bucket' ? 'water' : item_name === 'lava_bucket' ? 'lava' : null;
+            if (!expectedFluid) return false;
+            const placement = waitForBlockUpdate(bot, target_dest, block => block?.name === expectedFluid, INTERACTION_CONFIRM_TIMEOUT_MS);
+            try {
+                if (!await useToolOnBlock(bot, item_name, buildOffBlock)) return false;
+                const confirmed = await placement.promise;
+                if (!confirmed) log(bot, `Could not confirm ${expectedFluid} at ${target_dest}.`);
+                return confirmed;
+            } finally {
+                placement.cleanup();
+            }
         }
         else {
             await bot.equip(block_item, 'hand');
@@ -1645,7 +1693,7 @@ export async function useDoor(bot, door_pos=null) {
     if (!door_pos) {
         for (let door_type of ['oak_door', 'spruce_door', 'birch_door', 'jungle_door', 'acacia_door', 'dark_oak_door',
                                'mangrove_door', 'cherry_door', 'bamboo_door', 'crimson_door', 'warped_door']) {
-            door_pos = world.getNearestBlock(bot, door_type, 16).position;
+            door_pos = world.getNearestBlock(bot, door_type, 16)?.position;
             if (door_pos) break;
         }
     } else {
@@ -1656,24 +1704,50 @@ export async function useDoor(bot, door_pos=null) {
         return false;
     }
 
-    bot.pathfinder.setGoal(new pf.goals.GoalNear(door_pos.x, door_pos.y, door_pos.z, 1));
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    while (bot.pathfinder.isMoving()) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    
-    let door_block = bot.blockAt(door_pos);
-    await bot.lookAt(door_pos);
-    if (!door_block._properties.open)
-        await bot.activateBlock(door_block);
-    
-    bot.setControlState("forward", true);
-    await new Promise((resolve) => setTimeout(resolve, 600));
-    bot.setControlState("forward", false);
-    await bot.activateBlock(door_block);
+    let forwardEnabled = false;
+    try {
+        if (!await goToPosition(bot, door_pos.x, door_pos.y, door_pos.z, 1)) return false;
+        let doorBlock = bot.blockAt(door_pos);
+        const isOpen = block => block?.getProperties?.().open === true;
+        if (!doorBlock || !doorBlock.name?.includes('door')) {
+            log(bot, `Could not find a door at ${door_pos}.`);
+            return false;
+        }
+        if (!isOpen(doorBlock)) {
+            const opening = waitForBlockUpdate(bot, door_pos, isOpen, INTERACTION_CONFIRM_TIMEOUT_MS);
+            try {
+                await bot.lookAt(door_pos);
+                await bot.activateBlock(doorBlock);
+                if (!await opening.promise || bot.interrupt_code) {
+                    log(bot, `Could not confirm opening the door at ${door_pos}.`);
+                    return false;
+                }
+            } finally {
+                opening.cleanup();
+            }
+            doorBlock = bot.blockAt(door_pos);
+        }
+        if (!isOpen(doorBlock) || bot.interrupt_code) return false;
 
-    log(bot, `Used door at ${door_pos}.`);
-    return true;
+        bot.setControlState('forward', true);
+        forwardEnabled = true;
+        await new Promise(resolve => setTimeout(resolve, 600));
+        if (bot.interrupt_code) return false;
+        bot.setControlState('forward', false);
+        forwardEnabled = false;
+        doorBlock = bot.blockAt(door_pos);
+        if (isOpen(doorBlock)) await bot.activateBlock(doorBlock);
+
+        log(bot, `Used door at ${door_pos}.`);
+        return true;
+    } catch (err) {
+        log(bot, `Failed to use door at ${door_pos}: ${err.message}.`);
+        return false;
+    } finally {
+        if (forwardEnabled) {
+            try { bot.setControlState('forward', false); } catch (err) {}
+        }
+    }
 }
 
 export async function goToBed(bot) {
@@ -2241,7 +2315,33 @@ export async function useToolOn(bot, toolName, targetName) {
         return false;
     }
     if (toolName.includes('bucket')) {
-        await bot.activateItem();
+        const filledBucket = toolName === 'bucket'
+            ? block.name === 'water' ? 'water_bucket' : block.name === 'lava' ? 'lava_bucket' : null
+            : toolName === 'water_bucket' || toolName === 'lava_bucket' ? toolName : null;
+        if (!filledBucket) {
+            log(bot, `Cannot use ${toolName} on ${block.name} as a supported bucket interaction.`);
+            return false;
+        }
+        const inputBucket = toolName === 'bucket' ? 'bucket' : filledBucket;
+        const outputBucket = toolName === 'bucket' ? filledBucket : 'bucket';
+        const inventoryChange = trackBucketInventoryChange(bot, inputBucket, outputBucket);
+        try {
+            await bot.activateItem();
+            if (!await inventoryChange.wait()) {
+                log(bot, `Could not confirm ${toolName} interaction with ${block.name}.`);
+                return false;
+            }
+            if (toolName === 'bucket') {
+                const currentBlock = bot.blockAt(block.position);
+                if (!['air', block.name].includes(currentBlock?.name)) {
+                    log(bot, `Bucket inventory changed, but target ${block.name} is now ${currentBlock?.name ?? 'unknown'}.`);
+                    return false;
+                }
+            }
+        } catch (err) {
+            log(bot, `Failed to use ${toolName} on ${block.name}: ${err.message}.`);
+            return false;
+        }
     }
     else {
         await bot.activateBlock(block);
