@@ -151,8 +151,9 @@ function installStopContract (bot, state) {
   let savedTarget = null
   let savedFace = null
   const wrapStop = original => function (...args) {
-    state.cancelGroundWait?.()
     const active = state.activeDig
+    if (active?.serverConfirmed && active.startedAt != null) return
+    state.cancelGroundWait?.()
     if (active) {
       active.cancelled = true
       active.cancelLookAt?.(new Error('Digging aborted while turning to the block'))
@@ -285,9 +286,20 @@ function installDigContract (bot, state, options) {
     operation.cancelLookAt = error => rejectLookAt(error)
     state.activeDig = operation
     const eventName = `blockUpdate:${block.position}`
-    const onServerUpdate = (_oldBlock, newBlock) => {
-      if (newBlock?.type === 0) operation.serverConfirmed = true
+    const onGlobalServerUpdate = (oldBlock, newBlock) => {
+      if (newBlock?.type === 0 && samePosition(oldBlock?.position, operation.position)) {
+        if (operation.startedAt == null) {
+          operation.cancelled = true
+          operation.cancelLookAt?.(new Error('Target block changed before dig start'))
+        } else {
+          operation.serverConfirmed = true
+        }
+      }
     }
+    const onServerUpdate = (_oldBlock, newBlock) => {
+      if (newBlock?.type === 0 && operation.startedAt != null) operation.serverConfirmed = true
+    }
+    bot.prependListener('blockUpdate', onGlobalServerUpdate)
     bot.on(eventName, onServerUpdate)
 
     try {
@@ -323,6 +335,7 @@ function installDigContract (bot, state, options) {
       }
     } finally {
       clearTimeout(operation.timer)
+      bot.removeListener('blockUpdate', onGlobalServerUpdate)
       bot.removeListener(eventName, onServerUpdate)
       if (state.activeDig === operation) state.activeDig = null
     }

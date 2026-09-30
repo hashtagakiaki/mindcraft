@@ -3,6 +3,7 @@ import * as world from './library/world.js';
 import * as mc from '../utils/mcdata.js';
 import settings from './settings.js'
 import convoManager from './conversation.js';
+import { isMiningProtected } from './library/mining_sync.js';
 
 async function say(agent, message) {
     agent.bot.modes.behavior_log += message + '\n';
@@ -107,6 +108,13 @@ const modes_list = [
             }
             const bot = agent.bot;
             const cur_dig_block = bot.targetDigBlock;
+            if (isMiningProtected(bot)) {
+                this.stuck_time = 0;
+                this.prev_location = bot.entity.position.clone();
+                this.prev_dig_block = cur_dig_block;
+                this.last_time = Date.now();
+                return;
+            }
             if (cur_dig_block && !this.prev_dig_block) {
                 this.prev_dig_block = cur_dig_block;
             }

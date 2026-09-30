@@ -7,6 +7,13 @@ import craftingSync from "./crafting_sync.js";
 
 const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_place_delay;
 const useDelay = blockPlaceDelay > 0;
+const COLLECT_DROP_RADIUS = 0.5;
+const CROPS = {
+    wheat: { mature: 7, seed: 'wheat_seeds', produce: ['wheat'] },
+    carrots: { mature: 7, seed: 'carrot', produce: ['carrot'] },
+    potatoes: { mature: 7, seed: 'potato', produce: ['potato'] },
+    beetroots: { mature: 3, seed: 'beetroot_seeds', produce: ['beetroot'] },
+};
 
 export function log(bot, message) {
     bot.output += message + '\n';
@@ -499,6 +506,49 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             log(bot, `Don't have right tools to harvest ${blockType}.`);
             return false;
         }
+        const expectedItemIds = new Set();
+        const addItemId = id => {
+            if (Number.isInteger(id)) expectedItemIds.add(id);
+        };
+        for (const drop of block.drops ?? []) {
+            const id = typeof drop === 'number' ? drop : typeof drop.drop === 'number' ? drop.drop : drop.drop?.id;
+            if (id != null) addItemId(id);
+        }
+        const silkTouch = bot.heldItem?.enchants?.some(enchant => enchant.name === 'silk_touch' && enchant.lvl > 0);
+        if (silkTouch) {
+            const blockItemId = bot.registry?.itemsByName?.[block.name]?.id;
+            if (blockItemId != null) {
+                expectedItemIds.clear();
+                addItemId(blockItemId);
+            }
+        }
+        const crop = CROPS[block.name];
+        for (const itemName of [...(crop?.produce ?? []), ...(crop ? [crop.seed] : [])]) {
+            const cropItemId = bot.registry?.itemsByName?.[itemName]?.id;
+            if (cropItemId != null) addItemId(cropItemId);
+        }
+        const trackedDrops = new Map();
+        let collectedTargetDrop = false;
+        let targetAirObserved = false;
+        const onItemDrop = entity => {
+            const center = block.position.offset(0.5, 0.5, 0.5);
+            if (!entity.position?.distanceTo || entity.position.distanceTo(center) > COLLECT_DROP_RADIUS) return;
+            const item = entity.getDroppedItem?.();
+            if (item?.type != null && expectedItemIds.has(item.type) && entity.id != null) trackedDrops.set(entity.id, item.type);
+        };
+        const onPlayerCollect = (collector, entity) => {
+            if (bot.entity?.id == null || collector?.id !== bot.entity.id || entity?.id == null || !trackedDrops.has(entity.id)) return;
+            collectedTargetDrop = true;
+        };
+        const onBlockUpdate = (oldBlock, newBlock) => {
+            if (oldBlock?.position?.x === block.position.x && oldBlock.position.y === block.position.y &&
+                oldBlock.position.z === block.position.z && newBlock?.type === 0) targetAirObserved = true;
+        };
+        if (!isLiquid) {
+            bot.on('itemDrop', onItemDrop);
+            bot.on('playerCollect', onPlayerCollect);
+            bot.on('blockUpdate', onBlockUpdate);
+        }
         try {
             let success = false;
             if (isLiquid) {
@@ -514,6 +564,11 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                 await bot.collectBlock.collect(block);
                 success = true;
             }
+            if (success && !isLiquid) {
+                const currentBlock = bot.blockAt(block.position);
+                success = collectedTargetDrop && (targetAirObserved || currentBlock?.type === 0 || currentBlock?.name === 'air');
+                if (!success) log(bot, `Mined ${block.name}, but its target drop pickup or server block-air update was not confirmed.`);
+            }
             if (success)
                 collected++;
             await autoLight(bot);
@@ -526,6 +581,13 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             else {
                 log(bot, `Failed to collect ${blockType}: ${err}.`);
                 continue;
+            }
+        }
+        finally {
+            if (!isLiquid) {
+                bot.removeListener('itemDrop', onItemDrop);
+                bot.removeListener('playerCollect', onPlayerCollect);
+                bot.removeListener('blockUpdate', onBlockUpdate);
             }
         }
         
@@ -2111,12 +2173,7 @@ export async function tendNearbyFarm(bot, radius = 32, seedReserve = 1, chestPos
      * @example
      * await skills.tendNearbyFarm(bot);
      **/
-    const crops = {
-        wheat: { mature: 7, seed: 'wheat_seeds', produce: ['wheat'] },
-        carrots: { mature: 7, seed: 'carrot', produce: ['carrot'] },
-        potatoes: { mature: 7, seed: 'potato', produce: ['potato'] },
-        beetroots: { mature: 3, seed: 'beetroot_seeds', produce: ['beetroot'] },
-    };
+    const crops = CROPS;
     const cropNames = Object.keys(crops);
     const cropPositions = world.getNearestBlocks(bot, cropNames, radius, 512)
         .sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position));

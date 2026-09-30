@@ -1,8 +1,8 @@
 # 採掘時間と採掘失敗の調査（2026-09-30）
 
-## 結論
+## 調査時点の結論
 
-鉄鉱石などの採掘時間の誤計算と、サーバーで壊れていないブロックを完了扱いする処理を確認した。追加調査では、通常の採掘スキルが途中のブロックを掘って地下へ到達できること、落下中に固定された採掘待ち時間が`unstuck`判定と衝突することを確認した。調査のみで、実装・依存・稼働bundleの変更は行っていない。
+鉄鉱石などの採掘時間の誤計算と、サーバーで壊れていないブロックを完了扱いする処理を確認した。追加調査では、通常の採掘スキルが途中のブロックを掘って地下へ到達できること、落下中に固定された採掘待ち時間が`unstuck`判定と衝突することを確認した。この段落と第1〜4節は修正前の調査記録である。その後、source側に採掘同期helperと回帰fixtureが追加された。依存・稼働bundleは変更していない。
 
 対象はMinecraft Java 1.21.1、稼働source pin `fc53dae41f893cfaaaf6ada9b75a68d95e81255a`、共有依存Mineflayer 4.39.0 / prismarine-block 1.23.0 / minecraft-data 3.117.0 / mineflayer-tool 1.2.0 / mineflayer-collectblock 1.6.0。将来のバージョンの保証ではない。
 
@@ -93,11 +93,31 @@ unstuck試験はpinned sourceの`initModes`を使い、300 ms周期で実際の�
 - ユーザーの許可で稼働Bot3へ診断を指示したが、LLM生成コードのAPI誤用と中断のため有効な比較は取れなかった。採掘自体は実行され、最後の状態確認ではraw ironが15→16個、位置が約`(32.5,59,-299.3)`になっていた。長い結果のwhisper送信で`disconnect.spam`を受け自動再接続した。最後に4botすべてIdleとUI接続を確認した。この試行を採掘時間の比較や破壊失敗の証拠とはしない。
 - 既存craft/farm offline suiteは成功。採掘の実装を修正したという意味ではない。
 
-## 最小の修正方針（未実装）
+## 修正方針（当時の提案）
 
 1. botごとの採掘速度データを補正し、dig・tool選択・pathfinderが同じ正しい速度を使う。共有node_modulesの編集や依存全体の更新を回避する。
 2. gotoの空経路を成功扱いする不具合を是正し、実位置で距離・視線・対象の現在状態を確認する。落下中に到着しても、接地を確認してから採掘時間を決める。
 3. サーバーの破壊確認後に成功とし、collectではアイテム取得も区別して検証する。unstuckは進行中の正当な採掘待ちを停止と誤認しないようにする。
 4. 途中を掘る既存のcanDig=trueは維持する。到達不能の別候補への切り替えは、実際に経路が作れないケースの原因を確認した後に必要性を判断する。
 
-修正の検証では、同じ条件の鉄鉱石について開始・終了・サーバーair更新・回収を記録し、距離外の対象で成功扱いしないことも確認する必要がある。
+以下の検証では、同条件の鉄鉱石で開始・server-air・回収を記録し、距離外の対象を成功扱いしないことを確認した。
+
+## 修正実装と検証（2026-09-30）
+
+採掘同期、回収確認、unstuck保護をsourceへ実装した。以下のoffline結果は回帰fixtureによる確認、isolated live結果は既存raw-iron templateの隔離copyでの測定であり、稼働play pinの保証ではない。
+
+- [採掘同期helper](../src/agent/library/mining_sync.js)は各botのblock instanceだけを補正する。`material === incorrect_for_wooden_tool`かつ`harvestTools`にツルハシがあるblockに限定し、共有registryや依存ファイルは変更しない。Mineflayer dig、`mineflayer-tool`、pathfinderが補正後の同じblock materialを参照する。
+- 実`Block.fromStateId`の接地・水中なし・効果なし計算は、iron oreがstone/iron/diamond pickaxeで1150/750/600 ms、deepslate iron oreがstone/ironで1700/1150 ms、obsidianがdiamond pickaxeで9400 ms。採取可否は元の`harvestTools`規則に従う。
+- 地上待ちは最大15秒、視線合わせ待ちは最大5秒。creative、水中、梯子などの特殊移動では接地待ちを強制しない。digの終了packetは依存側の計算時間で送るが、クライアント推測のair更新だけでは成功にせず、server block updateによる対象airを待つ。確認deadlineは期待dig時間に2秒を加えた有限値。
+- stop、death、end、接地待ち・視線合わせ中断・dig完了では関連listener/timerをcleanupする。global `blockUpdate`のserver-airをpathfinderのreset/stopより先に拾い、確認済みの対象破壊を後続stopで失敗扱いしない。dig開始前にairが届いた場合もlook待ちをcancelし、遅れてdigを始めない。gotoは空pathの`noPath`/`timeout`を成功にせず、partial pathを到着根拠にしない。現在位置でgoalを満たす場合だけ既に到着したものとして成功できる。
+- collectBlockはブロック中心近傍で期待dropの`itemDrop` entity ID/typeを追跡し、自botをcollectorとする`playerCollect`で取得を確認する。対象ブロックのserver airも併せて確認して成功数に加える。inventory差分は成功条件にせず、slot移動や自動chest収納の影響を避ける。entity IDを特定できない既存dropへのmergeは未確認扱いになる。
+- [offline回帰fixture](../tests/mining_sync.test.cjs)と統合fixture（tests/run-tests.cjs経由）はPASSした。server-air/playerCollectの組合せ、他playerや近傍外dropの除外、raw dropとsilk touch、wheat seedのdrop、部分成功、30秒の保護中はunstuckが発火せず保護解除後に発火することを確認した。craft/farm suite、main.js syntax、`git diff --check`も成功。
+
+### 隔離live採掘
+
+既存のraw-iron templateを変更せず新しいCaseServer copyにし、`127.0.0.1:25569`でNode 20・read-only依存を使って検証した。実行sourceはbase commit `bfe2e98`に作業中の採掘/回収/unstuck変更を重ねた状態で、稼働manifest pin `fc53dae41f893cfaaaf6ada9b75a68d95e81255a`そのものではない。template SHAは実行前後で`217211...`と一致し、専用serverは停止済み。
+
+- 通常の`canDig=true`と`initModes`のunstuck有効で、開始位置からtarget `(-53,64,-58)`までのgrass block 1、dirt 3、stone 3を掘って到達した。採掘packet開始時は接地済みで、helperの計算値は1150 ms。packet開始7545 ms、target server-air 8732 ms（packet開始から1187 ms、dig呼出しから1388 ms）、`playerCollect`でraw ironを取得しserver inventoryは1個。全collectは9259 msでtrue、採掘中のunstuck発火なし。
+- 距離8.972 mのstone対象はrange errorとなり、採掘開始packetは0件。成功扱いしなかった。
+
+測定の記録は[summary-final.json](../../mindcraft-eval/results/mining-investigation/fix-integration/summary-final.json)と[client trace](../../mindcraft-eval/results/mining-investigation/fix-integration/mine-raw-iron/20260930T162524-ff56c4ca/mining-client.jsonl)にある。追加の初回probeで生じた失敗は最終実装・結果に含めず、ここでは記録しない。

@@ -11,12 +11,12 @@
 
 | Purpose | Command |
 |---|---|
-| Offline craft/farm regression tests | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs` |
+| Offline craft/farm/mining regression tests | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs` |
 | Syntax check | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node --check main.js` |
 | Whitespace check | `git diff --check` |
 | Worktree status | `git status --short` |
 
-`tests/run-tests.cjs` はtemporary fixtureへsourceとminimum stubを用意し、Minecraft serverやshared dependenciesを変更せずcraft protocolとfarm workflowを検証する。`npm test` は未設定。共有依存に対して `npm install`、`npm ci`、package postinstallを実行しない。既存の `mindcraft-eval/runtime/upstream/node_modules` はread-only dependency inputとして扱う。
+`tests/run-tests.cjs` は一時fixtureへsourceとminimum mockを用意し、Minecraft serverやshared dependenciesを変更せずcraft protocol、farm workflow、採掘同期を検証する。採掘fixtureはread-onlyの `mindcraft-eval/runtime/upstream/node_modules` から実dig/loader/Block/Tool実装も読み込み、target airと対象dropのserver `playerCollect`確認を検証する。`npm test` は未設定。共有依存に対して `npm install`、`npm ci`、package postinstallを実行しない。既存の `mindcraft-eval/runtime/upstream/node_modules` はread-only dependency inputとして扱う。
 
 ## パスと実行境界
 

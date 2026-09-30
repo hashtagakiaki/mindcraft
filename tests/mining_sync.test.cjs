@@ -53,7 +53,9 @@ function fixture({ digMs = 40, groundTimeoutMs = 40, lookTimeoutMs = 20, confirm
 }
 
 function serverAir(bot, block) {
-  bot.emit(`blockUpdate:${block.position}`, block, { type: 0, name: 'air', position: block.position })
+  const air = { type: 0, name: 'air', position: block.position }
+  bot.emit('blockUpdate', block, air)
+  bot.emit(`blockUpdate:${block.position}`, block, air)
 }
 
 async function rejects(promise, expression) {
@@ -138,6 +140,24 @@ async function main() {
     assert.deepEqual(bot._client.writes.map(packet => packet.status), [0])
     assert.equal(bot.listenerCount(`blockUpdate:${block.position}`), 0)
   }
+  // Mineflayer emits global blockUpdate before coordinate blockUpdate; pathfinder's global
+  // listener may stop digging in between, after the authoritative air is already known.
+  {
+    const { bot, block } = fixture({ digMs: 500 })
+    const globalListenersBefore = bot.listenerCount('blockUpdate')
+    const stopOnGlobalAir = (oldBlock, newBlock) => {
+      if (oldBlock?.position?.equals?.(block.position) && newBlock?.type === 0) bot.stopDigging()
+    }
+    bot.on('blockUpdate', stopOnGlobalAir)
+    const digging = bot.dig(block, 'ignore')
+    await sleep(0)
+    serverAir(bot, block)
+    await digging
+    assert.deepEqual(bot._client.writes.map(packet => packet.status), [0])
+    assert.equal(bot.listenerCount(`blockUpdate:${block.position}`), 0)
+    assert.equal(bot.listenerCount('blockUpdate'), globalListenersBefore + 1)
+    bot.removeListener('blockUpdate', stopOnGlobalAir)
+  }
   // No server confirmation rejects at a finite deadline and cleans up the dependency listener.
   {
     const { bot, block } = fixture({ digMs: 12, confirmationGraceMs: 20 })
@@ -194,6 +214,21 @@ async function main() {
     await sleep(0)
     assert.deepEqual(bot._client.writes, [])
     assert.equal(bot.listenerCount(`blockUpdate:${block.position}`), 0)
+  }
+  // Server air before the dependency has sent start must cancel its deferred lookAt;
+  // otherwise its completion listener is installed too late and the dig hangs.
+  {
+    const { bot, block } = fixture({ lookTimeoutMs: 30 })
+    let finishLook
+    bot.lookAt = () => new Promise(resolve => { finishLook = resolve })
+    const digging = bot.dig(block, true)
+    await sleep(0)
+    serverAir(bot, block)
+    finishLook()
+    await rejects(digging, /Target block changed before dig start/)
+    assert.deepEqual(bot._client.writes, [])
+    assert.equal(bot.listenerCount(`blockUpdate:${block.position}`), 0)
+    assert.equal(bot.listenerCount('blockUpdate'), 0)
   }
   {
     const { bot, block } = fixture({ lookTimeoutMs: 10 })

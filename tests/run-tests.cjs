@@ -20,16 +20,23 @@ async function setupFarmFixture(root) {
   await write(root, 'package.json', '{"type":"module"}')
   await write(root, 'settings.js', 'export default { block_place_delay: 0 };')
   await write(root, 'src/agent/library/skills.js', await readFile(path.join(repo, 'src/agent/library/skills.js')))
+  await write(root, 'src/agent/library/mining_sync.js', await readFile(path.join(repo, 'src/agent/library/mining_sync.js')))
   await write(root, 'src/agent/library/crafting_sync.js', await readFile(path.join(repo, 'src/agent/library/crafting_sync.js')))
   await write(root, 'src/agent/library/index.js', await readFile(path.join(repo, 'src/agent/library/index.js')))
   await write(root, 'src/agent/library/skill_library.js', await readFile(path.join(repo, 'src/agent/library/skill_library.js')))
-  await write(root, 'src/utils/mcdata.js', 'export {};')
+  await write(root, 'src/agent/modes.js', await readFile(path.join(repo, 'src/agent/modes.js')))
+  await write(root, 'src/agent/settings.js', 'export default {};')
+  await write(root, 'src/agent/conversation.js', 'export default {};')
+  await write(root, 'src/utils/mcdata.js', 'export function mustCollectManually(name) { return name === "wheat"; }')
   await write(root, 'src/utils/math.js', 'export function cosineSimilarity() { return 0; }')
   await write(root, 'src/utils/text.js', 'export function wordOverlapScore() { return 0; }')
   await write(root, 'src/agent/library/world.js', `
 export function getNearestBlocks(bot, types) {
   const scenario = globalThis.farmScenario;
   return Array.isArray(types) ? scenario.crops : types === 'farmland' ? scenario.farmland : [];
+}
+export function getNearestBlocksWhere(bot, predicate) {
+  return (globalThis.farmScenario.collectBlocks || []).filter(predicate);
 }
 export function getNearestBlock(bot, type) {
   const scenario = globalThis.farmScenario;
@@ -47,7 +54,7 @@ export default function Vec3(x, y, z) {
 }
 `)
   await write(root, 'node_modules/mineflayer-pathfinder/package.json', '{"type":"module","exports":"./index.js"}')
-  await write(root, 'node_modules/mineflayer-pathfinder/index.js', 'export default { goals: { GoalNear: class {} }, Movements: class {} };')
+  await write(root, 'node_modules/mineflayer-pathfinder/index.js', 'export default { goals: { GoalNear: class {} }, Movements: class { safeToBreak() { return true } } };')
 }
 
 function block(name, age, x = 0) {
@@ -180,7 +187,10 @@ async function main() {
     await write(temp, 'node_modules/prismarine-item/package.json', '{"main":"index.js"}')
     await write(temp, 'node_modules/prismarine-item/index.js', 'module.exports = () => class Item { static toNotch(item) { return item ? { type: item.type, count: item.count, metadata: item.metadata } : null } static fromNotch(item) { return item ? { ...item, stackSize: 64 } : null } };')
     execFileSync(node, [path.join(__dirname, 'crafting_sync.test.cjs'), helper], { stdio: 'inherit' })
-    await testFarm(path.join(temp, 'farm-fixture'))
+    execFileSync(node, [path.join(__dirname, 'mining_sync.test.cjs'), path.join(repo, 'src/agent/library/mining_sync.js')], { stdio: 'inherit' })
+    const farmRoot = path.join(temp, 'farm-fixture')
+    await testFarm(farmRoot)
+    execFileSync(node, [path.join(__dirname, 'mining_integration.test.cjs'), farmRoot], { stdio: 'inherit' })
   } finally {
     await rm(temp, { recursive: true, force: true })
   }
