@@ -63,19 +63,37 @@ function block(name, age, x = 0) {
 
 function makeBot(scenario) {
   const items = scenario.items.map(item => ({ ...item }))
+  const listeners = new Map()
   const bot = {
     output: '',
     entity: { position: { x: 0, y: 0, z: 0, distanceTo: () => 0 } },
     modes: { isOn: mode => mode === 'cheat' && scenario.cheat !== false },
     inventory: { items: () => items, slots: items },
+    armorManager: { equipAll() {} },
+    on(event, listener) {
+      const eventListeners = listeners.get(event) || new Set()
+      eventListeners.add(listener)
+      listeners.set(event, eventListeners)
+    },
+    removeListener(event, listener) { listeners.get(event)?.delete(listener) },
     async equip(item) { this.heldItem = item },
     blockAt(position) {
-      if (position.y === 1) return { name: 'air' }
+      if (position.y === 1) return scenario.planted?.get(`${position.x},${position.y},${position.z}`) || { name: 'air', position }
       if (scenario.explicitChest && position.x === scenario.explicitChest.position.x && position.y === scenario.explicitChest.position.y && position.z === scenario.explicitChest.position.z) return scenario.explicitChest
       return { name: 'farmland', position }
     },
     chat() {},
-    async activateBlock(block) { scenario.activations.push(block.position.x); if (this.heldItem?.name === 'wheat_seeds') this.heldItem.count-- },
+    async activateBlock(block) {
+      scenario.activations.push(block.position.x)
+      if (this.heldItem?.name === 'wheat_seeds' && !scenario.noPlant) {
+        this.heldItem.count--
+        const position = block.position.offset(0, 1, 0)
+        const oldBlock = { name: 'air', position }
+        const newBlock = { name: 'wheat', position }
+        scenario.planted?.set(`${position.x},${position.y},${position.z}`, newBlock)
+        for (const listener of listeners.get('blockUpdate') || []) listener(oldBlock, newBlock)
+      }
+    },
     async dig(crop) {
       crop.diggable = false
       const produce = crop.name === 'wheat' ? [['wheat', 1], ['wheat_seeds', 1]] : [[crop.name.slice(0, -1), 1]]
@@ -98,7 +116,7 @@ function makeBot(scenario) {
 
 async function testFarm(root) {
   await setupFarmFixture(root)
-  const { tendNearbyFarm } = await import(pathToFileURL(path.join(root, 'src/agent/library/skills.js')))
+  const { tendNearbyFarm, tillAndSow } = await import(pathToFileURL(path.join(root, 'src/agent/library/skills.js')))
   const { getSkillDocs } = await import(pathToFileURL(path.join(root, 'src/agent/library/index.js')))
   const { SkillLibrary } = await import(pathToFileURL(path.join(root, 'src/agent/library/skill_library.js')))
 
@@ -110,7 +128,7 @@ async function testFarm(root) {
     items: [{ name: 'wheat_seeds', type: 'wheat_seeds', count: 1 }],
     nearestChest: nearChest,
     explicitChest,
-    opened: [], deposits: [], closed: 0, activations: [], cheat: true
+    opened: [], deposits: [], closed: 0, activations: [], planted: new Map(), cheat: true
   }
   globalThis.farmScenario = scenario
   let bot = makeBot(scenario)
@@ -125,7 +143,7 @@ async function testFarm(root) {
   scenario.crops = []
   scenario.farmland = [block('farmland', null, 11), block('farmland', null, 12)]
   scenario.items = [{ name: 'wheat_seeds', type: 'wheat_seeds', count: 2 }]
-  scenario.opened = []; scenario.deposits = []; scenario.closed = 0; scenario.activations = []; scenario.cheat = false
+  scenario.opened = []; scenario.deposits = []; scenario.closed = 0; scenario.activations = []; scenario.planted = new Map(); scenario.cheat = false
   bot = makeBot(scenario)
   result = await tendNearbyFarm(bot, 16, 1)
   assert.equal(result.planted, 1)
@@ -169,6 +187,24 @@ async function testFarm(root) {
   bot = makeBot(scenario)
   await assert.rejects(tendNearbyFarm(bot, 32, 0), /injected deposit failure/)
   assert.equal(scenario.closed, 1, 'container closes when a deposit fails')
+
+  const plantingScenario = {
+    crops: [], farmland: [block('farmland', null, 20)],
+    items: [{ name: 'wheat', count: 8 }, { name: 'wheat_seeds', type: 'wheat_seeds', count: 2 }],
+    opened: [], deposits: [], closed: 0, activations: [], planted: new Map(), cheat: false
+  }
+  globalThis.farmScenario = plantingScenario
+  bot = makeBot(plantingScenario)
+  assert.equal(await tillAndSow(bot, 20, 0, 0, 'wheat'), true, 'crop-name alias plants using its seed item')
+  assert.equal(bot.heldItem.name, 'wheat_seeds', 'wheat alias equips wheat seeds, not wheat grain')
+  assert.equal(bot.blockAt({ x: 20, y: 1, z: 0 }).name, 'wheat', 'planting is confirmed by the block update')
+  assert.equal(bot.inventory.items().find(item => item.name === 'wheat_seeds').count, 1)
+
+  plantingScenario.planted = new Map()
+  plantingScenario.noPlant = true
+  bot = makeBot(plantingScenario)
+  assert.equal(await tillAndSow(bot, 20, 0, 0, 'wheat'), false, 'planting returns false without a block update')
+  assert.match(bot.output, /Could not confirm planting wheat_seeds/)
 
   const docs = getSkillDocs()
   assert.ok(docs.some(doc => doc.startsWith('skills.tendNearbyFarm\n') && doc.includes('seedReserve')))

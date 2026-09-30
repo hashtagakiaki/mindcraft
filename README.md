@@ -4,6 +4,8 @@
 
 This repository is the `hashtagakiaki/mindcraft` development fork used as the source owner for craft synchronization, farm skills, and server-confirmed mining. The `autonomy` branch is the fork's default branch and starts from upstream stable commit `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`. Evaluation and play tooling export the full commit SHA pinned in `mindcraft-eval/mindcraft-source.json`. Craft synchronization, `tendNearbyFarm`, and mining sync are maintained here as normal source; play overlays remain owned by eval.
 
+`tillAndSow` accepts a seed item name or a supported crop name (for example, `wheat` maps to `wheat_seeds`). In survival mode it reports planting success only after a block update confirms the crop.
+
 For local development, keep this full-history clone separate from the read-only upstream checkout at `mindcraft-eval/runtime/upstream`. Reuse the existing compatible `node_modules` only as a read-only dependency input; do not run `npm install`, `npm ci`, or postinstall in the shared dependency tree. See [AGENTS.md](AGENTS.md) for repository, runtime, and live-server boundaries.
 
 Run the offline craft, farm, and mining regression tests with `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs`. The runner builds disposable fixtures and does not start Minecraft or modify shared dependencies. Its mining fixture also uses read-only real Mineflayer digging, plugin loader, Block, and Tool implementations from eval's upstream dependency tree. Farm harvesting, planting, reserve handling, and chest storage are verified by mocks; eval's live smoke only invokes the farm skill in a surveyed no-target area.

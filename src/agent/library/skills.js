@@ -8,6 +8,7 @@ import craftingSync from "./crafting_sync.js";
 const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_place_delay;
 const useDelay = blockPlaceDelay > 0;
 const COLLECT_DROP_RADIUS = 0.5;
+const PLANT_CONFIRM_TIMEOUT_MS = 2000;
 const CROPS = {
     wheat: { mature: 7, seed: 'wheat_seeds', produce: ['wheat'] },
     carrots: { mature: 7, seed: 'carrot', produce: ['carrot'] },
@@ -1649,25 +1650,24 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
      * @param {number} x, the x coordinate to till.
      * @param {number} y, the y coordinate to till.
      * @param {number} z, the z coordinate to till.
-     * @param {string} plantType, the type of plant to plant. Defaults to none, which will only till the ground.
-     * @returns {Promise<boolean>} true if the ground was tilled, false otherwise.
+     * @param {string} seedType, a seed item name or supported crop name. Defaults to none, which will only till the ground.
+     * @returns {Promise<boolean>} true if tilling succeeded and any requested planting was confirmed, false otherwise.
      * @example
      * let position = world.getPosition(bot);
-     * await skills.tillAndSow(bot, position.x, position.y - 1, position.x, "wheat");
+     * await skills.tillAndSow(bot, position.x, position.y - 1, position.z, "wheat_seeds");
      **/
     let pos = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
     let block = bot.blockAt(pos);
-    log(bot, `Planting ${seedType} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
+    const requestedPlant = seedType;
+    const plantingItem = seedType
+        ? (CROPS[seedType]?.seed ?? (seedType.endsWith('seed') && !seedType.endsWith('seeds') ? `${seedType}s` : seedType))
+        : null;
+    const cropName = seedType ? (CROPS[seedType] ? seedType : Object.entries(CROPS).find(([, crop]) => crop.seed === plantingItem)?.[0]) : null;
+    log(bot, `Planting ${requestedPlant} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
 
     if (bot.modes.isOn('cheat')) {
-        let to_remove = ['_seed', '_seeds'];
-        for (let remove of to_remove) {
-            if (seedType.endsWith(remove)) {
-                seedType = seedType.replace(remove, '');
-            }
-        }
         placeBlock(bot, 'farmland', x, y, z);
-        placeBlock(bot, seedType, x, y+1, z);
+        if (plantingItem) placeBlock(bot, cropName ?? plantingItem, x, y+1, z);
         return true;
     }
 
@@ -1704,17 +1704,45 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
         log(bot, `Tilled block x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
     }
     
-    if (seedType) {
-        if (seedType.endsWith('seed') && !seedType.endsWith('seeds'))
-            seedType += 's'; // fixes common mistake
-        let equipped_seeds = await equip(bot, seedType);
+    if (plantingItem) {
+        let equipped_seeds = await equip(bot, plantingItem);
         if (!equipped_seeds) {
-            log(bot, `No ${seedType} to plant.`);
+            log(bot, `No ${plantingItem} to plant.`);
             return false;
         }
 
-        await bot.activateBlock(block);
-        log(bot, `Planted ${seedType} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
+        const cropPosition = pos.offset(0, 1, 0);
+        let timer;
+        let onBlockUpdate;
+        const confirmed = new Promise(resolve => {
+            let settled = false;
+            const finish = value => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                if (onBlockUpdate) bot.removeListener('blockUpdate', onBlockUpdate);
+                resolve(value);
+            };
+            onBlockUpdate = (_oldBlock, newBlock) => {
+                const samePosition = newBlock?.position?.x === cropPosition.x &&
+                    newBlock.position.y === cropPosition.y && newBlock.position.z === cropPosition.z;
+                const expectedCrop = cropName ? newBlock?.name === cropName : newBlock?.name !== 'air';
+                if (samePosition && expectedCrop) finish(true);
+            };
+            bot.on('blockUpdate', onBlockUpdate);
+            timer = setTimeout(() => finish(false), PLANT_CONFIRM_TIMEOUT_MS);
+        });
+        try {
+            await bot.activateBlock(block);
+            if (!await confirmed) {
+                log(bot, `Could not confirm planting ${plantingItem} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
+                return false;
+            }
+        } finally {
+            clearTimeout(timer);
+            bot.removeListener('blockUpdate', onBlockUpdate);
+        }
+        log(bot, `Planted ${plantingItem} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
     }
     return true;
 }
