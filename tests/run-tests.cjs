@@ -57,6 +57,107 @@ export default function Vec3(x, y, z) {
   await write(root, 'node_modules/mineflayer-pathfinder/index.js', 'export default { goals: { GoalNear: class {} }, Movements: class { safeToBreak() { return true } } };')
 }
 
+async function setupNavigationFixture(root) {
+  await write(root, 'package.json', '{"type":"module"}')
+  await write(root, 'settings.js', 'export default { block_place_delay: 0 };')
+  await write(root, 'src/agent/library/skills.js', await readFile(path.join(repo, 'src/agent/library/skills.js')))
+  await write(root, 'src/agent/library/crafting_sync.js', await readFile(path.join(repo, 'src/agent/library/crafting_sync.js')))
+  await write(root, 'src/utils/mcdata.js', 'export function mustCollectManually(name) { return name === "wheat"; } export function getBlockId() { return 1; }')
+  await write(root, 'src/agent/library/world.js', `
+export function getNearestBlock(bot) { return bot.navigation.block || null; }
+export function getNearestBlocksWhere(bot, predicate) { return (bot.navigation.blocks || []).filter(predicate); }
+export function getNearestEntityWhere(bot, predicate) { return (bot.navigation.entities || []).find(predicate) || null; }
+export function isEntityType(name) { return name === 'cow'; }
+export function shouldPlaceTorch() { return false; }
+export function getNearbyEntities() { return []; }
+export function getPosition(bot) { return bot.entity.position; }
+`)
+  await write(root, 'node_modules/vec3/package.json', '{"type":"module","exports":"./index.js"}')
+  await write(root, 'node_modules/vec3/index.js', 'export default function Vec3(x, y, z) { return { x, y, z }; }')
+  await write(root, 'node_modules/mineflayer-pathfinder/package.json', '{"type":"module","exports":"./index.js"}')
+  await write(root, 'node_modules/mineflayer-pathfinder/index.js', 'export default { goals: { GoalNear: class {}, GoalFollow: class {}, GoalInvert: class {} }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } } };')
+}
+
+async function testNavigation(root) {
+  await setupNavigationFixture(root)
+  const skills = await import(pathToFileURL(path.join(root, 'src/agent/library/skills.js')))
+  const targetBlock = { name: 'chest', position: { x: 4, y: 0, z: 0, toString() { return '4,0,0' }, offset() { return this } } }
+  const targetEntity = { name: 'cow', position: { x: 4, y: 0, z: 0 } }
+  const makeBot = ({ result = true, reject = false, rejectAfter = 0, distance = 0 } = {}) => {
+    const bot = {
+      output: '', username: 'bot', game: { gameMode: 'survival' }, players: {}, navigation: { block: targetBlock, blocks: [], entities: [targetEntity] },
+      entity: { position: { x: 0, y: 0, z: 0, clone() { return this }, offset() { return this }, distanceTo: () => result === false ? 10 : distance }, height: 1 },
+      modes: { isOn: () => false, pause() {}, unpause() {} }, inventory: { slots: [], items: () => [], findInventoryItem: () => null },
+      pathfinder: { async getPathTo() { return { status: 'noPath' } }, setMovements() {}, async goto() {} },
+      findBlocks: () => [{ x: 4, y: 0, z: 0 }], blockAt: () => targetBlock,
+      async openContainer() { bot.navigation.opened = true; return { containerItems: () => [], async close() {}, async deposit() {}, async withdraw() {} } },
+      async lookAt() {}, async activateBlock() { bot.navigation.activated = true }, async useOn() { bot.navigation.used = true },
+      async equip() {}, async unequip() {}, blockAtCursor: () => null, chat() {}, tossCalls: 0,
+      async toss() { this.tossCalls++ }
+    }
+    let gotoCalls = 0
+    bot.pathfinder.goto = async () => {
+      gotoCalls++
+      if (reject && (!rejectAfter || gotoCalls >= rejectAfter)) throw new Error('navigation rejected')
+    }
+    return bot
+  }
+
+  let bot = makeBot({ result: false })
+  assert.equal(await skills.goToNearestBlock(bot, 'chest'), false, 'nearest block propagates failed navigation')
+  assert.equal(await skills.goToNearestEntity(bot, 'cow'), false, 'nearest entity propagates failed navigation')
+  bot.navigation.block = null
+  assert.equal(await skills.goToNearestBlock(bot, 'chest'), false, 'missing target returns false')
+
+  bot = makeBot()
+  assert.equal(await skills.goToPlayer(bot, 'missing'), false, 'unknown player returns false')
+  bot.players.player = { entity: targetEntity }
+  assert.equal(await skills.goToPlayer(bot, 'player'), true, 'successful player navigation returns true')
+  bot = makeBot({ reject: true })
+  bot.players.player = { entity: targetEntity }
+  assert.equal(await skills.goToPlayer(bot, 'player'), false, 'pathfinding rejection maps to false')
+
+  bot = makeBot({ result: false })
+  bot.inventory.findInventoryItem = () => ({ count: 1 })
+  assert.equal(await skills.putInChest(bot, 'log'), false)
+  assert.equal(bot.navigation.opened, undefined, 'chest is not opened after failed navigation')
+  assert.equal(await skills.takeFromChest(bot, 'log'), false)
+  assert.equal(await skills.viewChest(bot), false)
+  assert.equal(await skills.useToolOn(bot, 'hand', 'cow'), false)
+  assert.equal(bot.navigation.used, undefined, 'entity use does not continue after failed navigation')
+  assert.equal(await skills.useToolOnBlock(bot, 'hand', targetBlock), false)
+  assert.equal(bot.navigation.activated, undefined, 'block use does not continue after failed navigation')
+
+  bot = makeBot({ reject: true })
+  bot.players.player = { entity: targetEntity }
+  bot.inventory.findInventoryItem = () => ({ type: 1, count: 1 })
+  assert.equal(await skills.giveToPlayer(bot, 'log', 'player'), false)
+  assert.equal(bot.tossCalls, 0, 'item is not tossed after player navigation rejection')
+  bot = makeBot({ reject: true, rejectAfter: 2, distance: 1 })
+  bot.players.player = { entity: targetEntity }
+  bot.inventory.findInventoryItem = () => ({ type: 1, count: 1 })
+  assert.equal(await skills.giveToPlayer(bot, 'log', 'player'), false)
+  assert.equal(bot.tossCalls, 0, 'item is not tossed after moving away is rejected')
+  bot = makeBot()
+  bot.findBlocks = () => []
+  assert.equal(await skills.goToBed(bot), false)
+  bot = makeBot({ result: false })
+  bot.slept = false
+  bot.sleep = async () => { bot.slept = true }
+  assert.equal(await skills.goToBed(bot), false)
+  assert.equal(bot.slept, false, 'bed is not used after failed navigation')
+
+  bot = makeBot({ reject: true })
+  assert.equal(await skills.goToNearestBlock(bot, 'chest'), false, 'rejected pathfinding resolves to navigation failure')
+  bot = makeBot({ distance: 10 })
+  assert.equal(await skills.goToPosition(bot, 10, 0, 0), false, 'unreached position returns false')
+
+  bot = makeBot()
+  assert.equal(await skills.goToNearestBlock(bot, 'chest'), true)
+  assert.equal(await skills.goToNearestEntity(bot, 'cow'), true)
+  console.log('navigation contract tests passed')
+}
+
 function block(name, age, x = 0) {
   return { name, position: { x, y: 0, z: 0, offset(dx, dy, dz) { return { x: x + dx, y: dy, z: dz } } }, diggable: true, getProperties: () => ({ age }) }
 }
@@ -228,6 +329,7 @@ async function main() {
     execFileSync(node, [path.join(__dirname, 'mining_sync.test.cjs'), path.join(repo, 'src/agent/library/mining_sync.js')], { stdio: 'inherit' })
     const farmRoot = path.join(temp, 'farm-fixture')
     await testFarm(farmRoot)
+    await testNavigation(path.join(temp, 'navigation-fixture'))
     execFileSync(node, [path.join(__dirname, 'mining_integration.test.cjs'), farmRoot], { stdio: 'inherit' })
   } finally {
     await rm(temp, { recursive: true, force: true })
