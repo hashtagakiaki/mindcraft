@@ -2,9 +2,11 @@
 
 ## Personal development fork
 
-This repository is the `hashtagakiaki/mindcraft` development fork used as the source owner for the craft synchronization and farm skills. The `autonomy` branch starts from upstream stable commit `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`; evaluation and play tooling will consume an explicitly pinned commit from this repository. This baseline setup does not yet move the craft or farm implementation out of `mindcraft-eval`; that source migration is a later step.
+This repository is the `hashtagakiaki/mindcraft` development fork used as the source owner for the craft synchronization and farm skills. The `autonomy` branch starts from upstream stable commit `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`; evaluation and play tooling will consume an explicitly pinned commit from this repository. Craft synchronization and `tendNearbyFarm` are maintained here as normal source; eval/play runtime migration and pinned-source setup are tracked separately.
 
 For local development, keep this full-history clone separate from the read-only upstream checkout at `mindcraft-eval/runtime/upstream`. Reuse the existing compatible `node_modules` only as a read-only dependency input; do not run `npm install`, `npm ci`, or postinstall in the shared dependency tree. See [AGENTS.md](AGENTS.md) for repository, runtime, and live-server boundaries.
+
+Run the offline craft protocol and farm behavior tests with `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs`. The runner builds disposable fixtures and does not start Minecraft or modify shared dependencies.
 
 <h1 align="center">
   <a href="https://trendshift.io/repositories/9163" target="_blank"><img src="https://trendshift.io/api/badge/repositories/9163" alt="kolbytn%2Fmindcraft | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>

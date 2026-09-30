@@ -11,11 +11,12 @@
 
 | Purpose | Command |
 |---|---|
+| Offline craft/farm regression tests | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs` |
 | Syntax check | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node --check main.js` |
 | Whitespace check | `git diff --check` |
 | Worktree status | `git status --short` |
 
-この基点にはproject test scriptがない。craft/farmを移す前に機能を対象としたテストを追加する。`npm test` は未設定。共有依存に対して `npm install`、`npm ci`、package postinstallを実行しない。将来ignored `node_modules` symlinkを `/home/akito/workspace/project/minecraft-autonomy/mindcraft-eval/runtime/upstream/node_modules` へ向ける場合も、read-only importだけに使う。
+`tests/run-tests.cjs` はtemporary fixtureへsourceとminimum stubを用意し、Minecraft serverやshared dependenciesを変更せずcraft protocolとfarm workflowを検証する。`npm test` は未設定。共有依存に対して `npm install`、`npm ci`、package postinstallを実行しない。既存の `mindcraft-eval/runtime/upstream/node_modules` はread-only dependency inputとして扱う。
 
 ## パスと実行境界
 
@@ -29,7 +30,7 @@
 - ユーザー作成のworld template/saveはread-only。live確認は既存CaseServer copyだけで行い、templateを生成・編集しない。
 - 稼働中play server `40973`、UI `8098`、tmux session、4体のbotへ接続・再起動しない。test目的でplay起動scriptを実行しない。
 - 隔離Minecraft live確認はCaseServerのloopback `25569` / `25570`だけを使う。`25566`は禁止。productionやsystem serviceを変更しない。
-- この初期source基点にはcraft/farm移管は含まない。割り当てられたtask内で移管・検証してから、他repoのsource pinを更新する。
+- craft同期helper、`craftRecipe` wrapper、farm skillはこのforkの通常sourceとして管理する。eval/play runtimeへ適用する方法とsource pinは後続migration tasksで更新する。
 
 ## 完了条件
 

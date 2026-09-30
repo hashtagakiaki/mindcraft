@@ -3,6 +3,7 @@ import * as world from "./world.js";
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import settings from "../../../settings.js";
+import craftingSync from "./crafting_sync.js";
 
 const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_place_delay;
 const useDelay = blockPlaceDelay > 0;
@@ -49,6 +50,12 @@ export async function craftRecipe(bot, itemName, num=1) {
         return false;
     }
 
+    if (!Number.isInteger(num) || num < 1) {
+        log(bot, `Crafting count must be a positive integer: ${num}.`);
+        return false;
+    }
+
+    return craftingSync.run(bot, async (craft) => {
     // get recipes that don't require a crafting table
     let recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, null); 
     let craftingTable = null;
@@ -100,8 +107,8 @@ export async function craftRecipe(bot, itemName, num=1) {
     const requiredIngredients = mc.ingredientsFromPrismarineRecipe(recipe); //Items required to use the recipe once.
     const craftLimit = mc.calculateLimitingResource(inventory, requiredIngredients);
     
-    await bot.craft(recipe, Math.min(craftLimit.num, num), craftingTable);
-    if(craftLimit.num<num) log(bot, `Not enough ${craftLimit.limitingResource} to craft ${num}, crafted ${craftLimit.num}. You now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
+    const craftedCount = await craft(recipe, Math.min(craftLimit.num, num), craftingTable);
+    if(craftedCount<num) log(bot, `Not enough ${craftLimit.limitingResource} to craft ${num}, crafted ${craftedCount}. You now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
     else log(bot, `Successfully crafted ${itemName}, you now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
     if (placedTable) {
         await collectBlock(bot, 'crafting_table', 1);
@@ -111,7 +118,8 @@ export async function craftRecipe(bot, itemName, num=1) {
     //There is probablly a more efficient method than checking the entire inventory but this is all mineflayer-armor-manager provides. :P
     bot.armorManager.equipAll(); 
 
-    return true;
+    return craftedCount > 0;
+    });
 }
 
 export async function wait(bot, milliseconds) {
@@ -2091,3 +2099,88 @@ export async function useToolOn(bot, toolName, targetName) {
     log(bot, `Used ${toolName} on ${block.name}.`);
     return true;
  }
+
+export async function tendNearbyFarm(bot, radius = 32, seedReserve = 1, chestPosition = null) {
+    /**
+     * Harvest every mature nearby farmland crop, replant empty farmland with available seeds, and store crop produce in the nearest chest.
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {number} radius, maximum search distance in blocks. Defaults to 32.
+     * @param {number} seedReserve, number of each planting item to keep in inventory. Defaults to 1.
+     * @param {{x: number, y: number, z: number}|null} chestPosition, optional coordinates of the chest to use. Defaults to the nearest chest.
+     * @returns {Promise<object>} counts of harvested crops, planted crops, and stored items.
+     * @example
+     * await skills.tendNearbyFarm(bot);
+     **/
+    const crops = {
+        wheat: { mature: 7, seed: 'wheat_seeds', produce: ['wheat'] },
+        carrots: { mature: 7, seed: 'carrot', produce: ['carrot'] },
+        potatoes: { mature: 7, seed: 'potato', produce: ['potato'] },
+        beetroots: { mature: 3, seed: 'beetroot_seeds', produce: ['beetroot'] },
+    };
+    const cropNames = Object.keys(crops);
+    const cropPositions = world.getNearestBlocks(bot, cropNames, radius, 512)
+        .sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position));
+    const harvestedItems = new Set();
+    let harvested = 0;
+
+    for (const cropBlock of cropPositions) {
+        const crop = crops[cropBlock.name];
+        const age = cropBlock.getProperties?.().age;
+        if (!crop || age == null || Number(age) < crop.mature) continue;
+        if (!cropBlock.diggable) continue;
+        for (const item of crop.produce) harvestedItems.add(item);
+        harvestedItems.add(crop.seed);
+        await bot.dig(cropBlock);
+        harvested++;
+    }
+
+    const farmland = world.getNearestBlocks(bot, 'farmland', radius, 512)
+        .filter(block => bot.blockAt(block.position.offset(0, 1, 0))?.name === 'air')
+        .sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position));
+    let planted = 0;
+    const seedItems = new Set(Object.values(crops).map(crop => crop.seed));
+    for (const seed of seedItems) {
+        const stacks = bot.inventory.items().filter(item => item.name === seed);
+        let available = stacks.reduce((total, item) => total + item.count, 0) - seedReserve;
+        while (available > 0 && farmland.length > 0) {
+            const soil = farmland.shift();
+            const ok = await tillAndSow(bot, soil.position.x, soil.position.y, soil.position.z, seed);
+            if (ok) {
+                planted++;
+                available--;
+            }
+        }
+    }
+
+    let stored = 0;
+    const deposits = [...harvestedItems].map(itemName => {
+        const stacks = bot.inventory.items().filter(candidate => candidate.name === itemName);
+        const itemCount = stacks.reduce((total, item) => total + item.count, 0);
+        const reserve = seedItems.has(itemName) ? seedReserve : 0;
+        return { itemName, item: stacks[0], count: Math.max(0, itemCount - reserve) };
+    }).filter(deposit => deposit.item && deposit.count > 0);
+    if (deposits.length > 0) {
+        let chest;
+        if (chestPosition == null) {
+            chest = world.getNearestBlock(bot, 'chest', 32);
+        } else if ([chestPosition.x, chestPosition.y, chestPosition.z].every(Number.isFinite)) {
+            chest = bot.blockAt(new Vec3(Math.floor(chestPosition.x), Math.floor(chestPosition.y), Math.floor(chestPosition.z)));
+        }
+        if (!chest || !['chest', 'trapped_chest'].includes(chest.name)) {
+            log(bot, chestPosition == null ? 'Could not find a nearby chest; harvested items remain in inventory.' : 'The requested chest position does not contain a chest; harvested items remain in inventory.');
+        } else if (await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2)) {
+            const container = await bot.openContainer(chest);
+            try {
+                for (const deposit of deposits) {
+                    await container.deposit(deposit.item.type, null, deposit.count);
+                    stored += deposit.count;
+                }
+            } finally {
+                await container.close();
+            }
+        }
+    }
+    const result = { harvested, planted, stored };
+    log(bot, `Farm cycle complete: ${JSON.stringify(result)}. Call skills.tendNearbyFarm again to repeat.`);
+    return result;
+}
