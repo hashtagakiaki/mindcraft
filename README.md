@@ -1,4 +1,11 @@
 <h1 align="center">🧠mindcraft⛏️</h1>
+
+## Personal development fork
+
+This repository is the `hashtagakiaki/mindcraft` development fork used as the source owner for the craft synchronization and farm skills. The `autonomy` branch starts from upstream stable commit `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`; evaluation and play tooling will consume an explicitly pinned commit from this repository. This baseline setup does not yet move the craft or farm implementation out of `mindcraft-eval`; that source migration is a later step.
+
+For local development, keep this full-history clone separate from the read-only upstream checkout at `mindcraft-eval/runtime/upstream`. Reuse the existing compatible `node_modules` only as a read-only dependency input; do not run `npm install`, `npm ci`, or postinstall in the shared dependency tree. See [AGENTS.md](AGENTS.md) for repository, runtime, and live-server boundaries.
+
 <h1 align="center">
   <a href="https://trendshift.io/repositories/9163" target="_blank"><img src="https://trendshift.io/api/badge/repositories/9163" alt="kolbytn%2Fmindcraft | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 </h1>

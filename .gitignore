@@ -7,6 +7,8 @@ scratch.js
 bots/**/action-code/**
 bots/**/
 keys.json
+codex-oauth.json
+.env
 services/viaproxy/jars/**
 services/viaproxy/logs/**
 services/viaproxy/plugins/**
