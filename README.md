@@ -2,11 +2,13 @@
 
 ## Personal development fork
 
-This repository is the `hashtagakiaki/mindcraft` development fork used as the source owner for the craft synchronization and farm skills. The `autonomy` branch starts from upstream stable commit `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`; evaluation and play tooling will consume an explicitly pinned commit from this repository. Craft synchronization and `tendNearbyFarm` are maintained here as normal source; eval/play runtime migration and pinned-source setup are tracked separately.
+This repository is the `hashtagakiaki/mindcraft` development fork used as the source owner for the craft synchronization and farm skills. The `autonomy` branch is the fork's default branch and starts from upstream stable commit `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`. Evaluation and play tooling export the full commit SHA pinned in `mindcraft-eval/mindcraft-source.json`. Craft synchronization and `tendNearbyFarm` are maintained here as normal source; play overlays remain owned by eval.
 
 For local development, keep this full-history clone separate from the read-only upstream checkout at `mindcraft-eval/runtime/upstream`. Reuse the existing compatible `node_modules` only as a read-only dependency input; do not run `npm install`, `npm ci`, or postinstall in the shared dependency tree. See [AGENTS.md](AGENTS.md) for repository, runtime, and live-server boundaries.
 
-Run the offline craft protocol and farm behavior tests with `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs`. The runner builds disposable fixtures and does not start Minecraft or modify shared dependencies.
+Run the offline craft protocol and farm behavior tests with `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs`. The runner builds disposable fixtures and does not start Minecraft or modify shared dependencies. Farm harvesting, planting, reserve handling, and chest storage are verified by these mocks; eval's live smoke only invokes the farm skill in a surveyed no-target area.
+
+To publish a source update, make the source change on `autonomy`, run the offline test command, and push the reviewed commit to this fork. Then update the eval manifest to that exact full SHA and run the eval tests and isolated live smoke against the pin. Review and commit/push the eval change after those checks, then prepare a new play bundle. Keep the eval dependency tree read-only; do not reinstall packages as part of a source-only update. Activate a bundle only through the explicitly authorized bot-only cutover, which leaves the Minecraft server, world, and Ollama process running.
 
 <h1 align="center">
   <a href="https://trendshift.io/repositories/9163" target="_blank"><img src="https://trendshift.io/api/badge/repositories/9163" alt="kolbytn%2Fmindcraft | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>

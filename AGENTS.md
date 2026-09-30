@@ -28,9 +28,10 @@
 
 - `mindcraft-eval/runtime/upstream/codex-oauth.json` を読まない、コピーしない、stage/logに含めない。keys、`.env`、profiles、bot logs、conversations、memory、worlds、server jars、runtime modules、生成resultを追加しない。
 - ユーザー作成のworld template/saveはread-only。live確認は既存CaseServer copyだけで行い、templateを生成・編集しない。
-- 稼働中play server `40973`、UI `8098`、tmux session、4体のbotへ接続・再起動しない。test目的でplay起動scriptを実行しない。
+- smokeや通常検証では稼働中play server `40973`、UI `8098`、tmux session、4体のbotを操作しない。ユーザーが明示承認したbot-only切替に限り親Node・4bot・UIの停止/起動を許可する。Minecraft server/worldとOllamaは切替対象外。test目的でplay起動scriptを実行しない。
 - 隔離Minecraft live確認はCaseServerのloopback `25569` / `25570`だけを使う。`25566`は禁止。productionやsystem serviceを変更しない。
-- craft同期helper、`craftRecipe` wrapper、farm skillはこのforkの通常sourceとして管理する。eval/play runtimeへ適用する方法とsource pinは後続migration tasksで更新する。
+- craft同期helper、`craftRecipe` wrapper、farm skillはこのforkの通常sourceとして管理する。eval/play runtimeはmanifestのfull SHAからexportし、play overlaysはeval側で適用する。manifest更新前にforkのcommitをown originへpushし、eval側で検証する。
+- `autonomy`でsourceを編集し、上記Node 20 offline suiteを通してからown originへcommit/pushする。eval側はそのfull SHAをmanifestへpinし、read-only dependency treeを使って再検証した後に新bundleを準備する。
 
 ## 完了条件
 
