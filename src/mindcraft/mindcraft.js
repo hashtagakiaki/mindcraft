@@ -1,6 +1,7 @@
 import { createMindServer, registerAgent, numStateListeners } from './mindserver.js';
 import { AgentProcess } from '../process/agent_process.js';
 import { getServer } from './mcserver.js';
+import { getBotViewerPort } from '../utils/viewer_ports.js';
 import open from 'open';
 
 let mindserver;
@@ -38,7 +39,7 @@ export async function createAgent(settings) {
     settings = JSON.parse(JSON.stringify(settings));
     let agent_name = settings.profile.name;
     const agentIndex = agent_count++;
-    const viewer_port = 3000 + agentIndex;
+    const viewer_port = getBotViewerPort(agentIndex);
     registerAgent(settings, viewer_port);
     let load_memory = settings.load_memory || false;
     let init_message = settings.init_message || null;
