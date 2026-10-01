@@ -488,6 +488,13 @@ async function main() {
   execFileSync(node, [path.join(__dirname, 'place_agent.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'action_manager.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'idle_scheduling.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'generation_cancellation.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'furnace_lifecycle.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'recovery_replanning.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'management_reconnect.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'agent_process.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'agent_shutdown.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'shutdown_experiments.cjs')], { stdio: 'inherit' })
   const temp = await mkdtemp(path.join(os.tmpdir(), 'mindcraft-owned-tests-'))
   try {
     const helper = path.join(temp, 'crafting_sync.js')

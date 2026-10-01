@@ -387,3 +387,5 @@ Scheduling: eval apply/rollbackの旧process所有確認とprepare overlay適応
 - Wave7 Task epoch境界: 既開始setupはuser stopと新intent、管理disconnectと復旧を跨いで再開しない。各setup invocationのepoch/管理世代を捕捉し、canContinueで現在flagだけでなく失効を確認する。init falseをcallerが無視して旧goalを再設定しない。task-completeはcode0標準IPCでglobal終了、通知後の実exit異常codeは親が保持する。
 
 - Wave7受入: actualAgent/Managerで2.8s観測期限はstop:false、旧body未settleでもsuccessor拒否/late transfer click0、保存/end一度、abort listener再入も同Promiseを確認。history要約失効/atomic final save/保存失敗、init IPC/Signal/早期startup、Task/Cooking世代跨ぎcommand0を検証。実Node bot/helper/CLI/TERM無視孫、foreign PID、所有不明保持、親hub create race/PlaceStore drainとlock順序、task-complete0/通知後exit1/code>1保持は各fixtureで確認。最新Node20fullsuite/focused Verify exit0、diffcheck0。
+
+- Wave8 source slice受入: 全fixtureをrunnerへ統合、README/AGENTSを実Agent/Task/parent lifecycleのoffline確認範囲へ更新。最新Node20fullrunner exit0、diffcheck0。source docs/runnerをcommit/pushしてからcanonical eval pinへ進む。隔離liveでのsmelt/cancel/craft/equipとexport確認は未完了なのでTask8 checkboxは保持。

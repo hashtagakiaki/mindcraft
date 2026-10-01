@@ -187,8 +187,18 @@ async function experimentActionManager() {
   await action
   assert.equal(manager.executing, false)
 
-  // Exercise the real 10-second escalation callback with virtual timer
-  // delivery, so the test records behavior without waiting ten wall seconds.
+  // Exercise the current action-identity stop watchdog with virtual timer
+  // delivery. The old Wave1 timeout-escalation observation is historical.
+  manager.beginUserIntent()
+  agent.bot.interrupt_code = false
+  const unresponsiveGate = deferred()
+  agent.requestInterrupt = () => { agent.bot.interrupt_code = true }
+  const unresponsive = manager.runAction('unresponsive-action-identity', async () => unresponsiveGate.promise, { timeout: 0 })
+  await delay(0)
+  const stuckActionId = manager.currentAction?.id
+  assert.ok(stuckActionId)
+  const cancellationContext = manager.getCancellationContext(stuckActionId)
+  assert.equal(cancellationContext.actionId, stuckActionId)
   const savedSetTimeout = global.setTimeout
   const savedClearTimeout = global.clearTimeout
   const timers = []
@@ -200,26 +210,34 @@ async function experimentActionManager() {
     return timer
   }
   global.clearTimeout = timer => { if (timer) timer.cleared = true }
+  let stopResult
   try {
-    manager.executing = true
-    manager.actionId = 90
-    const timeout = manager._startTimeout(1, 90)
-    await timeout.callback()
-    const escalation = timers.findLast(timer => timer.delay === 10000)
-    assert.ok(escalation)
-    escalation.callback()
+    const stopPromise = manager.stop('timeout')
+    assert.equal(cancellationContext.signal.aborted, true)
+    assert.equal(manager.currentAction.id, stuckActionId)
+    const watchdog = timers.find(timer => timer.delay === 10000)
+    assert.ok(watchdog, 'current stop path arms a bounded last-resort watchdog')
+    watchdog.callback()
+    stopResult = await stopPromise
     assert.equal(cleanKills, 1)
+    assert.equal(stopResult.stopped, false, 'watchdog escalation is not cooperative stop success')
+    assert.equal(manager.executing, true, 'fallback request does not prove the action body exited')
+    const successor = await manager.runAction('unsafe-successor', async () => { throw new Error('must not execute') }, { timeout: 0 })
+    assert.equal(successor.reason, 'stop-failed', 'successor is rejected while the old action remains unsettled')
+    assert.equal(manager.currentAction.id, stuckActionId)
   } finally {
     global.setTimeout = savedSetTimeout
     global.clearTimeout = savedClearTimeout
-    manager.executing = false
+    unresponsiveGate.resolve()
+    await unresponsive
     manager.timeoutEscalations.clear()
     console.log = savedLog
     console.warn = savedWarn
   }
   return {
-    unresolvedPromise: { interruptFlagSettlesAction: false, actionRemainsExecuting: true, raceAloneProvesStop: false },
-    timeoutEscalation: { currentActionHasExistingTenSecondCleanKillPath: true, callbackInvokedWithVirtualClock: true, elapsedWallMs: 0, cleanKillCalls: cleanKills, attribution: 'pre-existing behavior; not evidence for the recorded incident cause' },
+    unresolvedPromise: { interruptFlagSettlesAction: false, actualActionIdRemainsCurrent: true, raceAloneProvesStop: false },
+    currentStopWatchdog: { callbackInvokedWithVirtualClock: true, stopReportedSuccess: stopResult?.stopped, cleanKillRequests: cleanKills, bodyStillExecutingAtEscalation: true, successorRejected: true },
+    historicalBaseline: { formerTimeoutEscalationExperimentNoLongerDescribesCurrentActionManager: true },
     reentry: { outerActionAwaitingSameManagerInnerActionCanSelfWait: 'prior investigation evidence; not executed by this fixture', attribution: 'not evidence this caused a recorded incident' }
   }
 }

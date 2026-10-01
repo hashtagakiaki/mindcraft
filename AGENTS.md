@@ -11,14 +11,14 @@
 
 | Purpose | Command |
 |---|---|
-| Offline craft/farm/mining regression tests | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs` |
+| Offline regression suite (Node 20) | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs` |
 | Place agent command/SES fixture | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/place_agent.test.cjs` |
 | Place store/RPC focused fixtures | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/place_store.test.cjs` and `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/place_rpc.test.cjs` |
 | Syntax check | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node --check main.js` |
 | Whitespace check | `git diff --check` |
 | Worktree status | `git status --short` |
 
-`tests/run-tests.cjs` は一時fixtureへsourceとminimum mockを用意し、Minecraft serverやshared dependenciesを変更せずcraft protocol、farm workflow、採掘同期を検証する。採掘fixtureはread-onlyの `mindcraft-eval/runtime/upstream/node_modules` から実dig/loader/Block/Tool実装も読み込み、target airと対象dropのserver `playerCollect`確認を検証する。`npm test` は未設定。共有依存に対して `npm install`、`npm ci`、package postinstallを実行しない。既存の `mindcraft-eval/runtime/upstream/node_modules` はread-only dependency inputとして扱う。
+`tests/run-tests.cjs` はdisposable fixtureを実行し、Minecraft serverや共有dependencyを変更しない。furnace fixtureは実Mineflayer inventory/furnace pluginを使い、generation/process fixtureは一時CLIとfixture所有Node子/孫processだけを起動する。shutdown coverageは実 `Agent.shutdown` / `ActionManager`、taskとCooking setup guard、init signal/IPC、parent supervisorのtask終了codeと所有process回収、MindServer hub / PlaceStoreのdrainとcloseを検証する。正常task endingはexit code 0を維持し、異常codeは保持する。shutdown保存失敗はbot終了やprocess回収と別の結果として記録される。これらはoffline fixtureの範囲であり、READMEの[動作仕様と検証範囲](README.md#action-cancellation-and-reconnect-behavior)を参照。`shutdown_experiments.cjs` はWave1境界実験と現在のaction-identity stop watchdogを区別する。`npm test` は未設定。共有依存に対して `npm install`、`npm ci`、package postinstallを実行しない。既存の `mindcraft-eval/runtime/upstream/node_modules` はread-only dependency inputとして扱い、検証で稼働中server、credentials、play processを操作しない。
 
 ## パスと実行境界
 
