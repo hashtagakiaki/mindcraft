@@ -295,7 +295,7 @@ Scheduling: supervisor部分（agent_process.jsとagent_process.test.cjs）はWa
 
 Scheduling: eval apply/rollbackの旧process所有確認とprepare overlay適応は、source pin更新前に独立実装・offline検証できる。manifest更新/source full push/live smokeは全source受入後に行う。
 
-- [ ] Task 8: 全workflowの検証をrunner・eval準備/切替へ組み込む
+- [x] Task 8: 全workflowの検証をrunner・eval準備/切替へ組み込む
   Writes:
   - tests/run-tests.cjs
   - tests/interaction_confirmation.test.cjs（overlay navigationの実position契約）
@@ -407,3 +407,5 @@ Scheduling: eval apply/rollbackの旧process所有確認とprepare overlay適応
 - Wave8 navigation追加観測: GoalNear補完後もgoToPlayerのGoalFollow mockにheuristic欠落がありprepared成功navigationがfalse。eval finally修正でrunnerはexit1しinterval leakは解消。repin反復前にsource workerが全fixture goal APIを監査し、temp prepared runtimeへ変更済testのみコピーしてoverlay込み全suiteを事前検証する。最終受入はpush済み新SHAの再exportとする。
 
 - Wave8 caller mock監査追加: prepared navigation成功後、interaction fixture独自makePositionにもfloored欠落がありwater bucket pickupがfalse。interaction/mining integration fixtureのoverlay navigation callerを監査し実API互換を保持する。成功条件は変更せずsource/prepared全suiteを再確認する。
+
+- Wave8最終受入: source de7208e fullNode20 suite exit0、push済みSHAから新temp prepared runtimeへoverlayを適用しcwd=runtime・testコピー/互換symlinkなしでfullNode20 suite exit0（v20.20.2、105s）。eval full90/90 exit0。d549の隔離CaseServer直接skillでsmelt→36slot満杯→開炉取消→shield craft/equip、同PID/login1/spawn1/end0/接続維持、inventory/window/grid/cursor確定を確認し、production src/main/settings/package diffは最終pinと空。全owned fixture/client/server/temp回収、template/deps/既存runtime入力hash一致。manual play未適用。両repo full diff/diffcheck受入、全Task完了。
