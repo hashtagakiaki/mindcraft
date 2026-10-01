@@ -56,3 +56,12 @@ export function createMinecraftProtocolOverrides(version, protocol) {
         }
     };
 }
+
+export function createMinecraftConnectionProtocolOptions(settings, fallbackVersion, loadMinecraftData) {
+    const version = settings.minecraft_version ?? fallbackVersion;
+    const versionData = version && version !== 'auto' ? loadMinecraftData(version) : null;
+    return {
+        version,
+        customPackets: createMinecraftProtocolOverrides(version, versionData?.protocol)
+    };
+}

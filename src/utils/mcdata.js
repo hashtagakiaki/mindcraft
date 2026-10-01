@@ -8,7 +8,7 @@ import { plugin as collectblock } from 'mineflayer-collectblock';
 import { plugin as autoEat } from 'mineflayer-auto-eat';
 import plugin from 'mineflayer-armor-manager';
 import { miningSyncPlugin } from '../agent/library/mining_sync.js';
-import { createMinecraftProtocolOverrides } from './minecraft_protocol_overrides.js';
+import { createMinecraftConnectionProtocolOptions } from './minecraft_protocol_overrides.js';
 const armorManager = plugin;
 let mc_version = settings.minecraft_version;
 let mcdata = null;
@@ -55,16 +55,17 @@ export const WOOL_COLORS = [
 
 
 export function initBot(username) {
+    const protocolOptions = createMinecraftConnectionProtocolOptions(settings, mc_version, minecraftData);
     const options = {
         username: username,
         host: settings.host,
         port: settings.port,
         auth: settings.auth,
-        version: mc_version,
-        customPackets: createMinecraftProtocolOverrides(mc_version, minecraftData(mc_version)?.protocol),
+        version: protocolOptions.version,
+        customPackets: protocolOptions.customPackets,
         checkTimeoutInterval: 60000,  // 60s keep-alive check (default 30s) — reduces disconnects on slow servers
     }
-    if (!mc_version || mc_version === "auto") {
+    if (!protocolOptions.version || protocolOptions.version === "auto") {
         delete options.version;
     }
 

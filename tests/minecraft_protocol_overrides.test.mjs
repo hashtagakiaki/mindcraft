@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { createMinecraftProtocolOverrides } from '../src/utils/minecraft_protocol_overrides.js';
+import {
+    createMinecraftConnectionProtocolOptions,
+    createMinecraftProtocolOverrides
+} from '../src/utils/minecraft_protocol_overrides.js';
 
 const sharedModules = new URL('../../mindcraft-eval/runtime/upstream/node_modules/', import.meta.url);
 const require = createRequire(new URL('package.json', sharedModules));
@@ -8,9 +11,17 @@ const minecraftData = require('minecraft-data');
 const { createDeserializer } = require('minecraft-protocol/src/transforms/serializer');
 
 const protocol = minecraftData('1.21.1').protocol;
-const overrides = createMinecraftProtocolOverrides('1.21.1', protocol);
-assert.ok(overrides);
 assert.equal(createMinecraftProtocolOverrides('1.21.2', protocol), undefined);
+
+const lateLoadedSettings = {};
+lateLoadedSettings.minecraft_version = '1.21.1';
+const connectionOptions = createMinecraftConnectionProtocolOptions(
+    lateLoadedSettings,
+    undefined,
+    minecraftData
+);
+assert.equal(connectionOptions.version, '1.21.1');
+assert.ok(connectionOptions.customPackets);
 
 const recipeId = Buffer.from('minecraft:decorated_pot');
 const packet = Buffer.concat([
@@ -23,8 +34,8 @@ const decoded = await new Promise((resolve, reject) => {
     const parser = createDeserializer({
         state: 'play',
         isServer: false,
-        version: '1.21.1',
-        customPackets: overrides,
+        version: connectionOptions.version,
+        customPackets: connectionOptions.customPackets,
         noErrorLogging: true
     });
     parser.once('data', resolve);
