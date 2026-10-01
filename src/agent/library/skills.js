@@ -12,6 +12,11 @@ const PLANT_CONFIRM_TIMEOUT_MS = 2000;
 const HARVEST_CONFIRM_TIMEOUT_MS = 2000;
 const INTERACTION_CONFIRM_TIMEOUT_MS = 2000;
 const COMBAT_CHECK_INTERVAL_MS = 100;
+const FARM_SEARCH_RADIUS = 32;
+const FARM_SEED_RESERVE = 1;
+const FARM_CHEST_RADIUS = 32;
+const FARM_SEARCH_LIMIT = 10000;
+const FARM_NEIGHBORS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 const CROPS = {
     wheat: { mature: 7, seed: 'wheat_seeds', produce: ['wheat'] },
     carrots: { mature: 7, seed: 'carrot', produce: ['carrot'] },
@@ -829,12 +834,14 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
         let msg = '/setblock ' + Math.floor(x) + ' ' + Math.floor(y) + ' ' + Math.floor(z) + ' ' + blockType;
         bot.chat(msg);
-        if (blockType.includes('door'))
+        if (blockType.includes('door')) {
             if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
             bot.chat('/setblock ' + Math.floor(x) + ' ' + Math.floor(y+1) + ' ' + Math.floor(z) + ' ' + blockType + '[half=upper]');
-        if (blockType.includes('bed'))
+        }
+        if (blockType.includes('bed')) {
             if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
             bot.chat('/setblock ' + Math.floor(x) + ' ' + Math.floor(y) + ' ' + Math.floor(z-1) + ' ' + blockType + '[part=head]');
+        }
         log(bot, `Used /setblock to place ${blockType} at ${target_dest}.`);
         return true;
     }
@@ -2350,20 +2357,71 @@ export async function useToolOn(bot, toolName, targetName) {
     return true;
  }
 
-export async function tendNearbyFarm(bot, radius = 32, seedReserve = 1, chestPosition = null) {
+function selectFarmSoil(bot, { scope, searchRadius, radius, startPosition }) {
+    if (scope === 'radius') {
+        const soil = world.getNearestBlocks(bot, 'farmland', radius, FARM_SEARCH_LIMIT);
+        if (soil.length === FARM_SEARCH_LIMIT) throw new Error('Farm search limit reached; reduce radius.');
+        return soil;
+    }
+    let start;
+    if (startPosition != null) {
+        if (![startPosition.x, startPosition.y, startPosition.z].every(Number.isFinite)) {
+            throw new Error('startPosition must contain finite x, y and z farmland coordinates.');
+        }
+        start = bot.blockAt(new Vec3(Math.floor(startPosition.x), Math.floor(startPosition.y), Math.floor(startPosition.z)));
+        if (start?.name !== 'farmland') throw new Error('startPosition must point to farmland.');
+    } else {
+        start = world.getNearestBlock(bot, 'farmland', searchRadius);
+        if (!start) return [];
+    }
+    const soil = [start];
+    const visited = new Set([`${start.position.x},${start.position.z}`]);
+    for (let index = 0; index < soil.length; index++) {
+        for (const [dx, dz] of FARM_NEIGHBORS) {
+            const position = soil[index].position.offset(dx, 0, dz);
+            const key = `${position.x},${position.z}`;
+            if (visited.has(key)) continue;
+            visited.add(key);
+            const neighbor = bot.blockAt(position);
+            if (!neighbor) throw new Error('Farm boundary is not loaded; move closer and retry.');
+            if (neighbor.name === 'farmland') soil.push(neighbor);
+        }
+    }
+    return soil;
+}
+
+export async function tendNearbyFarm(bot, options = {}) {
     /**
-     * Harvest every mature nearby farmland crop, replant empty farmland with available seeds, and store crop produce in the nearest chest.
+     * Tend the nearest connected farmland plot by default: harvest mature crops, replant empty soil, and store produce in a chest.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {number} radius, maximum search distance in blocks. Defaults to 32.
-     * @param {number} seedReserve, number of each planting item to keep in inventory. Defaults to 1.
-     * @param {{x: number, y: number, z: number}|null} chestPosition, optional coordinates of the chest to use. Defaults to the nearest chest.
-     * @returns {Promise<object>} counts of harvested crops, planted crops, and stored items.
+     * @param {object} options, optional farm settings (use an object, not positional arguments).
+     * @param {string} options.scope, 'connected' (default) or 'radius'. Connected means same-height farmland sharing an edge; water and diagonal contact do not connect plots.
+     * @param {number} options.searchRadius, distance to search for the starting farmland in connected mode, default 32. Does not limit the selected plot's size.
+     * @param {{x: number, y: number, z: number}} options.startPosition, optional farmland coordinates selecting the connected plot instead of searching.
+     * @param {number} options.radius, working radius in radius mode only, default 32.
+     * @param {number} options.seedReserve, number of each planting item to keep in inventory, default 1.
+     * @param {{x: number, y: number, z: number}} options.chestPosition, optional chest coordinates; otherwise searches for a chest within 32 blocks after tending.
+     * @returns {Promise<object>} confirmed harvested, planted and stored counts. Unavailable seeds or unreachable crops can leave work unfinished; inspect counts and logs. An unloaded plot boundary throws before tending.
      * @example
      * await skills.tendNearbyFarm(bot);
+     * await skills.tendNearbyFarm(bot, { startPosition: { x: 10, y: 64, z: -4 }, seedReserve: 1 });
+     * await skills.tendNearbyFarm(bot, { scope: 'radius', radius: 32 });
      **/
+    if (options == null || typeof options !== 'object' || Array.isArray(options)) {
+        throw new Error('tendNearbyFarm expects an options object.');
+    }
+    const { scope = 'connected', searchRadius = FARM_SEARCH_RADIUS, radius = FARM_SEARCH_RADIUS,
+        seedReserve = FARM_SEED_RESERVE, chestPosition = null, startPosition = null } = options;
+    if (!['connected', 'radius'].includes(scope)) throw new Error('Unknown farm scope.');
+    if (scope === 'connected' && options.radius != null) throw new Error('radius requires scope: radius; use searchRadius to find a connected plot.');
+    if (scope === 'radius' && (options.searchRadius != null || startPosition != null)) throw new Error('searchRadius and startPosition require scope: connected.');
+    if (![searchRadius, radius].every(value => Number.isFinite(value) && value > 0) || !Number.isInteger(seedReserve) || seedReserve < 0) {
+        throw new Error('Farm distances must be positive and seedReserve must be a nonnegative integer.');
+    }
     const crops = CROPS;
-    const cropNames = Object.keys(crops);
-    const cropPositions = world.getNearestBlocks(bot, cropNames, radius, 512)
+    const soil = selectFarmSoil(bot, { scope, searchRadius, radius, startPosition });
+    const cropPositions = soil.map(block => bot.blockAt(block.position.offset(0, 1, 0)))
+        .filter(block => block && crops[block.name])
         .sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position));
     const harvestedItems = new Set();
     let harvested = 0;
@@ -2373,10 +2431,19 @@ export async function tendNearbyFarm(bot, radius = 32, seedReserve = 1, chestPos
         const age = cropBlock.getProperties?.().age;
         if (!crop || age == null || Number(age) < crop.mature) continue;
         if (!cropBlock.diggable) continue;
+        if (bot.interrupt_code) break;
+        if (bot.entity.position.distanceTo(cropBlock.position) > 2 &&
+            !await goToPosition(bot, cropBlock.position.x, cropBlock.position.y, cropBlock.position.z, 2)) {
+            log(bot, `Could not reach crop at ${cropBlock.position}.`);
+            continue;
+        }
+        const current = bot.blockAt(cropBlock.position);
+        const currentAge = current?.getProperties?.().age;
+        if (current?.name !== cropBlock.name || currentAge == null || Number(currentAge) < crop.mature || bot.interrupt_code) continue;
         const expectedDropIds = itemIdsForNames(bot, [...crop.produce, crop.seed]);
-        const collectionTracker = trackBlockCollection(bot, cropBlock, expectedDropIds);
+        const collectionTracker = trackBlockCollection(bot, current, expectedDropIds);
         try {
-            await bot.dig(cropBlock);
+            await bot.dig(current);
             if (await collectionTracker.wait(HARVEST_CONFIRM_TIMEOUT_MS)) {
                 for (const item of crop.produce) harvestedItems.add(item);
                 harvestedItems.add(crop.seed);
@@ -2390,15 +2457,15 @@ export async function tendNearbyFarm(bot, radius = 32, seedReserve = 1, chestPos
         if (bot.interrupt_code) break;
     }
 
-    const farmland = world.getNearestBlocks(bot, 'farmland', radius, 512)
-        .filter(block => bot.blockAt(block.position.offset(0, 1, 0))?.name === 'air')
+    const farmland = soil
+        .filter(block => bot.blockAt(block.position)?.name === 'farmland' && bot.blockAt(block.position.offset(0, 1, 0))?.name === 'air')
         .sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position));
     let planted = 0;
     const seedItems = new Set(Object.values(crops).map(crop => crop.seed));
     for (const seed of seedItems) {
         const stacks = bot.inventory.items().filter(item => item.name === seed);
         let available = stacks.reduce((total, item) => total + item.count, 0) - seedReserve;
-        while (available > 0 && farmland.length > 0) {
+        while (available > 0 && farmland.length > 0 && !bot.interrupt_code) {
             const soil = farmland.shift();
             const ok = await tillAndSow(bot, soil.position.x, soil.position.y, soil.position.z, seed);
             if (ok) {
@@ -2415,10 +2482,10 @@ export async function tendNearbyFarm(bot, radius = 32, seedReserve = 1, chestPos
         const reserve = seedItems.has(itemName) ? seedReserve : 0;
         return { itemName, item: stacks[0], count: Math.max(0, itemCount - reserve) };
     }).filter(deposit => deposit.item && deposit.count > 0);
-    if (deposits.length > 0) {
+    if (deposits.length > 0 && !bot.interrupt_code) {
         let chest;
         if (chestPosition == null) {
-            chest = world.getNearestBlock(bot, 'chest', 32);
+            chest = world.getNearestBlock(bot, 'chest', FARM_CHEST_RADIUS);
         } else if ([chestPosition.x, chestPosition.y, chestPosition.z].every(Number.isFinite)) {
             chest = bot.blockAt(new Vec3(Math.floor(chestPosition.x), Math.floor(chestPosition.y), Math.floor(chestPosition.z)));
         }

@@ -31,16 +31,19 @@ async function setupFarmFixture(root) {
   await write(root, 'src/utils/math.js', 'export function cosineSimilarity() { return 0; }')
   await write(root, 'src/utils/text.js', 'export function wordOverlapScore() { return 0; }')
   await write(root, 'src/agent/library/world.js', `
-export function getNearestBlocks(bot, types) {
+export function getNearestBlocks(bot, types, distance) {
   const scenario = globalThis.farmScenario;
-  return Array.isArray(types) ? scenario.crops : types === 'farmland' ? scenario.farmland : [];
+  const soil = scenario.plot || [...scenario.farmland, ...scenario.crops.map(crop => ({ name: 'farmland', position: crop.position.offset(0, -1, 0) }))];
+  return Array.isArray(types) ? scenario.crops : types === 'farmland' ? soil.filter(block => Math.hypot(block.position.x, block.position.y, block.position.z) <= distance) : [];
 }
 export function getNearestBlocksWhere(bot, predicate) {
   return (globalThis.farmScenario.collectBlocks || []).filter(predicate);
 }
-export function getNearestBlock(bot, type) {
+export function getNearestBlock(bot, type, distance) {
   const scenario = globalThis.farmScenario;
-  return type === 'chest' ? scenario.nearestChest : null;
+  if (type === 'chest') return scenario.nearestChest;
+  const soil = getNearestBlocks(bot, type, distance);
+  return soil.sort((a, b) => Math.hypot(a.position.x, a.position.y, a.position.z) - Math.hypot(b.position.x, b.position.y, b.position.z))[0] || null;
 }
 export function getInventoryCounts() { return {}; }
 export function getNearestFreeSpace() { return { x: 0, y: 0, z: 0 }; }
@@ -158,8 +161,9 @@ async function testNavigation(root) {
   console.log('navigation contract tests passed')
 }
 
-function block(name, age, x = 0) {
-  return { name, position: { x, y: 0, z: 0, offset(dx, dy, dz) { return { x: x + dx, y: dy, z: dz } } }, diggable: true, getProperties: () => ({ age }) }
+function block(name, age, x = 0, y = name === 'farmland' ? 0 : 1, z = 0) {
+  const position = (x, y, z) => ({ x, y, z, offset(dx, dy, dz) { return position(x + dx, y + dy, z + dz) } });
+  return { name, position: position(x, y, z), diggable: true, getProperties: () => ({ age }) };
 }
 
 function makeBot(scenario) {
@@ -182,6 +186,16 @@ function makeBot(scenario) {
     emit(event, ...args) { for (const listener of listeners.get(event) || []) listener(...args) },
     async equip(item) { this.heldItem = item },
     blockAt(position) {
+      const matches = block => block.position.x === position.x && block.position.y === position.y && block.position.z === position.z;
+      if (scenario.unloaded?.(position)) return null;
+      if (scenario.plot && position.x === 0 && position.y === 0 && position.z === 1) return { name: 'water', position };
+      const crop = scenario.crops.find(matches);
+      if (crop?.diggable) return crop;
+      if (scenario.plot) {
+        const soil = scenario.plot.find(matches);
+        if (soil) return soil;
+        return scenario.planted?.get(`${position.x},${position.y},${position.z}`) || { name: 'air', position };
+      }
       if (position.y === 1) return scenario.planted?.get(`${position.x},${position.y},${position.z}`) || { name: 'air', position }
       if (scenario.explicitChest && position.x === scenario.explicitChest.position.x && position.y === scenario.explicitChest.position.y && position.z === scenario.explicitChest.position.z) return scenario.explicitChest
       return { name: scenario.baseBlockName || 'farmland', position }
@@ -195,6 +209,7 @@ function makeBot(scenario) {
       const emitUpdate = () => {
         const isTargetFarmland = position.x === 30 && position.y === 0 && position.z === 2 && name === 'farmland'
         const actualName = scenario.setblockMode === 'wrong' && isTargetFarmland ? 'dirt' : name.split('[')[0]
+        if (scenario.plot && actualName === 'wheat') scenario.planted.set(`${position.x},${position.y},${position.z}`, { name: actualName, position });
         bot.emit('blockUpdate', { name: 'air', position }, { name: actualName, position })
       }
       if (scenario.setblockMode === 'delayed') setTimeout(emitUpdate, 15)
@@ -269,12 +284,76 @@ async function testFarm(root) {
   }
   globalThis.farmScenario = scenario
   let bot = makeBot(scenario)
-  let result = await tendNearbyFarm(bot, 16, 1, { x: 4.9, y: 0.5, z: 0.1 })
+  let result = await tendNearbyFarm(bot, { scope: 'radius', radius: 16, seedReserve: 1, chestPosition: { x: 4.9, y: 0.5, z: 0.1 } })
   assert.deepEqual(result, { harvested: 1, planted: 1, stored: 2 })
   assert.deepEqual(scenario.opened, [explicitChest])
   assert.equal(scenario.closed, 1)
   assert.deepEqual(scenario.deposits, [{ type: 'wheat', count: 1 }, { type: 'wheat_seeds', count: 1 }])
   assert.equal(bot.inventory.items().find(item => item.name === 'wheat_seeds').count, 1)
+
+  function plotScenario() {
+    const plot = [0, 1, 2, 3, 4].map(x => block('farmland', null, x));
+    plot.push(block('farmland', null, 0, 0, 2), block('farmland', null, 5, 0, 1), block('farmland', null, 2, 1, 1));
+    return { plot, farmland: [], crops: [block('wheat', 7, 4), block('wheat', 7, 0, 1, 2), block('wheat', 7, 5, 1, 1), block('wheat', 7, 2, 2, 1)],
+      items: [{ name: 'wheat_seeds', type: 'wheat_seeds', count: 8 }],
+      opened: [], deposits: [], closed: 0, activations: [], planted: new Map(), cheat: true };
+  }
+  let connected = plotScenario();
+  globalThis.farmScenario = connected;
+  let connectedBot = makeBot(connected);
+  result = await tendNearbyFarm(connectedBot, { searchRadius: 1 });
+  assert.deepEqual(result, { harvested: 1, planted: 5, stored: 0 }, 'connected plot extends beyond the starting search distance');
+  assert.ok(connected.crops.slice(1).every(crop => crop.diggable), 'water gaps, diagonals and different heights are separate plots');
+  assert.equal(connected.planted.size, 5, 'empty soil joins the same plot and harvested soil is replanted');
+
+  connected = plotScenario();
+  globalThis.farmScenario = connected;
+  connectedBot = makeBot(connected);
+  result = await tendNearbyFarm(connectedBot);
+  assert.equal(result.harvested, 1, 'connected is the default scope');
+
+  connected = plotScenario();
+  globalThis.farmScenario = connected;
+  connectedBot = makeBot(connected);
+  result = await tendNearbyFarm(connectedBot, { startPosition: { x: 0.9, y: 0.1, z: 2.9 } });
+  assert.equal(result.harvested, 1);
+  assert.ok(connected.crops[0].diggable, 'explicit start selects the requested plot');
+  assert.equal(connected.planted.size, 1);
+
+  connected = plotScenario();
+  globalThis.farmScenario = connected;
+  connectedBot = makeBot(connected);
+  result = await tendNearbyFarm(connectedBot, { scope: 'radius', radius: 2 });
+  assert.equal(result.harvested, 1, 'radius mode covers separate plots within its work radius');
+  assert.ok(connected.crops[0].diggable, 'radius mode excludes farmland outside its radius');
+
+  connected = plotScenario();
+  connected.unloaded = position => position.x === 5 && position.z === 0;
+  globalThis.farmScenario = connected;
+  connectedBot = makeBot(connected);
+  await assert.rejects(tendNearbyFarm(connectedBot), /boundary is not loaded/);
+  assert.ok(connected.crops.every(crop => crop.diggable), 'unloaded boundary fails before harvesting');
+  for (const options of [32, { radius: 5 }, { scope: 'radius', searchRadius: 5 }, { scope: 'radius', startPosition: { x: 0, y: 0, z: 0 } }, { scope: 'unknown' }, { searchRadius: -1 }, { seedReserve: -1 }, { startPosition: { x: 20, y: 0, z: 0 } }]) {
+    await assert.rejects(tendNearbyFarm(connectedBot, options));
+  }
+  globalThis.farmScenario = scenario;
+
+  connected = plotScenario();
+  connected.plot = Array.from({ length: 600 }, (_, x) => block('farmland', null, x));
+  connected.crops = [block('wheat', 7, 599)];
+  connected.items = [];
+  globalThis.farmScenario = connected;
+  connectedBot = makeBot(connected);
+  connectedBot.entity.position.distanceTo = position => Math.hypot(position.x, position.y, position.z);
+  result = await tendNearbyFarm(connectedBot, { searchRadius: 1 });
+  assert.equal(result.harvested, 1, 'connected plot is not truncated by the old 512-block limit');
+  assert.match(connectedBot.output, /Teleported to 599, 1, 0/, 'distant crop is approached before harvest');
+
+  connected = plotScenario();
+  connected.plot = []; connected.crops = [];
+  globalThis.farmScenario = connected;
+  assert.deepEqual(await tendNearbyFarm(makeBot(connected)), { harvested: 0, planted: 0, stored: 0 }, 'no farmland is a no-op');
+  globalThis.farmScenario = scenario;
 
   const occupiedFarmScenario = {
     crops: [], farmland: [], items: [{ name: 'wheat_seeds', type: 'wheat_seeds', count: 1 }],
@@ -296,7 +375,7 @@ async function testFarm(root) {
     }
     globalThis.farmScenario = confirmationScenario
     const confirmationBot = makeBot(confirmationScenario)
-    result = await tendNearbyFarm(confirmationBot, 32, 0)
+    result = await tendNearbyFarm(confirmationBot, { scope: 'radius', radius: 32, seedReserve: 0 })
     assert.equal(result.harvested, harvestMode === 'delayed' ? 1 : 0, `${harvestMode} harvest confirmation`)
     if (harvestMode !== 'delayed') {
       assert.equal(result.stored, 0, 'failed harvest leaves pre-existing crop inventory unstored')
@@ -313,7 +392,7 @@ async function testFarm(root) {
   scenario.items = [{ name: 'wheat_seeds', type: 'wheat_seeds', count: 2 }]
   scenario.opened = []; scenario.deposits = []; scenario.closed = 0; scenario.activations = []; scenario.planted = new Map(); scenario.cheat = false
   bot = makeBot(scenario)
-  result = await tendNearbyFarm(bot, 16, 1)
+  result = await tendNearbyFarm(bot, { scope: 'radius', radius: 16, seedReserve: 1 })
   assert.equal(result.planted, 1)
   assert.deepEqual(scenario.activations, [11], 'normal-mode planting uses only seed inventory above reserve')
   assert.equal(bot.inventory.items().find(item => item.name === 'wheat_seeds').count, 1, 'one seed is consumed and reserve remains')
@@ -323,7 +402,7 @@ async function testFarm(root) {
   scenario.items = [{ name: 'carrot', type: 'carrot', count: 1 }]
   scenario.opened = []; scenario.deposits = []; scenario.closed = 0
   bot = makeBot(scenario)
-  result = await tendNearbyFarm(bot, 16, 1)
+  result = await tendNearbyFarm(bot, { scope: 'radius', radius: 16, seedReserve: 1 })
   assert.deepEqual(result, { harvested: 0, planted: 0, stored: 0 })
   assert.deepEqual(scenario.opened, [], 'default chest is unused when there are no deposits')
 
@@ -333,7 +412,7 @@ async function testFarm(root) {
   scenario.nearestChest = null
   scenario.opened = []; scenario.deposits = []; scenario.closed = 0
   bot = makeBot(scenario)
-  result = await tendNearbyFarm(bot)
+  result = await tendNearbyFarm(bot, { scope: 'radius' })
   assert.equal(result.harvested, 1)
   assert.match(bot.output, /Could not find a nearby chest/)
   assert.equal(scenario.closed, 0)
@@ -343,7 +422,7 @@ async function testFarm(root) {
   scenario.nearestChest = nearChest
   scenario.opened = []; scenario.deposits = []; scenario.closed = 0; scenario.cheat = true; scenario.depositReject = false
   bot = makeBot(scenario)
-  result = await tendNearbyFarm(bot, 32, 0)
+  result = await tendNearbyFarm(bot, { scope: 'radius', radius: 32, seedReserve: 0 })
   assert.equal(result.stored, 2)
   assert.deepEqual(scenario.opened, [nearChest], 'default chest lookup is used')
   assert.equal(scenario.closed, 1, 'opened container is closed')
@@ -353,7 +432,7 @@ async function testFarm(root) {
   scenario.depositReject = true
   scenario.opened = []; scenario.deposits = []; scenario.closed = 0; scenario.cheat = true
   bot = makeBot(scenario)
-  await assert.rejects(tendNearbyFarm(bot, 32, 0), /injected deposit failure/)
+  await assert.rejects(tendNearbyFarm(bot, { scope: 'radius', radius: 32, seedReserve: 0 }), /injected deposit failure/)
   assert.equal(scenario.closed, 1, 'container closes when a deposit fails')
 
   const plantingScenario = {
@@ -397,7 +476,7 @@ async function testFarm(root) {
   const library = new SkillLibrary({}, null)
   await library.initSkillLibrary()
   assert.ok(library.always_show_skills.includes('skills.tendNearbyFarm'))
-  assert.ok(library.always_show_skills_docs['skills.tendNearbyFarm'].includes('Harvest every mature nearby farmland crop'))
+  assert.ok(library.always_show_skills_docs['skills.tendNearbyFarm'].includes('Tend the nearest connected farmland plot'))
   console.log('farm skill tests passed')
 }
 
