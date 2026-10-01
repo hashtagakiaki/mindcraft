@@ -8,6 +8,7 @@ import { readFileSync } from 'fs';
 import settings from '../../settings.js';
 import { attachPlaceStoreLifecycle, PlaceStore } from './place_store.js';
 import { attachPlaceRpc } from './place_rpc.js';
+import { createHash, randomUUID } from 'crypto';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Mindserver is:
@@ -19,6 +20,7 @@ let io;
 let server;
 let placeStorePromise = null;
 let placeStoreError = null;
+const managementGeneration = randomUUID();
 const agent_connections = {};
 const agent_listeners = [];
 
@@ -131,7 +133,17 @@ export function createMindServer(host_public = false, port = 8080) {
 
         socket.on('get-settings', (agentName, callback) => {
             if (agent_connections[agentName]) {
-                callback({ settings: settingsForAgent(agent_connections[agentName].settings) });
+                const agentSettings = settingsForAgent(agent_connections[agentName].settings);
+                callback({
+                    settings: agentSettings,
+                    management: {
+                        generation: managementGeneration,
+                        agentName,
+                        placeMemoryEnabled: agentSettings.place_memory_enabled,
+                        placeWorldId: agentSettings.place_world_id,
+                        settingsFingerprint: settingsFingerprint(agentSettings)
+                    }
+                });
             } else {
                 callback({ error: `Agent '${agentName}' not found.` });
             }
@@ -274,6 +286,15 @@ function settingsForAgent(agentSettings) {
     return result;
 }
 
+function settingsFingerprint(value) {
+    const stable = (item) => Array.isArray(item)
+        ? item.map(stable)
+        : item && typeof item === 'object'
+            ? Object.fromEntries(Object.keys(item).sort().map(key => [key, stable(item[key])]))
+            : item;
+    return createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
+}
+
 function agentsStatusUpdate(socket) {
     if (!socket) {
         socket = io;
@@ -294,6 +315,7 @@ function agentsStatusUpdate(socket) {
 
 let listenerInterval = null;
 function addListener(listener_socket) {
+    if (agent_listeners.includes(listener_socket)) return;
     agent_listeners.push(listener_socket);
     if (agent_listeners.length === 1) {
         listenerInterval = setInterval(async () => {
@@ -319,7 +341,9 @@ function addListener(listener_socket) {
 }
 
 function removeListener(listener_socket) {
-    agent_listeners.splice(agent_listeners.indexOf(listener_socket), 1);
+    const index = agent_listeners.indexOf(listener_socket);
+    if (index < 0) return;
+    agent_listeners.splice(index, 1);
     if (agent_listeners.length === 0) {
         clearInterval(listenerInterval);
         listenerInterval = null;

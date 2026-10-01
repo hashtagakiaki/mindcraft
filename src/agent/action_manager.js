@@ -14,6 +14,9 @@ export class ActionManager {
         this.timeoutEscalations = new Map();
         this.currentAction = null;
         this.userStopped = false;
+        this.managementPaused = Boolean(agent.managementPaused);
+        this.managementIntentRequired = Boolean(agent._managementInterruption);
+        this.managementStopFailed = false;
         this.intentEpoch = 0;
         this.recoveryPaused = false;
         this.recoveryAttempts = 0;
@@ -22,8 +25,10 @@ export class ActionManager {
     }
 
     beginUserIntent() {
+        if (this.managementPaused) return this.intentEpoch;
         this.intentEpoch++;
         this.userStopped = false;
+        this.managementIntentRequired = false;
         this.recoveryPaused = false;
         this.recoveryAttempts = 0;
         this.recent_action_counter = 0;
@@ -52,6 +57,20 @@ export class ActionManager {
         this.recent_action_counter = 0;
     }
 
+    pauseForManagement(reason = 'management') {
+        this.managementPaused = true;
+        this.managementIntentRequired = true;
+        this.intentEpoch++;
+        this.cancelResume();
+        return this.stop(reason);
+    }
+
+    restoreManagement(meta) {
+        if (!meta?.isCurrentConnection?.() || this.managementStopFailed || this.currentAction) return false;
+        this.managementPaused = false;
+        return true;
+    }
+
     getCancellationContext(actionId = this.currentAction?.id) {
         const action = this.currentAction;
         if (!action || action.id !== actionId) return null;
@@ -75,12 +94,16 @@ export class ActionManager {
     }
 
     async resumeAction(actionLabel, actionFn, timeout) {
+        if (this.managementPaused) return this._rejectedResult('management-paused');
+        if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
         if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
         if (this.recoveryPaused) return this._rejectedResult('recovery-paused');
         return this._executeResume(actionLabel, actionFn, timeout);
     }
 
     async runAction(actionLabel, actionFn, { timeout, resume = false } = {}) {
+        if (this.managementPaused) return this._rejectedResult('management-paused');
+        if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
         if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
         const recoveryAdmissionId = this.agent._recoveryPromptCommand && actionLabel.startsWith('action:')
             ? this.agent._recoveryAdmissionId
@@ -126,6 +149,7 @@ export class ActionManager {
             const watchdog = setTimeout(() => {
                 if (this.currentAction !== action) return;
                 const finalReason = action.reason || reason;
+                if (finalReason === 'management') this.managementStopFailed = true;
                 action.watchdogAtPhase = action.phase;
                 action.phaseStatus = `stop-failed:${finalReason}`;
                 this.agent.cleanKill(`Action ${action.id} did not settle after stop request (${finalReason}); status=${action.phaseStatus}; stopRequestedPhase=${action.stopRequestedPhase || 'unknown'}; watchdogAtPhase=${action.watchdogAtPhase || 'unknown'}.`);
@@ -156,6 +180,8 @@ export class ActionManager {
 
     async _executeResume(actionLabel = null, actionFn = null, timeout = 10) {
         const newResume = actionFn != null;
+        if (this.managementPaused) return this._rejectedResult('management-paused');
+        if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
         if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
         if (this.recoveryPaused) return this._rejectedResult('recovery-paused');
         if (this.userStopped) return this._rejectedResult('user-stop');
@@ -182,6 +208,8 @@ export class ActionManager {
         try {
             // A stop or newer user instruction invalidates actions that were
             // queued before it. Resume is never allowed to reopen a user stop.
+            if (this.managementPaused) return this._rejectedResult('management-paused');
+            if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
             if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
             if (this.recoveryPaused && !this.isRecoveryAdmission(actionLabel, recoveryAdmissionId)) return this._rejectedResult('recovery-paused');
             if (this.userStopped || intentEpoch !== this.intentEpoch) return this._rejectedResult(this.userStopped ? 'user-stop' : 'superseded');
@@ -189,6 +217,8 @@ export class ActionManager {
                 const stopped = await this.stop('superseded');
                 if (!stopped.stopped) return this._rejectedResult('stop-failed', stopped);
             }
+            if (this.managementPaused) return this._rejectedResult('management-paused');
+            if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
             if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
             if (this.recoveryPaused && !this.isRecoveryAdmission(actionLabel, recoveryAdmissionId)) return this._rejectedResult('recovery-paused');
             if (this.userStopped || intentEpoch !== this.intentEpoch) return this._rejectedResult(this.userStopped ? 'user-stop' : 'superseded');

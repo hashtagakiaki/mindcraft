@@ -225,12 +225,15 @@ Scheduling: modesとrecovery fixtureはWave2/3の取消API/生成phase確認後�
 
 Scheduling: proxy/mindserver/testの管理接続部分はWave2確認後に他の非交差Writesと並行できる。agent.jsへの管理ゲート結線はWave4の最小hook完了後、action_managerへのゲートはWave5 ownerと調整してから実装し、Task6全体を検証する。
 
-- [ ] Task 6: 管理socketの喪失をMinecraft接続から切り離す
+- [x] Task 6: 管理socketの喪失をMinecraft接続から切り離す
   Writes:
   - src/agent/mindserver_proxy.js
   - src/agent/agent.js
   - src/mindcraft/mindserver.js
   - tests/management_reconnect.test.cjs
+  - src/agent/action_manager.js（managementPaused admission/queued/resume gate結線）
+  - src/agent/self_prompter.js（user stopを解除しないmanagement pause hook）
+  - tests/idle_scheduling.test.cjs（management gate付きidle条件との互換検証）
   Reads:
   - src/agent/places.js
   - src/mindcraft/place_rpc.js
@@ -367,3 +370,7 @@ Scheduling: eval apply/rollbackの旧process所有確認とprepare overlay適応
 - 再接続明示性補足: 通常/recovery/systemのLLM回答で!restartを直接実行しない。literal human forced commandとUI Restart/設定変更を明示経路とし、接続喪失・停止不能fallbackはコード側証拠付き経路を使う。自然言語の「restart不要」promptだけを保証にしない。
 
 - Wave5受入: 実Agent/ActionManager fixturesで2plans上限、LLM-await中autonomous/resume拒否、無進捗停止、normal inventory合計/0.5block以上movementだけbudgetreset、slot分割/jitterはresetしない。参照commandは旧body/intentを変更せず、モデル!restart拒否・literal human!restart維持。unstuck timeoutはmode一経路通知。stopRequestedPhase/watchdogAtPhase/実actionPhaseをstatusと分け、元待機先を保持。idle fixtureの新message generation未初期化がNaNで待機した原因を修正。全focused+workerfullsuite Verify exit0、diffcheck0。
+
+- Wave6結線割当: Task5 commit7003d2f受入後、管理workerがagent.js/action_manager.js/proxy/testを所有。pauseManagementは同期gate・世代失効・resume取消後に協調stopを観測、restoreはcurrent connection token確認後に管理gateのみ解除する。userStopped/recoveryPaused/inventory unknownは解除しない。startup/NPC/idle/selfprompt/lateLLM/queuedcommandが管理gateを迂回しないことを実Agent+manager fixtureで確認。
+
+- Wave6受入: 実Socket.IO+Agent/Manager fixtureで管理切断時のactive body協調停止、queued action/resume破棄、世代を跨ぐLLM/翻訳応答失効を確認。復旧時は同設定/namespaceのみ管理gate解除、user stop等とfresh intent要求を維持。literal chat stopと新指示を実listenerから検証、kill0。management/manager/recovery/generation/idle Verify exit0、diffcheck0。

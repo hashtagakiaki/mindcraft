@@ -13,6 +13,7 @@ export class SelfPrompter {
     }
 
     start(prompt) {
+        if (this.agent.managementPaused) return 'MindServer management is paused. Waiting for a fresh instruction.';
         console.log('Self-prompting started.');
         if (!prompt) {
             if (!this.prompt)
@@ -67,6 +68,7 @@ export class SelfPrompter {
             const msg = `You are self-prompting with the goal: '${this.prompt}'. Your next response MUST contain a command with this syntax: !commandName. Respond:`;
             
             let used_command = await this.agent.handleMessage('system', msg, -1);
+            if (this.interrupt || this.agent.managementPaused) break;
             if (!used_command) {
                 no_command_count++;
                 if (no_command_count >= MAX_NO_COMMAND) {
@@ -87,6 +89,7 @@ export class SelfPrompter {
     }
 
     update(delta) {
+        if (this.agent.managementPaused) return;
         // automatically restarts loop
         if (this.state === ACTIVE && !this.loop_active && !this.interrupt) {
             if (this.agent.isIdle())
@@ -126,6 +129,12 @@ export class SelfPrompter {
     stopForRecovery() {
         this.interrupt = true;
         this.state = STOPPED;
+    }
+
+    pauseForManagement() {
+        this.interrupt = true;
+        this.state = PAUSED;
+        this.idle_time = 0;
     }
 
     async pause() {
