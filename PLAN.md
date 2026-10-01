@@ -220,6 +220,7 @@ Full verification:
   - src/agent/coder.js
   - src/models/prompter.js
   - bots/lintTemplate.js
+  - bots/execTemplate.js
   - tests/place_agent.test.cjs
   - tests/run-tests.cjs
   - README.md
@@ -245,7 +246,7 @@ Full verification:
   Commit:
   - `feat: connect place memory to agent commands and actions`
 
-- [ ] Task 6: 場所IDから既存移動・farm skillを使うadapterを実装する。
+- [x] Task 6: 場所IDから既存移動・farm skillを使うadapterを実装する。
   Writes:
   - src/agent/place_actions.js
   - src/agent/library/skills.js
@@ -270,6 +271,34 @@ Full verification:
   Commit:
   - `feat: reuse saved places for navigation and farm work`
 
+## Wave 4
+
+- [ ] Task 7: 検証済みsourceをeval pinと隔離exportへ反映する。
+  Writes:
+  - ../mindcraft-eval/mindcraft-source.json
+  - ../mindcraft-eval/tests/test_play_runtime.py
+  - ../mindcraft-eval/README.md（検証記録・使用方法に必要な場合のみ）
+  - 専用temporary directory内のprepare-only fixture（検証後削除）
+  Reads:
+  - ../mindcraft-eval/AGENTS.md
+  - ../mindcraft-eval/scripts/prepare_mindcraft_play.py
+  - ../mindcraft-eval/scripts/place_state.py
+  - src/agent/places.js
+  - src/agent/place_actions.js
+  - src/agent/coder.js
+  Change:
+  - Task 5/6のfull source検証とown origin push後、そのfull SHAをmanifestへ固定する。
+  - real forkの隔離export fixtureでplaces facade/adapter/RPC/storeとSES接続、global scope、load_memory=false、同run新bundleのnamespace保持を確認する。
+  - 実行済みのoffline検証範囲を記載し、live activationは行わない。
+  Verify:
+  - eval repoで `python3 -m unittest discover -s tests -v`
+  - 専用temp runだけでprepare_bundleを実行し、exported JS syntaxと新API・settingsを照合、cleanup確認。
+  - eval repoで `git diff --check` とfull diff review。
+  Expected:
+  - pushed source SHAから新機能を含むbundleがexportされ、同runのnamespace/state scopeが保たれ、全evalテスト成功。
+  Commit:
+  - `feat: pin place memory runtime and verify isolated exports`
+
 ## Deferred work
 
 - Wave 1の契約確定後、sourceにschema/PlaceStore、単一writer/保存/namespace、clientと設定を実装する。独立fixtureで4bot共有、再起動、競合、破損保持を確認する。
@@ -281,6 +310,9 @@ Full verification:
 
 ## Plan updates
 
+- 2026-10-01: Task 5 fixtureのnode_modules全体symlink配下writeが共有cheerioの2fileを変更したため検証を停止。package-lockのintegrity一致cacheからpackage.json復旧、注入index.js削除、全228file一致とreal load smoke成功。fixtureはpackage単位read-only symlinkと一時directory内write guardへ変更し、full suiteを再実行する。install/ci・live操作なし。
+- 2026-10-01: Task 6は既存farm skillに遅延storage解決・収納直前照合hookを追加。収納delta、partial/open/deposit failure、観測RPC中relation変更、relation消失時fallback禁止、観測missing/unloaded/到達不能、zero-workをfixtureで確認、focused/full suiteとsyntax/diff checks成功。
+- 2026-10-01: Task 5のSES実行templateもplaces引数に対応させる必要があるためbots/execTemplate.jsをWritesへ追加。実行/lint両templateとCoderを同じ契約で検証する。
 - 2026-10-01: Task 3のstore/RPC/alias/preferences/inspect/visit、global固定設定、保存失敗・競合・restart・SIGINT/TERM・shutdown queue drainを検証。full source suiteとsyntax/diff checks成功。実applyがUIport閉後kill-sessionするためstore releaseをHTTP closeより先行させた。Task 5/6はcoreへ依存する並列scopeとして具体化。
 - 2026-10-01: public settings_specは全項目をper-agent gearへ露出するためglobal scope設定は掲載しない。root設定をhubの正本としてagent返信/RPCを固定し、UI payload上書きのfixtureをTask 3へ追加。
 - 2026-10-01: Task 4でrun-level namespaceのatomic初期化/明示更新、global bundle設定、旧台帳保持を実装。24並行initializer、同run/別run/破損保持/rollback fixtureとeval全68テスト成功。source接続とpin/export検証は後続task。

@@ -2476,6 +2476,7 @@ export async function tendNearbyFarm(bot, options = {}) {
     }
 
     let stored = 0;
+    let storageStatus = 'not_needed';
     const deposits = [...harvestedItems].map(itemName => {
         const stacks = bot.inventory.items().filter(candidate => candidate.name === itemName);
         const itemCount = stacks.reduce((total, item) => total + item.count, 0);
@@ -2484,26 +2485,88 @@ export async function tendNearbyFarm(bot, options = {}) {
     }).filter(deposit => deposit.item && deposit.count > 0);
     if (deposits.length > 0 && !bot.interrupt_code) {
         let chest;
-        if (chestPosition == null) {
+        let chestTargetBlock = null;
+        let chestTargetReachable = true;
+        let resolvedChestPosition = chestPosition;
+        const hasChestResolver = typeof options.resolveChestPosition === 'function';
+        if (hasChestResolver) {
+            const resolved = await options.resolveChestPosition();
+            resolvedChestPosition = resolved?.position ?? null;
+            storageStatus = resolvedChestPosition ? 'target_resolved' : (resolved?.status ?? 'target_unavailable');
+        }
+        if (resolvedChestPosition == null && !hasChestResolver && chestPosition == null) {
             chest = world.getNearestBlock(bot, 'chest', FARM_CHEST_RADIUS);
-        } else if ([chestPosition.x, chestPosition.y, chestPosition.z].every(Number.isFinite)) {
-            chest = bot.blockAt(new Vec3(Math.floor(chestPosition.x), Math.floor(chestPosition.y), Math.floor(chestPosition.z)));
+        } else if (resolvedChestPosition && [resolvedChestPosition.x, resolvedChestPosition.y, resolvedChestPosition.z].every(Number.isFinite)) {
+            const target = new Vec3(Math.floor(resolvedChestPosition.x), Math.floor(resolvedChestPosition.y), Math.floor(resolvedChestPosition.z));
+            chestTargetBlock = bot.blockAt(target);
+            if (!chestTargetBlock) {
+                chestTargetReachable = await goToPosition(bot, target.x, target.y, target.z, 2);
+                if (chestTargetReachable) chestTargetBlock = bot.blockAt(target);
+            }
+            chest = chestTargetBlock;
         }
         if (!chest || !['chest', 'trapped_chest'].includes(chest.name)) {
-            log(bot, chestPosition == null ? 'Could not find a nearby chest; harvested items remain in inventory.' : 'The requested chest position does not contain a chest; harvested items remain in inventory.');
-        } else if (await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2)) {
-            const container = await bot.openContainer(chest);
-            try {
-                for (const deposit of deposits) {
-                    await container.deposit(deposit.item.type, null, deposit.count);
-                    stored += deposit.count;
-                }
-            } finally {
-                await container.close();
+            if (storageStatus === 'target_resolved') storageStatus = !chestTargetReachable ? 'unreachable' : chestTargetBlock ? 'target_missing' : 'target_unloaded';
+            else if (!hasChestResolver && resolvedChestPosition == null && chestPosition == null) storageStatus = 'no_chest';
+            if (chestTargetBlock && typeof options.onChestBlock === 'function') {
+                await options.onChestBlock({ position: resolvedChestPosition, block: chestTargetBlock });
             }
+            log(bot, storageStatus === 'no_chest' ? 'Could not find a nearby chest; harvested items remain in inventory.' : 'The selected chest is unavailable; harvested items remain in inventory.');
+        } else if (await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2)) {
+            const mustRecheckChest = resolvedChestPosition != null || typeof options.beforeFarmDeposit === 'function';
+            const currentChest = mustRecheckChest ? bot.blockAt(chest.position) : chest;
+            if (currentChest && typeof options.onChestBlock === 'function') {
+                await options.onChestBlock({
+                    position: { x: chest.position.x, y: chest.position.y, z: chest.position.z }, block: currentChest
+                });
+            }
+            const stillAllowed = typeof options.beforeFarmDeposit !== 'function' || await options.beforeFarmDeposit({
+                position: { x: chest.position.x, y: chest.position.y, z: chest.position.z }
+            });
+            if (!stillAllowed) {
+                storageStatus = 'relation_changed';
+                log(bot, 'Farm storage relation changed before deposit; harvested items remain in inventory.');
+            } else if (!currentChest || !['chest', 'trapped_chest'].includes(currentChest.name)) {
+                storageStatus = currentChest ? 'target_missing' : 'target_unloaded';
+                log(bot, currentChest ? 'The requested chest is missing; harvested items remain in inventory.' : 'The requested chest is no longer loaded; harvested items remain in inventory.');
+            } else {
+                let container;
+                let depositError = null;
+                try {
+                    container = await bot.openContainer(currentChest);
+                    for (const deposit of deposits) {
+                        const before = bot.inventory.items().filter(item => item.name === deposit.itemName).reduce((total, item) => total + item.count, 0);
+                        try {
+                            await container.deposit(deposit.item.type, null, deposit.count);
+                        } catch (error) {
+                            if (options.confirmStorage !== true) throw error;
+                            depositError = error;
+                        }
+                        const after = bot.inventory.items().filter(item => item.name === deposit.itemName).reduce((total, item) => total + item.count, 0);
+                        stored += options.confirmStorage === true ? Math.max(0, before - after) : deposit.count;
+                        if (depositError) break;
+                    }
+                } catch (error) {
+                    if (options.confirmStorage !== true) throw error;
+                    depositError ??= error;
+                } finally {
+                    if (container) {
+                        try { await container.close(); }
+                        catch (error) {
+                            if (options.confirmStorage !== true) throw error;
+                            depositError ??= error;
+                        }
+                    }
+                }
+                storageStatus = depositError ? (stored > 0 ? 'partial_storage_failed' : 'storage_failed') : stored > 0 ? 'stored' : 'storage_unconfirmed';
+                if (depositError) log(bot, `Farm storage failed after confirmed stored count ${stored}: ${depositError.message}`);
+            }
+        } else {
+            storageStatus = 'unreachable';
         }
     }
     const result = { harvested, planted, stored };
+    if (options.includeStorageStatus === true) result.storageStatus = storageStatus;
     log(bot, `Farm cycle complete: ${JSON.stringify(result)}. Call skills.tendNearbyFarm again to repeat.`);
     return result;
 }
