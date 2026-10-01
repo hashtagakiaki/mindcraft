@@ -15,7 +15,7 @@ Acceptance criteria:
 - 稼働40973/8098、4bot、world、Ollamaを設計・開発検証で操作しない。実装完了と実際のactivationは区別する。
 
 Constraints:
-- 今回は設計のみ。変更はこのPLAN.mdだけ。実装・deploy・bot切替・world操作を行わない。
+- 2026-10-01の `$exec` 依頼で実装・隔離検証を実行する。稼働bot切替・deploy・ユーザーworld操作は行わない。
 - source ownerはhashtagakiaki/mindcraft、branch autonomy。own originだけへcommit/pushする。eval変更はhashtagakiaki/mindcraft-evalの別commitで管理する。
 - upstream、共有node_modules、credentials、ユーザーworldはread-only。場所台帳・会話・runtime生成物はGitに含めない。
 - 既存Socket.IO、Node標準fs/crypto、既存移動・farm skillを再利用する。新DB、HTTPサービス、依存パッケージは追加しない。
@@ -93,7 +93,7 @@ Full verification:
 
 ## Wave 1
 
-- [ ] Task 1: 既存hubとSESから使う場所操作契約を隔離fixtureで確定する。
+- [x] Task 1: 既存hubとSESから使う場所操作契約を隔離fixtureで確定する。
   Writes:
   - docs/place-memory-transport-experiment.md
   - "$PLACE_TRANSPORT_TMP/probe.mjs" と同directory内の実験fixture/state（実験後削除）
@@ -120,7 +120,7 @@ Full verification:
   Commit:
   - `docs: record place memory transport contract experiments`（own source originのみ）
 
-- [ ] Task 2: world namespaceとbundle外stateの準備契約を隔離fixtureで確定する。
+- [x] Task 2: world namespaceとbundle外stateの準備契約を隔離fixtureで確定する。
   Writes:
   - ../mindcraft-eval/docs/place-memory-runtime-experiment.md
   - "$PLACE_RUNTIME_TMP/probe.py" と同directory内の実験run/config（実験後削除）
@@ -148,6 +148,67 @@ Full verification:
   Commit:
   - `docs: record place memory runtime namespace contract`（own eval originのみ）
 
+## Wave 2
+
+- [ ] Task 3: 共有PlaceStoreと中央hubのRPCを実装する。
+  Writes:
+  - src/mindcraft/place_store.js
+  - src/mindcraft/place_rpc.js（必要時のみ）
+  - src/mindcraft/mindserver.js
+  - src/agent/mindserver_proxy.js
+  - settings.js
+  - src/mindcraft/public/settings_spec.json
+  - tests/place_store.test.cjs
+  - tests/place_rpc.test.cjs
+  - tests/run-tests.cjs
+  - README.md
+  - AGENTS.md
+  Reads:
+  - docs/place-memory-transport-experiment.md
+  - src/agent/memory_bank.js
+  - src/agent/settings.js
+  - src/mindcraft/mindcraft.js
+  Change:
+  - global設定place_state_dir/place_world_idで中央storeを初期化。world別JSONと安定ID、用途検索、output_storage関係、agent別alias/preferences、観測状態を実装。
+  - 更新直列化、同directory一時file→rename後ack、保存失敗時state維持、破損原本保持、writer lock、revision競合を検証する。
+  - 登録済みagent socketからの要求をglobal scopeへ限定し、payload/UI/個別agentからscopeを上書きさせない。プロキシは期限付きackを使う。
+  - 有限座標・dimension・型・参照を検証し、未設定時は既存session bookmarkを保つ。
+  - 実storeとRPCで4client共有、再起動、別namespace、保存失敗、lock、同名と個人aliasをoffline fixture確認。raw依存はread-only。
+  - 設定の正本・scope・親起動activationとlock復旧手順をREADME/AGENTSへ反映する。
+  Verify:
+  - `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs`
+  - `git diff --check`
+  Expected:
+  - 実store/RPCで共有・再起動復元が成立し、失敗/競合を成功扱いせず、既存offline suiteも成功する。
+  Commit:
+  - `feat: add shared persistent place store`
+
+- [ ] Task 4: bundle外の場所stateとworld namespaceを準備設定へ接続する。
+  Writes:
+  - ../mindcraft-eval/scripts/prepare_mindcraft_play.py
+  - ../mindcraft-eval/scripts/place_state.py（必要な場合のみ）
+  - ../mindcraft-eval/tests/test_play_runtime.py
+  - ../mindcraft-eval/README.md
+  - ../mindcraft-eval/AGENTS.md
+  Reads:
+  - docs/place-memory-runtime-experiment.md（eval repo）
+  - ../mindcraft-eval/scripts/apply_mindcraft_play.py
+  - ../mindcraft-eval/scripts/start_mindcraft_play.sh
+  - settings.js
+  Change:
+  - run_dir/place-state/world.jsonにnamespace UUIDを安全に一度作成し、同runの新bundleへabsolute place_state_dir/place_world_idを引き継ぐ。
+  - 明示namespace更新の操作を用意し、以前のnamespace台帳は保持する。通常準備でnamespaceを勝手に更新しない。
+  - load_memoryと独立したglobal設定として4botへ共通に供給。既存live run・worldには触れない。
+  - 同run/別run、破損metadata、namespaceの明示更新、並行初期化、bundle切替/rollback保持を一時fixtureで検証する。
+  - README/AGENTSへ保存scope・有効化条件・save交換時の手順を記載する。実稼働サービス切替は行わない。
+  Verify:
+  - eval repoで `python3 -m unittest discover -s tests -v`
+  - eval repoで `git diff --check`
+  Expected:
+  - 新bundleへ設定されるnamespaceが同runで安定し、別run/更新namespaceと分離。既存場所dataを保持し、metadata破損を上書きしない。
+  Commit:
+  - `feat: preserve place state across play bundles`
+
 ## Deferred work
 
 - Wave 1の契約確定後、sourceにschema/PlaceStore、単一writer/保存/namespace、clientと設定を実装する。独立fixtureで4bot共有、再起動、競合、破損保持を確認する。
@@ -159,6 +220,9 @@ Full verification:
 
 ## Plan updates
 
+- 2026-10-01: Task 1で4client/保存失敗と回復/再読込/SES facade/host timeoutを確認しcleanup済み。初期timeoutはprobe shutdown順の問題で、transport仮説を否定。metadataはworld.jsonのworld_id、台帳はworlds/<world_id>.jsonでTask 3/4を整合。
+- 2026-10-01: Task 2 filesystem fixtureで同run/bundle間のstate共有、別run分離、4bot一致、load_memory独立を確認しcleanup済み。現行prepareには未実装。metadata並行初期化は未検証のため実装fixtureで検証する。source/eval baseline suitesも成功。
+- 2026-10-01: `$exec` により実装を開始。Wave 1の2実験を独立workerへ割り当て、結果を確認してDeferredを具体化する。
 - 2026-10-01: 抽象設計を正式設計へ更新。場所bookmark自体は既存で、永続化・用途検索・共有・実行時再確認が不足しているというコード観察に基づく。
 - 2026-10-01: ユーザー方針として、畑選択はモデル、選択済み畑の保管先参照解決はコードに置く。汎用場所台帳と最小output_storage関係を採用。
 - 2026-10-01: 設計時には実験を実行していない。未解決の技術契約は次のWave 1に置き、実装やlive確認済みと扱わない。
