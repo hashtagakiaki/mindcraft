@@ -4,6 +4,7 @@ const assert = require('node:assert/strict')
 const { cp, mkdtemp, readFile, rm, symlink, writeFile } = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
+const { moduleRoot } = require('./dependency_root.cjs')
 const { pathToFileURL } = require('node:url')
 
 function deferred() {
@@ -32,7 +33,7 @@ async function main() {
     await cp(path.join(__dirname, '../src'), path.join(root, 'src'), { recursive: true })
     await cp(path.join(__dirname, '../package.json'), path.join(root, 'package.json'))
     await writeFile(path.join(root, 'settings.js'), 'export default {}; export function setSettings() {}\n')
-    await symlink(path.resolve(__dirname, '../../mindcraft-eval/runtime/upstream/node_modules'), path.join(root, 'node_modules'))
+    await symlink(moduleRoot(), path.join(root, 'node_modules'))
     const savedHandleLog = console.log
     const savedWarn = console.warn
     console.log = () => {}

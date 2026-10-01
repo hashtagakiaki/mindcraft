@@ -3,11 +3,13 @@
 const assert = require('node:assert/strict')
 const { EventEmitter } = require('node:events')
 const path = require('node:path')
-const { Vec3 } = require('../../mindcraft-eval/runtime/upstream/node_modules/vec3')
-const injectDigging = require('../../mindcraft-eval/runtime/upstream/node_modules/mineflayer/lib/plugins/digging')
-const upstream = '../../mindcraft-eval/runtime/upstream/node_modules'
-const registryLoader = require(`${upstream}/prismarine-registry`)
-const BlockProvider = require(`${upstream}/prismarine-block`)
+const { createRequire } = require('node:module')
+const { moduleRoot } = require('./dependency_root.cjs')
+const dependencyRequire = createRequire(path.join(moduleRoot(), 'package.json'))
+const { Vec3 } = dependencyRequire('vec3')
+const injectDigging = dependencyRequire('mineflayer/lib/plugins/digging')
+const registryLoader = dependencyRequire('prismarine-registry')
+const BlockProvider = dependencyRequire('prismarine-block')
 let mining
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -384,8 +386,8 @@ async function main() {
   // The real plugin loader and collectblock plugin defer mineflayer-tool; the mining plugin's
   // late pass must run after that dependency has installed its real Tool instance.
   {
-    const pluginLoader = require(`${upstream}/mineflayer/lib/plugin_loader`)
-    const collectBlockPlugin = require(`${upstream}/mineflayer-collectblock/lib/index`).plugin
+    const pluginLoader = dependencyRequire('mineflayer/lib/plugin_loader')
+    const collectBlockPlugin = dependencyRequire('mineflayer-collectblock/lib/index').plugin
     const bot = new EventEmitter()
     const lateIron = Block.fromStateId(ironInfo.defaultState, 0)
     lateIron.position = new Vec3(8, 64, 0)

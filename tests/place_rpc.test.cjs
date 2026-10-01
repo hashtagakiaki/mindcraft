@@ -7,8 +7,9 @@ const { createRequire } = require('node:module')
 const os = require('node:os')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
+const { moduleRoot } = require('./dependency_root.cjs')
 
-const upstreamModules = '/home/akito/workspace/project/minecraft-autonomy/mindcraft-eval/runtime/upstream/node_modules'
+const upstreamModules = moduleRoot()
 const dependencyRequire = createRequire(path.join(upstreamModules, 'package.json'))
 const { Server } = dependencyRequire('socket.io')
 const { io: connect } = dependencyRequire('socket.io-client')

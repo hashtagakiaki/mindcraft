@@ -5,9 +5,10 @@ const { lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } = require('nod
 const os = require('node:os')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
+const { moduleRoot } = require('./dependency_root.cjs')
 
 const repo = path.resolve(__dirname, '..')
-const dependencyRoot = '/home/akito/workspace/project/minecraft-autonomy/mindcraft-eval/runtime/upstream/node_modules'
+const dependencyRoot = moduleRoot()
 const WORLD_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 
 async function write(root, relative, content) {

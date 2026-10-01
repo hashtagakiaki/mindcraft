@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import dependencyRoot from './dependency_root.cjs';
 import {
     createMinecraftConnectionProtocolOptions,
     createMinecraftProtocolOverrides
 } from '../src/utils/minecraft_protocol_overrides.js';
 
-const sharedModules = new URL('../../mindcraft-eval/runtime/upstream/node_modules/', import.meta.url);
-const require = createRequire(new URL('package.json', sharedModules));
+const require = createRequire(`${dependencyRoot.moduleRoot()}/package.json`);
 const minecraftData = require('minecraft-data');
 const { createDeserializer } = require('minecraft-protocol/src/transforms/serializer');
 
