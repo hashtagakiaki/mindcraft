@@ -145,7 +145,7 @@ Full verification:
 
 Scheduling: Codex adapterのowned process取消はWave1検証だけに依存するため、Wave2と並行できる。coder/prompter統合はWave2のAPI検証後に開始し、Task3全体の検証・commitは統合後に行う。WritesはWave2と交差しない。
 
-- [ ] Task 3: 生成待ちを取り消し、古い回答の実行を防ぐ
+- [x] Task 3: 生成待ちを取り消し、古い回答の実行を防ぐ
   Writes:
   - src/agent/coder.js
   - src/models/prompter.js
@@ -173,6 +173,7 @@ Scheduling: Wave1/2の境界とAPI確認後、Wave3と並行できる。furnace/
 - [ ] Task 4: 炉操作を中断可能にし、精錬後の無条件再接続を削除する
   Writes:
   - src/agent/library/skills.js
+  - src/agent/agent.js（botから現在actionの取消contextを取得する最小hookのみ）
   - src/agent/commands/actions.js
   - src/agent/library/crafting_sync.js（Wave1で再利用が適切と確認した場合だけ）
   - tests/furnace_lifecycle.test.cjs
@@ -237,6 +238,8 @@ Scheduling: Wave1/2の境界とAPI確認後、Wave3と並行できる。furnace/
   - `fix: recover management connections without reconnecting Minecraft`
 
 ## Wave 7
+
+Scheduling: supervisor部分（agent_process.jsとagent_process.test.cjs）はWave1のprocess所有確認後に並行実装できる。親子は標準Node IPCのshutdown request/exit intent/owned CLI登録を追加する。init_agent/agent/hubの結線はWave3/5/6完了後に同Task内で検証する。親desired stateはIPCのrestartIntentより優先し、child closeだけで子孫消滅と見なさない。
 
 - [ ] Task 7: 停止不能時だけ使う終了経路と親の再起動判断を統一する
   Writes:
@@ -320,3 +323,7 @@ Scheduling: Wave1/2の境界とAPI確認後、Wave3と並行できる。furnace/
 - 2026-10-02 Wave1検証: Mineflayer 1.21.1のopenFurnace待機はdisconnect/interrupt flagではsettleせず、遅延clickはflag後にも送信された。raceの完了を操作停止と扱わず、旧bodyのsettleを新操作の開始条件にする。close後の遅延slot更新を観測し、既存craft fenceはfull window_itemsと応答確認が必要、statisticsだけでは在庫確定できないと確認した。専用Node process groupのTERM/KILLと消滅確認、tempdir回収は成功。既存起動にはIPCがなく、追加する場合は明示的な新契約とする。Verify exit 0、cleanup complete=true。
 
 - 2026-10-02 Wave2検証: getCancellationContext(actionId)はsignal/phase/reason/settledを公開、setPhaseは現操作だけ更新する。停止Promiseを共有し、旧body settle前に新bodyを開始しない。userStopped/intentEpochでqueued actionとresumeを失効、新しい人間指示だけゲートを解除する。実Agent.handleMessageの遅い回答を!stopで失効させるfixture、既存resume、古いtimeout/watchdog、協調timeoutを確認。両Verify exit 0。Wave3 adapter部分とWave4はWrites非交差のため並行化する。
+
+- Wave4 scope追加: NPC item_goalと生成コードはskillsへbotだけを渡すため、commands引数だけでは取消が届かない。agent.jsにnon-enumerable getActionCancellationContext hookを追加し、callerのAPI変更を避ける。Wave3と非交差。
+
+- Wave3検証: coding requestだけ取消contextを渡し、Codexは所有CLI group回収完了までawaitする。未対応providerとprompt準備は非変更待機として取消可能、late回答はstage/execute/logへ進まない。stage/lint/実行直前にもsignal確認、mode pauseとawaiting_codingはfinally回復。CLI取消・timeout・不正output・spawnfailureと次の正常生成をVerify exit 0で確認。bot強制終了時のCLI所有登録はWave7で結線する。

@@ -215,11 +215,15 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
         return prompt;
     }
 
-    async checkCooldown() {
+    async checkCooldown(signal=null) {
         let elapsed = Date.now() - this.last_prompt_time;
         if (elapsed < this.cooldown && this.cooldown > 0) {
-            await new Promise(r => setTimeout(r, this.cooldown - elapsed));
+            const waited = signal
+                ? await waitForCooldown(this.cooldown - elapsed, signal)
+                : await new Promise(resolve => setTimeout(resolve, this.cooldown - elapsed));
+            if (waited === REQUEST_CANCELLED || signal?.aborted) return REQUEST_CANCELLED;
         }
+        if (signal?.aborted) return REQUEST_CANCELLED;
         this.last_prompt_time = Date.now();
     }
 
@@ -274,21 +278,50 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
         return '';
     }
 
-    async promptCoding(messages) {
+    async promptCoding(messages, cancellationContext=null) {
         if (this.awaiting_coding) {
             console.warn('Already awaiting coding response, returning no response.');
             return '```//no response```';
         }
         this.awaiting_coding = true;
-        await this.checkCooldown();
-        let prompt = this.profile.coding;
-        prompt = await this.replaceStrings(prompt, messages, this.coding_examples);
-        if (this.agent.places) prompt += `\n\nPLACE MEMORY CONTEXT\n${this.agent.places.getPromptContext()}`;
+        const context = cancellationContext || this.agent.actions.getCancellationContext?.() || null;
+        const signal = context?.signal;
+        try {
+            if (signal?.aborted) return null;
+            if (signal) {
+                const cooldownResult = await this.checkCooldown(signal);
+                if (cooldownResult === REQUEST_CANCELLED || signal.aborted) return null;
+            } else {
+                await this.checkCooldown();
+            }
+            if (signal?.aborted) return null;
+            let prompt = this.profile.coding;
+            const promptPreparation = this.replaceStrings(prompt, messages, this.coding_examples);
+            prompt = signal
+                ? await awaitRequestOrCancellation(promptPreparation, signal)
+                : await promptPreparation;
+            if (prompt === REQUEST_CANCELLED) return null;
+            if (signal?.aborted) return null;
+            if (this.agent.places) prompt += `\n\nPLACE MEMORY CONTEXT\n${this.agent.places.getPromptContext()}`;
 
-        let resp = await this.code_model.sendRequest(messages, prompt);
-        this.awaiting_coding = false;
-        await this._saveLog(prompt, messages, resp, 'coding');
-        return resp;
+            const request = this.code_model.sendRequest(messages, prompt, '***', { signal });
+            let resp;
+            if (signal && this.code_model.constructor.prefix !== 'codex') {
+                resp = await awaitRequestOrCancellation(request, signal);
+                if (resp === REQUEST_CANCELLED) return null;
+            } else {
+                // Codex owns a process group and does not reject until that
+                // group is gone; awaiting it keeps tempdir cleanup inside the
+                // action's settlement boundary.
+                resp = await request;
+            }
+            if (signal?.aborted) return null;
+            await this._saveLog(prompt, messages, resp, 'coding');
+            if (signal?.aborted) return null;
+            return resp;
+        } finally {
+            this.awaiting_coding = false;
+        }
     }
 
     async promptMemSaving(to_summarize) {
@@ -377,4 +410,38 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
         logFile = path.join(logDir, logFile);
         await fs.appendFile(logFile, String(logEntry), 'utf-8');
     }
+}
+
+const REQUEST_CANCELLED = Symbol('coding request cancelled');
+
+async function awaitRequestOrCancellation(request, signal) {
+    let onAbort;
+    const cancelled = new Promise(resolve => {
+        onAbort = () => resolve(REQUEST_CANCELLED);
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
+    });
+    try {
+        return await Promise.race([request, cancelled]);
+    } finally {
+        signal.removeEventListener('abort', onAbort);
+    }
+}
+
+function waitForCooldown(delayMs, signal) {
+    return new Promise(resolve => {
+        let timer;
+        const finish = result => {
+            clearTimeout(timer);
+            signal.removeEventListener('abort', onAbort);
+            resolve(result);
+        };
+        const onAbort = () => finish(REQUEST_CANCELLED);
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) {
+            onAbort();
+            return;
+        }
+        timer = setTimeout(() => finish(), delayMs);
+    });
 }
