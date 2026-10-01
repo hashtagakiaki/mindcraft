@@ -78,7 +78,13 @@ export function getPosition(bot) { return bot.entity.position; }
   await write(root, 'node_modules/vec3/package.json', '{"type":"module","exports":"./index.js"}')
   await write(root, 'node_modules/vec3/index.js', 'export default function Vec3(x, y, z) { return { x, y, z, plus(v) { return Vec3(x + v.x, y + v.y, z + v.z); }, offset(dx, dy, dz) { return Vec3(x + dx, y + dy, z + dz); }, distanceTo(v) { return Math.hypot(x - v.x, y - v.y, z - v.z); }, equals(v) { return x === v.x && y === v.y && z === v.z; }, toString() { return `(${x}, ${y}, ${z})`; } }; }')
   await write(root, 'node_modules/mineflayer-pathfinder/package.json', '{"type":"module","exports":"./index.js"}')
-  await write(root, 'node_modules/mineflayer-pathfinder/index.js', 'export default { goals: { GoalNear: class {}, GoalFollow: class {}, GoalInvert: class {} }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } } };')
+  await write(root, 'node_modules/mineflayer-pathfinder/index.js', `
+class GoalNear {
+  constructor(x, y, z, range) { this.x = Math.floor(x); this.y = Math.floor(y); this.z = Math.floor(z); this.rangeSq = range * range; }
+  heuristic(node) { const dx = this.x - node.x; const dy = this.y - node.y; const dz = this.z - node.z; return Math.hypot(dx, dz) + Math.abs(dy); }
+}
+export default { goals: { GoalNear, GoalFollow: class {}, GoalInvert: class {} }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } } };
+`)
 }
 
 async function testNavigation(root) {
@@ -89,7 +95,7 @@ async function testNavigation(root) {
   const makeBot = ({ result = true, reject = false, rejectAfter = 0, distance = 0 } = {}) => {
     const bot = {
       output: '', username: 'bot', game: { gameMode: 'survival' }, players: {}, navigation: { block: targetBlock, blocks: [], entities: [targetEntity] },
-      entity: { position: { x: 0, y: 0, z: 0, clone() { return this }, offset() { return this }, distanceTo: () => result === false ? 10 : distance }, height: 1 },
+      entity: { position: { x: 0, y: 0, z: 0, clone() { return this }, floored() { return { x: Math.floor(this.x), y: Math.floor(this.y), z: Math.floor(this.z) } }, offset() { return this }, distanceTo: () => result === false ? 10 : distance }, height: 1 },
       modes: { isOn: () => false, pause() {}, unpause() {} }, inventory: { slots: [], items: () => [], findInventoryItem: () => null },
       pathfinder: { async getPathTo() { return { status: 'noPath' } }, setMovements() {}, async goto() {} },
       findBlocks: () => [{ x: 4, y: 0, z: 0 }], blockAt: () => targetBlock,

@@ -399,3 +399,5 @@ Scheduling: eval apply/rollbackの旧process所有確認とprepare overlay適応
 - Wave8 source slice受入: 全fixtureをrunnerへ統合、README/AGENTSを実Agent/Task/parent lifecycleのoffline確認範囲へ更新。最新Node20fullrunner exit0、diffcheck0。source docs/runnerをcommit/pushしてからcanonical eval pinへ進む。隔離liveでのsmelt/cancel/craft/equipとexport確認は未完了なのでTask8 checkboxは保持。
 
 - Wave8 export失敗: bundle自体のnode_modulesは存在するが8fixturesがcheckout相対/絶対のeval dependency pathを採用し、temp export layoutでprotocol fixture import失敗。cwdをruntime rootに固定し、test-only共通resolverでbundle local node_modules優先/dev共有input fallbackへ修正する。互換symlinkだけの成功は受入にせず、新source SHAで再export/fullNode検証。gameplaycodeは変わらないため旧candidateの隔離live検証は独立継続できる。
+
+- Wave8 prepared再検証: navigation fixtureのGoalNear/position mockがoverlayのheuristic/floored契約を満たさず成功経路がfalse、try外baseline例外でdoor intervalが残りrunner未終了。source runner mockを実API互換に補完し、eval overlay baseline評価を既存try/finally内へ移して例外時cleanupを保持する。source workerはtests/run-tests.cjs、eval workerは既存overlay/testsを所有し、新SHAで再pin/export/fullNodeを必須とする。失敗runは成功と数えず専用PID/tempを回収する。
