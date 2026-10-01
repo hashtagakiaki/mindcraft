@@ -46,6 +46,45 @@ async function run(bot, callback, options = {}) {
   }
 }
 
+async function snapshotWindow(bot, window, options = {}) {
+  if (!bot || !bot._client || !bot.inventory) fail('bot is not ready')
+  if (!window || !sameWindow(bot, window)) {
+    bot.inventoryUnconfirmed = true
+    fail('window is not currently owned by this bot')
+  }
+  if (poisonedBots.has(bot)) {
+    bot.inventoryUnconfirmed = true
+    fail('connection had an ambiguous timed-out statistics fence; reconnect before inventory confirmation')
+  }
+  if (craftLocks.has(bot)) {
+    bot.inventoryUnconfirmed = true
+    fail('another craft session is active')
+  }
+  craftLocks.add(bot)
+  const session = new Session(bot, options.timeoutMs || FENCE_TIMEOUT_MS)
+  try {
+    session.attach()
+    session.phase = 'inventory-snapshot'
+    const snapshot = await session.sync(window)
+    if (window === bot.inventory) bot.inventoryUnconfirmed = false
+    return snapshot
+  } catch (error) {
+    bot.inventoryUnconfirmed = true
+    throw error
+  } finally {
+    session.detach()
+    craftLocks.delete(bot)
+  }
+}
+
+async function snapshotInventory(bot, options = {}) {
+  if (bot?.currentWindow && bot.currentWindow !== bot.inventory) {
+    bot.inventoryUnconfirmed = true
+    fail(`refusing inventory snapshot while ${bot.currentWindow.type || 'another'} window is open`)
+  }
+  return snapshotWindow(bot, bot?.inventory, options)
+}
+
 class Session {
   constructor(bot, timeoutMs) {
     this.bot = bot
@@ -450,4 +489,4 @@ class Session {
   }
 }
 
-export default { run }
+export default { run, snapshotWindow, snapshotInventory }

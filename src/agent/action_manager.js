@@ -47,10 +47,12 @@ export class ActionManager {
     }
 
     async resumeAction(actionLabel, actionFn, timeout) {
+        if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
         return this._executeResume(actionLabel, actionFn, timeout);
     }
 
     async runAction(actionLabel, actionFn, { timeout, resume = false } = {}) {
+        if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
         if (resume) return this._executeResume(actionLabel, actionFn, timeout);
         const epoch = this.intentEpoch;
         if (this.userStopped) return this._rejectedResult('user-stop');
@@ -106,6 +108,7 @@ export class ActionManager {
 
     async _executeResume(actionLabel = null, actionFn = null, timeout = 10) {
         const newResume = actionFn != null;
+        if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
         if (this.userStopped) return this._rejectedResult('user-stop');
         if (newResume) {
             if (actionLabel == null) throw new Error('actionLabel is required for new resume');
@@ -130,11 +133,13 @@ export class ActionManager {
         try {
             // A stop or newer user instruction invalidates actions that were
             // queued before it. Resume is never allowed to reopen a user stop.
+            if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
             if (this.userStopped || intentEpoch !== this.intentEpoch) return this._rejectedResult(this.userStopped ? 'user-stop' : 'superseded');
             if (this.currentAction) {
                 const stopped = await this.stop('superseded');
                 if (!stopped.stopped) return this._rejectedResult('stop-failed', stopped);
             }
+            if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
             if (this.userStopped || intentEpoch !== this.intentEpoch) return this._rejectedResult(this.userStopped ? 'user-stop' : 'superseded');
 
             if (this.last_action_time > 0) {

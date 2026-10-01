@@ -67,6 +67,29 @@ export class Agent {
 
         console.log(this.name, 'logging into minecraft...');
         this.bot = initBot(this.name);
+        Object.defineProperty(this.bot, 'inventoryUnconfirmed', {
+            configurable: true,
+            enumerable: false,
+            writable: true,
+            value: false,
+        });
+        Object.defineProperty(this.bot, 'getActionCancellationContext', {
+            configurable: true,
+            enumerable: false,
+            value: () => {
+                const context = this.actions.getCancellationContext();
+                if (!context) return null;
+                return Object.defineProperties({
+                    actionId: context.actionId,
+                    signal: context.signal,
+                    settled: context.settled,
+                    setPhase: phase => this.actions.setPhase(phase, context.actionId),
+                }, {
+                    phase: { enumerable: true, get: () => context.phase },
+                    reason: { enumerable: true, get: () => context.reason },
+                });
+            },
+        });
         
         // Connection Handler
         const onDisconnect = (event, reason) => {

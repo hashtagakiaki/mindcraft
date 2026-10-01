@@ -170,13 +170,15 @@ Scheduling: Codex adapterのowned process取消はWave1検証だけに依存す�
 
 Scheduling: Wave1/2の境界とAPI確認後、Wave3と並行できる。furnace/action commandのWritesはcoder/prompter/adapterと交差しない。
 
-- [ ] Task 4: 炉操作を中断可能にし、精錬後の無条件再接続を削除する
+- [x] Task 4: 炉操作を中断可能にし、精錬後の無条件再接続を削除する
   Writes:
   - src/agent/library/skills.js
   - src/agent/agent.js（botから現在actionの取消contextを取得する最小hookのみ）
   - src/agent/commands/actions.js
   - src/agent/library/crafting_sync.js（Wave1で再利用が適切と確認した場合だけ）
   - tests/furnace_lifecycle.test.cjs
+  - src/agent/action_manager.js（inventoryUnconfirmedのaction/resume開始拒否のみ）
+  - tests/action_manager.test.cjs（未確認在庫gateの検証）
   Reads:
   - src/agent/action_manager.js
   - Wave1の実plugin/在庫確認結果
@@ -186,12 +188,15 @@ Scheduling: Wave1/2の境界とAPI確認後、Wave3と並行できる。furnace/
   - 成功後500msのcleanKill timerを削除する。unsafeなpending処理だけ停止契約から最終終了へ渡し、正常成功の在庫更新目的の再接続を残さない。
   Verify:
   - `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/furnace_lifecycle.test.cjs`
+  - `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/action_manager.test.cjs`
   Expected:
   - 成功/不足/例外/中断のsettle後に炉窓を残さず、別所有windowは閉じない。smelt→inventory→craftの同接続workflowでrestartゼロ、未確認transferを成功扱いしない。
   Commit:
   - `fix: confirm furnace results and remove successful-smelt restarts`
 
 ## Wave 5
+
+Scheduling: modesとrecovery fixtureはWave2/3の取消API/生成phase確認後に先行できる。agent/action_managerへの再計画結線はWave4受入後に実装する（同じ炉workerを再利用し、fixture failure repairとの順序を調整）。Task6 agent/manager結線と同時に同fileへ書かない。
 
 - [ ] Task 5: 詰まり・反復・時間切れを停止結果と有限の再計画へ戻す
   Writes:
@@ -216,6 +221,8 @@ Scheduling: Wave1/2の境界とAPI確認後、Wave3と並行できる。furnace/
 
 ## Wave 6
 
+Scheduling: proxy/mindserver/testの管理接続部分はWave2確認後に他の非交差Writesと並行できる。agent.jsへの管理ゲート結線はWave4の最小hook完了後、action_managerへのゲートはWave5 ownerと調整してから実装し、Task6全体を検証する。
+
 - [ ] Task 6: 管理socketの喪失をMinecraft接続から切り離す
   Writes:
   - src/agent/mindserver_proxy.js
@@ -239,7 +246,7 @@ Scheduling: Wave1/2の境界とAPI確認後、Wave3と並行できる。furnace/
 
 ## Wave 7
 
-Scheduling: supervisor部分（agent_process.jsとagent_process.test.cjs）はWave1のprocess所有確認後に並行実装できる。親子は標準Node IPCのshutdown request/exit intent/owned CLI登録を追加する。init_agent/agent/hubの結線はWave3/5/6完了後に同Task内で検証する。親desired stateはIPCのrestartIntentより優先し、child closeだけで子孫消滅と見なさない。
+Scheduling: supervisor部分（agent_process.jsとagent_process.test.cjs）はWave1のprocess所有確認後に並行実装できる。親子は標準Node IPCのshutdown request/exit intent/owned CLI登録を追加する。hub/store lifecycle結線は管理transport slice受入後に先行し、init_agent/agent結線はWave3/5/6完了後に同Task内で検証する。親desired stateはIPCのrestartIntentより優先し、child closeだけで子孫消滅と見なさない。
 
 - [ ] Task 7: 停止不能時だけ使う終了経路と親の再起動判断を統一する
   Writes:
@@ -247,6 +254,9 @@ Scheduling: supervisor部分（agent_process.jsとagent_process.test.cjs）はWa
   - src/agent/history.js
   - src/process/init_agent.js
   - src/process/agent_process.js
+  - src/process/owned_cli.js
+  - src/models/codex.js
+  - tests/generation_cancellation.test.cjs
   - src/agent/mindserver_proxy.js
   - src/agent/action_manager.js
   - src/agent/commands/actions.js
@@ -275,6 +285,8 @@ Scheduling: supervisor部分（agent_process.jsとagent_process.test.cjs）はWa
 
 ## Wave 8
 
+Scheduling: eval apply/rollbackの旧process所有確認とprepare overlay適応は、source pin更新前に独立実装・offline検証できる。manifest更新/source full push/live smokeは全source受入後に行う。
+
 - [ ] Task 8: 全workflowの検証をrunner・eval準備/切替へ組み込む
   Writes:
   - tests/run-tests.cjs
@@ -285,6 +297,7 @@ Scheduling: supervisor部分（agent_process.jsとagent_process.test.cjs）はWa
   - ../mindcraft-eval/tests/test_play_runtime.py
   - ../mindcraft-eval/tests/test_apply_mindcraft_play.py
   - ../mindcraft-eval/scripts/smoke_crafting.py（炉連続workflowの隔離live確認に必要な部分のみ）
+  - ../mindcraft-eval/scripts/smoke_crafting.mjs（同じ炉連続workflowのskill呼出し）
   - ../mindcraft-eval/mindcraft-source.json
   - ../mindcraft-eval/README.md
   - ../mindcraft-eval/AGENTS.md
@@ -327,3 +340,15 @@ Scheduling: supervisor部分（agent_process.jsとagent_process.test.cjs）はWa
 - Wave4 scope追加: NPC item_goalと生成コードはskillsへbotだけを渡すため、commands引数だけでは取消が届かない。agent.jsにnon-enumerable getActionCancellationContext hookを追加し、callerのAPI変更を避ける。Wave3と非交差。
 
 - Wave3検証: coding requestだけ取消contextを渡し、Codexは所有CLI group回収完了までawaitする。未対応providerとprompt準備は非変更待機として取消可能、late回答はstage/execute/logへ進まない。stage/lint/実行直前にもsignal確認、mode pauseとawaiting_codingはfinally回復。CLI取消・timeout・不正output・spawnfailureと次の正常生成をVerify exit 0で確認。bot強制終了時のCLI所有登録はWave7で結線する。
+
+- Wave7設計修正（Astra調査）: 生存ancestryの事後登録とstdin ACKだけではCLIが登録前に孫を作り終了する競合を閉じない。Node owned_cli helperは専用groupで待機のみ、親がhelper所有登録してACKした後に実CLIをnon-detachedで起動する。登録前bot deathはhelper IPC disconnectで終了しCLIを作らない。登録後bot freezeは親が登録済groupを回収する。helper/adapterとsupervisorのWritesを分けて並行実装、init_agent/agent/hub結線は後続。stale ACK/取消/leader death/foreign group/全PID cleanupを検証する。
+
+- Wave4安全境界修正: 遅延click阻止前にMineflayerがlocal slot/cursorを予測変更する。過去snapshotへのrollbackだけを停止安全性の証明とせず、ownedwindow close後に取消後もinventory-only fullsnapshot fenceを一度許可する。確認成功時だけinventoryUnconfirmedを解除、失敗時はActionManagerが通常action/resumeを拒否する。回収/再投入clickは取消後に禁止し、確認不能時の明示restart commandは維持する。
+
+- Wave4 scheduling追加: 大きい炉workflow実装と実plugin回帰fixtureを並行化。炉workerはsource/既存manager test、独立fixture workerはtests/furnace_lifecycle.test.cjsのみ所有する。親がfailure evidenceとscopeを調整し、全Verify後に同Task commitへまとめる。
+
+- Wave4確認範囲の明確化: inventoryUnconfirmed gateは炉残量を含む未確定transfer/resultも停止理由に含める。取消後も通常の回収/投入clickは禁止し、owned炉とclose後player inventoryのread-only invalid-slot snapshot fenceだけ終了確認として許可する。両確認が成功した停止は接続維持でsettle、どちらか不明なら全action/resume gateを保持する。player snapshotだけの成功で炉確認失敗を解除しない。観測不能時は自動再投入せずpaused報告、明示restartは最終手段として残す。
+
+- Wave7親lifecycle scope: supervisor workerがmindcraft.js/mindserver.js/place_store.js/place_store.test.cjsを所有し、管理transport workerはmindserver.jsを凍結する。shutdown受付gate→全bot/group終了await→store queue drain/lock解放→transport終了を一本化。終了未確認ならlockと親を維持して再試行可能にする。Task5 agent/manager結線の後にTask6同fileへ渡し、Task7 child結線は最後に行う。
+
+- Wave4受入: 実1.21.1 furnace/inventory pluginで成功/不足/部分結果/例外/遅延open・click/取消/外国window/確認欠落を観測。両snapshot確認時だけ次の明示intentを許可、炉欠落+player確認でもgate維持。getSkillDocs両entry復元、取消ログは確認済/未確認を区別。親のfurnace lifecycle/ActionManager再Verify exit 0。実craft sync admissionは確認済、実craft/equip出力はWave8隔離serverで検証する。

@@ -212,6 +212,16 @@ async function main() {
     assert.equal((await manager.runAction('store resume', async () => {}, { timeout: 0 })).success, true)
     assert.equal((await manager.runAction('resume', async () => {}, { resume: true, timeout: 0 })).success, true)
     await assert.rejects(manager.resumeAction(null, async () => {}), /actionLabel is required/)
+
+    manager.beginUserIntent()
+    agent.bot.inventoryUnconfirmed = true
+    const blockedInventoryActions = []
+    assert.equal((await manager.runAction('blocked-by-inventory', async () => blockedInventoryActions.push('ran'), { timeout: 0 })).reason, 'inventory-unconfirmed')
+    assert.equal((await manager.runAction('blocked-resume', async () => blockedInventoryActions.push('resume-ran'), { resume: true, timeout: 0 })).reason, 'inventory-unconfirmed')
+    assert.equal((await manager.resumeAction('blocked-direct-resume', async () => blockedInventoryActions.push('direct-resume-ran'))).reason, 'inventory-unconfirmed')
+    assert.deepEqual(blockedInventoryActions, [], 'human intent cannot clear the uncertain-inventory action gate')
+    agent.bot.inventoryUnconfirmed = false // only a successful full snapshot may clear this in production
+    assert.equal((await manager.runAction('unblocked-after-snapshot', async () => {}, { timeout: 0 })).success, true)
     console.log('action manager tests passed')
   } finally {
     await rm(root, { recursive: true, force: true })

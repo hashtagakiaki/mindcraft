@@ -2,8 +2,11 @@ import * as mc from "../../utils/mcdata.js";
 import * as world from "./world.js";
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
+import { createRequire } from 'node:module';
 import settings from "../../../settings.js";
 import craftingSync from "./crafting_sync.js";
+
+const require = createRequire(import.meta.url);
 
 const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_place_delay;
 const useDelay = blockPlaceDelay > 0;
@@ -16,6 +19,9 @@ const FARM_SEARCH_RADIUS = 32;
 const FARM_SEED_RESERVE = 1;
 const FARM_CHEST_RADIUS = 32;
 const FARM_SEARCH_LIMIT = 10000;
+const FURNACE_POLL_INTERVAL_MS = 100;
+const FURNACE_IDLE_TIMEOUT_MS = 11000;
+const furnaceClickGuards = new WeakMap();
 const FARM_NEIGHBORS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 const CROPS = {
     wheat: { mature: 7, seed: 'wheat_seeds', produce: ['wheat'] },
@@ -26,6 +32,148 @@ const CROPS = {
 
 export function log(bot, message) {
     bot.output += message + '\n';
+}
+
+function getActionContext(bot, context) {
+    return context || bot.getActionCancellationContext?.() || null;
+}
+
+function isActionCancelled(bot, context) {
+    return !!bot.interrupt_code || !!context?.signal?.aborted;
+}
+
+function setActionPhase(context, phase) {
+    context?.setPhase?.(phase);
+}
+
+function waitForActionOrTimeout(bot, context, milliseconds) {
+    const signal = context?.signal;
+    return new Promise(resolve => {
+        let settled = false;
+        let timer;
+        const finish = value => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', onAbort);
+            resolve(value);
+        };
+        const onAbort = () => finish(false);
+        const poll = () => {
+            if (isActionCancelled(bot, context)) return finish(false);
+            const elapsed = Date.now() - startedAt;
+            if (elapsed >= milliseconds) return finish(true);
+            timer = setTimeout(poll, Math.min(FURNACE_POLL_INTERVAL_MS, milliseconds - elapsed));
+        };
+        const startedAt = Date.now();
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted || isActionCancelled(bot, context)) return finish(false);
+        timer = setTimeout(poll, Math.min(FURNACE_POLL_INTERVAL_MS, milliseconds));
+    });
+}
+
+function guardFurnaceClicks(bot, window, context) {
+    const client = bot._client;
+    let state = furnaceClickGuards.get(client);
+    if (!state) {
+        state = { originalWrite: client.write, rules: [] };
+        state.guardedWrite = function (name, packet, ...args) {
+            if (name === 'window_click') {
+                for (let index = state.rules.length - 1; index >= 0; index--) {
+                    const rule = state.rules[index];
+                    if (packet?.windowId === rule.windowId && isActionCancelled(rule.bot, rule.context)) {
+                        const readOnlyFence = packet.slot === -999 && packet.mode === 5 && packet.mouseButton === 2;
+                        if (readOnlyFence) return state.originalWrite.call(this, name, packet, ...args);
+                        rule.blocked = true;
+                        rule.restoreAuthoritativeWindow();
+                        throw new Error('furnace action cancelled before click packet was sent');
+                    }
+                }
+            }
+            return state.originalWrite.call(this, name, packet, ...args);
+        };
+        client.write = state.guardedWrite;
+        furnaceClickGuards.set(client, state);
+    }
+    const Item = require('prismarine-item')(bot.registry);
+    const copyItem = item => item ? Item.fromNotch(Item.toNotch(item)) : null;
+    const rule = {
+        bot,
+        context,
+        windowId: window.id,
+        blocked: false,
+        authoritativeSlots: window.slots.map(copyItem),
+        authoritativeCursor: copyItem(window.selectedItem),
+        captureWindow() {
+            this.authoritativeSlots = window.slots.map(copyItem);
+            this.authoritativeCursor = copyItem(window.selectedItem);
+        },
+        restoreAuthoritativeWindow() {
+            bot.inventoryUnconfirmed = true;
+            for (let slot = 0; slot < this.authoritativeSlots.length; slot++) {
+                window.slots[slot] = copyItem(this.authoritativeSlots[slot]);
+                if (window.slots[slot]) window.slots[slot].slot = slot;
+            }
+            window.selectedItem = copyItem(this.authoritativeCursor);
+        },
+        onWindowItems: packet => { if (packet.windowId === window.id) rule.captureWindow(); },
+        onSetSlot: packet => {
+            if (packet.windowId === window.id && packet.slot >= 0 && packet.slot < window.slots.length) rule.captureWindow();
+        }
+    };
+    client.on('window_items', rule.onWindowItems);
+    client.on('set_slot', rule.onSetSlot);
+    state.rules.push(rule);
+    return {
+        rule,
+        release() {
+            client.removeListener('window_items', rule.onWindowItems);
+            client.removeListener('set_slot', rule.onSetSlot);
+            const index = state.rules.indexOf(rule);
+            if (index >= 0) state.rules.splice(index, 1);
+            if (state.rules.length === 0) {
+                if (client.write === state.guardedWrite) client.write = state.originalWrite;
+                furnaceClickGuards.delete(client);
+            }
+        }
+    };
+}
+
+async function closeOwnedFurnaceWindow(bot, furnace) {
+    if (!furnace || bot.currentWindow !== furnace) return false;
+    await bot.closeWindow(furnace);
+    return true;
+}
+
+function itemCountInInventory(bot, type, metadata = null) {
+    return bot.inventory.items()
+        .filter(item => item.type === type && (metadata == null || item.metadata === metadata))
+        .reduce((count, item) => count + item.count, 0);
+}
+
+function verifyInventoryDelta(bot, baseline, returnedItems, removedItems = []) {
+    const changes = new Map();
+    for (const item of returnedItems) {
+        if (!item) continue;
+        const key = `${item.type}:${item.metadata ?? 0}`;
+        const entry = changes.get(key) || { type: item.type, metadata: item.metadata ?? 0, count: 0 };
+        entry.count += item.count;
+        changes.set(key, entry);
+    }
+    for (const item of removedItems) {
+        if (!item) continue;
+        const key = `${item.type}:${item.metadata ?? 0}`;
+        const entry = changes.get(key) || { type: item.type, metadata: item.metadata ?? 0, count: 0 };
+        entry.count -= item.count;
+        changes.set(key, entry);
+    }
+    const mismatches = [];
+    for (const { type, metadata, count } of changes.values()) {
+        const before = baseline.get(`${type}:${metadata}`) || 0;
+        const after = itemCountInInventory(bot, type, metadata);
+        if (after < before + count) mismatches.push({ type, metadata, before, expectedAtLeast: before + count, actual: after });
+    }
+    return mismatches;
 }
 
 function itemIdsForNames(bot, itemNames) {
@@ -263,174 +411,353 @@ export async function wait(bot, milliseconds) {
     return true;
 }
 
-export async function smeltItem(bot, itemName, num=1) {
+export async function smeltItem(bot, itemName, num=1, actionContext=null) {
     /**
-     * Puts 1 coal in furnace and smelts the given item name, waits until the furnace runs out of fuel or input items.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {string} itemName, the item name to smelt. Ores must contain "raw" like raw_iron.
-     * @param {number} num, the number of items to smelt. Defaults to 1.
-     * @returns {Promise<boolean>} true if the item was smelted, false otherwise. Fail
+     * Smelts the requested number of items in a nearby furnace and waits for the confirmed result.
+     * @param {MinecraftBot} bot, reference to the Minecraft bot.
+     * @param {string} itemName, item name to smelt. Ore inputs must use names such as raw_iron.
+     * @param {number} num, number of items to smelt. Defaults to 1.
+     * @returns {Promise<boolean>} true only when the furnace and inventory snapshots confirm the full result; false for shortages, partial results, or interruption. Partial results are not retried automatically.
      * @example
      * await skills.smeltItem(bot, "raw_iron");
-     * await skills.smeltItem(bot, "beef");
+     * await skills.smeltItem(bot, "beef", 4);
      **/
-
+    const context = getActionContext(bot, actionContext);
     if (!mc.isSmeltable(itemName)) {
         log(bot, `Cannot smelt ${itemName}. Hint: make sure you are smelting the 'raw' item.`);
         return false;
     }
+    if (!Number.isInteger(num) || num < 1) {
+        log(bot, `Smelting count must be a positive integer: ${num}.`);
+        return false;
+    }
 
-    let placedFurnace = false;
-    let furnaceBlock = undefined;
     const furnaceRange = 16;
-    furnaceBlock = world.getNearestBlock(bot, 'furnace', furnaceRange);
-    if (!furnaceBlock){
-        // Try to place furnace
-        let hasFurnace = world.getInventoryCounts(bot)['furnace'] > 0;
-        if (hasFurnace) {
-            let pos = world.getNearestFreeSpace(bot, 1, furnaceRange);
-            await placeBlock(bot, 'furnace', pos.x, pos.y, pos.z);
-            furnaceBlock = world.getNearestBlock(bot, 'furnace', furnaceRange);
-            placedFurnace = true;
-        }
+    let furnaceBlock = world.getNearestBlock(bot, 'furnace', furnaceRange);
+    let placedFurnace = false;
+    if (!furnaceBlock && world.getInventoryCounts(bot).furnace > 0 && !isActionCancelled(bot, context)) {
+        const pos = world.getNearestFreeSpace(bot, 1, furnaceRange);
+        await placeBlock(bot, 'furnace', pos.x, pos.y, pos.z);
+        furnaceBlock = world.getNearestBlock(bot, 'furnace', furnaceRange);
+        placedFurnace = !!furnaceBlock;
     }
-    if (!furnaceBlock){
-        log(bot, `There is no furnace nearby and you have no furnace.`)
+    if (!furnaceBlock) {
+        log(bot, 'There is no furnace nearby and you have no furnace.');
         return false;
     }
-    if (bot.entity.position.distanceTo(furnaceBlock.position) > 4) {
+    if (bot.entity.position.distanceTo(furnaceBlock.position) > 4)
         await goToNearestBlock(bot, 'furnace', 4, furnaceRange);
-    }
+    if (isActionCancelled(bot, context)) return false;
+
     bot.modes.pause('unstuck');
-    await bot.lookAt(furnaceBlock.position);
-
-    console.log('smelting...');
-    const furnace = await bot.openFurnace(furnaceBlock);
-    // check if the furnace is already smelting something
-    let input_item = furnace.inputItem();
-    if (input_item && input_item.type !== mc.getItemId(itemName) && input_item.count > 0) {
-        // TODO: check if furnace is currently burning fuel. furnace.fuel is always null, I think there is a bug.
-        // This only checks if the furnace has an input item, but it may not be smelting it and should be cleared.
-        log(bot, `The furnace is currently smelting ${mc.getItemName(input_item.type)}.`);
-        if (placedFurnace)
-            await collectBlock(bot, 'furnace', 1);
-        return false;
-    }
-    // check if the bot has enough items to smelt
-    let inv_counts = world.getInventoryCounts(bot);
-    if (!inv_counts[itemName] || inv_counts[itemName] < num) {
-        log(bot, `You do not have enough ${itemName} to smelt.`);
-        if (placedFurnace)
-            await collectBlock(bot, 'furnace', 1);
-        return false;
-    }
-
-    // fuel the furnace
-    if (!furnace.fuelItem()) {
-        let fuel = mc.getSmeltingFuel(bot);
-        if (!fuel) {
-            log(bot, `You have no fuel to smelt ${itemName}, you need coal, charcoal, or wood.`);
-            if (placedFurnace)
-                await collectBlock(bot, 'furnace', 1);
-            return false;
-        }
-        log(bot, `Using ${fuel.name} as fuel.`);
-
-        const put_fuel = Math.ceil(num / mc.getFuelSmeltOutput(fuel.name));
-
-        if (fuel.count < put_fuel) {
-            log(bot, `You don't have enough ${fuel.name} to smelt ${num} ${itemName}; you need ${put_fuel}.`);
-            if (placedFurnace)
-                await collectBlock(bot, 'furnace', 1);
-            return false;
-        }
-        await furnace.putFuel(fuel.type, null, put_fuel);
-        log(bot, `Added ${put_fuel} ${mc.getItemName(fuel.type)} to furnace fuel.`);
-        console.log(`Added ${put_fuel} ${mc.getItemName(fuel.type)} to furnace fuel.`)
-    }
-    // put the items in the furnace
-    await furnace.putInput(mc.getItemId(itemName), null, num);
-    // wait for the items to smelt
+    let furnace = null;
+    let clickGuard = null;
+    let cancelled = false;
+    let reason = null;
     let total = 0;
-    let smelted_item = null;
-    await new Promise(resolve => setTimeout(resolve, 200));
-    let last_collected = Date.now();
-    while (total < num) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        if (furnace.outputItem()) {
-            smelted_item = await furnace.takeOutput();
-            if (smelted_item) {
-                total += smelted_item.count;
-                last_collected = Date.now();
+    let smeltedItem = null;
+    let furnaceConfirmed = false;
+    let inventoryConfirmed = false;
+    let operationError = null;
+    let cleanupError = null;
+    const baseline = new Map();
+    const returnedItems = [];
+    const removedItems = [];
+    try {
+        setActionPhase(context, 'furnace-inventory-baseline');
+        await craftingSync.snapshotInventory(bot);
+        for (const item of bot.inventory.items()) {
+            const key = `${item.type}:${item.metadata ?? 0}`;
+            baseline.set(key, (baseline.get(key) || 0) + item.count);
+        }
+        if (isActionCancelled(bot, context)) {
+            cancelled = true;
+            reason = 'cancelled before opening furnace';
+        } else {
+            setActionPhase(context, 'opening-furnace');
+            await bot.lookAt(furnaceBlock.position);
+            if (!isActionCancelled(bot, context)) furnace = await bot.openFurnace(furnaceBlock);
+            else { cancelled = true; reason = 'cancelled before opening furnace'; }
+        }
+        if (furnace) clickGuard = guardFurnaceClicks(bot, furnace, context);
+        if (furnace && !cancelled && isActionCancelled(bot, context)) {
+            cancelled = true;
+            reason = 'cancelled after furnace opened';
+        }
+        if (furnace && !cancelled) {
+            const input = furnace.inputItem();
+            if (input && input.type !== mc.getItemId(itemName) && input.count > 0) {
+                reason = `furnace already contains ${mc.getItemName(input.type)}`;
+            } else if ((world.getInventoryCounts(bot)[itemName] || 0) < num) {
+                reason = `not enough ${itemName} in inventory`;
+            } else {
+                if (!furnace.fuelItem()) {
+                    const fuel = mc.getSmeltingFuel(bot);
+                    if (!fuel) reason = `no fuel available for ${itemName}`;
+                    else {
+                        const fuelCount = Math.ceil(num / mc.getFuelSmeltOutput(fuel.name));
+                        if (fuel.count < fuelCount) reason = `not enough ${fuel.name}: need ${fuelCount}`;
+                        else {
+                            setActionPhase(context, 'furnace-transfer-fuel');
+                            await furnace.putFuel(fuel.type, null, fuelCount);
+                            removedItems.push({ type: fuel.type, metadata: fuel.metadata ?? 0, count: fuelCount });
+                        }
+                    }
+                }
+                if (!reason && !isActionCancelled(bot, context)) {
+                    setActionPhase(context, 'furnace-transfer-input');
+                    await furnace.putInput(mc.getItemId(itemName), null, num);
+                    removedItems.push({ type: mc.getItemId(itemName), metadata: 0, count: num });
+                }
+                if (isActionCancelled(bot, context)) {
+                    cancelled = true;
+                    reason = 'cancelled during furnace transfer';
+                }
+                if (!cancelled && !reason) {
+                    setActionPhase(context, 'waiting-for-smelting');
+                    let quietMs = 0;
+                    while (total < num && quietMs < FURNACE_IDLE_TIMEOUT_MS) {
+                        if (!await waitForActionOrTimeout(bot, context, FURNACE_POLL_INTERVAL_MS)) {
+                            cancelled = true;
+                            reason = 'cancelled while waiting for smelting';
+                            break;
+                        }
+                        const output = furnace.outputItem();
+                        if (output) {
+                            setActionPhase(context, 'collecting-furnace-output');
+                            smeltedItem = await furnace.takeOutput();
+                            if (smeltedItem) {
+                                returnedItems.push(smeltedItem);
+                                total += smeltedItem.count;
+                                quietMs = 0;
+                            }
+                            if (isActionCancelled(bot, context)) {
+                                cancelled = true;
+                                reason = 'cancelled during output collection';
+                                break;
+                            }
+                            setActionPhase(context, 'waiting-for-smelting');
+                        } else quietMs += FURNACE_POLL_INTERVAL_MS;
+                    }
+                    if (!cancelled && furnace.inputItem()) {
+                        setActionPhase(context, 'collecting-furnace-input');
+                        const item = await furnace.takeInput();
+                        if (item) returnedItems.push(item);
+                    }
+                    if (!cancelled && !isActionCancelled(bot, context) && furnace.fuelItem()) {
+                        setActionPhase(context, 'collecting-furnace-fuel');
+                        const item = await furnace.takeFuel();
+                        if (item) returnedItems.push(item);
+                    }
+                    if (isActionCancelled(bot, context)) {
+                        cancelled = true;
+                        reason = 'cancelled during furnace collection';
+                    }
+                }
             }
         }
-        if (Date.now() - last_collected > 11000) {
-            break; // if nothing has been collected in 11 seconds, stop
+    } catch (error) {
+        if (isActionCancelled(bot, context)) {
+            cancelled = true;
+            reason = `cancelled with unresolved furnace state: ${error.message}`;
+        } else operationError = error;
+    } finally {
+        try {
+            if (furnace) {
+                setActionPhase(context, 'confirming-furnace-snapshot');
+                await craftingSync.snapshotWindow(bot, furnace);
+                furnaceConfirmed = true;
+            }
+        } catch (error) {
+            bot.inventoryUnconfirmed = true;
+            cleanupError = error;
+        } finally {
+            try {
+                clickGuard?.release();
+                if (furnace) await closeOwnedFurnaceWindow(bot, furnace);
+            } catch (error) {
+                cleanupError ||= error;
+            } finally {
+                try { bot.modes.unpause('unstuck'); }
+                catch (error) { cleanupError ||= error; }
+                if (furnace) {
+                    try {
+                        setActionPhase(context, cancelled || isActionCancelled(bot, context)
+                            ? 'confirming-player-inventory-after-stop'
+                            : 'confirming-player-inventory');
+                        await craftingSync.snapshotInventory(bot);
+                        inventoryConfirmed = true;
+                    } catch (error) {
+                        bot.inventoryUnconfirmed = true;
+                        cleanupError ||= error;
+                    }
+                }
+                if (furnace && (!furnaceConfirmed || !inventoryConfirmed)) bot.inventoryUnconfirmed = true;
+            }
         }
-        if (bot.interrupt_code) {
-            break;
-        }
-    }
-    // take all remaining in input/fuel slots
-    if (furnace.inputItem()) {
-        await furnace.takeInput();
-    }
-    if (furnace.fuelItem()) {
-        await furnace.takeFuel();
     }
 
-    await bot.closeWindow(furnace);
-
-    if (placedFurnace) {
+    if (operationError) throw operationError;
+    if (cleanupError && !cancelled && !isActionCancelled(bot, context)) throw cleanupError;
+    if (cancelled || isActionCancelled(bot, context)) {
+        log(bot, `Smelting ${itemName} interrupted before completion; observed output: ${total}. Furnace snapshot ${furnaceConfirmed ? 'confirmed after stopping transfers' : 'unconfirmed'}, player inventory snapshot ${inventoryConfirmed ? 'confirmed after close' : 'unconfirmed'}${bot.inventoryUnconfirmed ? '; actions are gated until state is confirmed' : ''}. The furnace may continue smelting after close${reason ? ` (${reason})` : ''}.`);
+        return false;
+    }
+    if (!furnace || !furnaceConfirmed) {
+        if (reason) {
+            log(bot, `Smelting ${itemName} did not start: ${reason}.`);
+            return false;
+        }
+        log(bot, `Smelting ${itemName} result is unconfirmed${reason ? `: ${reason}` : '.'}`);
+        return false;
+    }
+    if (!inventoryConfirmed) {
+        log(bot, `Smelting ${itemName} result is unconfirmed; inventory snapshot failed and actions are gated.`);
+        return false;
+    }
+    const mismatches = verifyInventoryDelta(bot, baseline, returnedItems, removedItems);
+    if (mismatches.length) {
+        log(bot, `Smelting ${itemName} result is unconfirmed: inventory delta ${JSON.stringify(mismatches)}.`);
+        return false;
+    }
+    if (placedFurnace && !furnace.outputItem() && !furnace.inputItem() && !furnace.fuelItem())
         await collectBlock(bot, 'furnace', 1);
-    }
     if (total === 0) {
-        log(bot, `Failed to smelt ${itemName}.`);
+        log(bot, `Failed to smelt ${itemName}; no output was confirmed.`);
         return false;
     }
     if (total < num) {
-        log(bot, `Only smelted ${total} ${mc.getItemName(smelted_item.type)}.`);
+        log(bot, `Only smelted ${total} ${mc.getItemName(smeltedItem.type)}; partial result confirmed, no retry was started.`);
         return false;
     }
-    log(bot, `Successfully smelted ${itemName}, got ${total} ${mc.getItemName(smelted_item.type)}.`);
+    log(bot, `Successfully smelted ${itemName}, got ${total} ${mc.getItemName(smeltedItem.type)}; furnace and inventory snapshots confirmed.`);
     return true;
 }
 
-export async function clearNearestFurnace(bot) {
+export async function clearNearestFurnace(bot, actionContext=null) {
     /**
-     * Clears the nearest furnace of all items.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @returns {Promise<boolean>} true if the furnace was cleared, false otherwise.
+     * Collects the output, input, and fuel from the nearest furnace.
+     * @param {MinecraftBot} bot, reference to the Minecraft bot.
+     * @returns {Promise<boolean>} true only when the owned furnace and player inventory snapshots confirm the transfers; false when no furnace is available, the operation is interrupted, or its result cannot be confirmed.
      * @example
      * await skills.clearNearestFurnace(bot);
      **/
-    let furnaceBlock = world.getNearestBlock(bot, 'furnace', 32);
+    const context = getActionContext(bot, actionContext);
+    const furnaceBlock = world.getNearestBlock(bot, 'furnace', 32);
     if (!furnaceBlock) {
-        log(bot, `No furnace nearby to clear.`);
+        log(bot, 'No furnace nearby to clear.');
         return false;
     }
-    if (bot.entity.position.distanceTo(furnaceBlock.position) > 4) {
+    if (bot.entity.position.distanceTo(furnaceBlock.position) > 4)
         await goToNearestBlock(bot, 'furnace', 4, 32);
+    if (isActionCancelled(bot, context)) return false;
+
+    let furnace = null;
+    let clickGuard = null;
+    let cancelled = false;
+    let furnaceConfirmed = false;
+    let inventoryConfirmed = false;
+    let operationError = null;
+    let cleanupError = null;
+    const returnedItems = [];
+    let smeltedItem = null;
+    let inputItem = null;
+    let fuelItem = null;
+    const baseline = new Map();
+    try {
+        setActionPhase(context, 'furnace-inventory-baseline');
+        await craftingSync.snapshotInventory(bot);
+        for (const item of bot.inventory.items()) {
+            const key = `${item.type}:${item.metadata ?? 0}`;
+            baseline.set(key, (baseline.get(key) || 0) + item.count);
+        }
+        setActionPhase(context, 'opening-furnace');
+        if (isActionCancelled(bot, context)) cancelled = true;
+        else furnace = await bot.openFurnace(furnaceBlock);
+        if (furnace) clickGuard = guardFurnaceClicks(bot, furnace, context);
+        if (furnace && isActionCancelled(bot, context)) cancelled = true;
+        if (furnace && !cancelled && furnace.outputItem()) {
+            setActionPhase(context, 'collecting-furnace-output');
+            smeltedItem = await furnace.takeOutput();
+            if (smeltedItem) returnedItems.push(smeltedItem);
+            if (isActionCancelled(bot, context)) cancelled = true;
+        }
+        if (furnace && !cancelled && furnace.inputItem()) {
+            setActionPhase(context, 'collecting-furnace-input');
+            inputItem = await furnace.takeInput();
+            if (inputItem) returnedItems.push(inputItem);
+            if (isActionCancelled(bot, context)) cancelled = true;
+        }
+        if (furnace && !cancelled && furnace.fuelItem()) {
+            setActionPhase(context, 'collecting-furnace-fuel');
+            fuelItem = await furnace.takeFuel();
+            if (fuelItem) returnedItems.push(fuelItem);
+            if (isActionCancelled(bot, context)) cancelled = true;
+        }
+    } catch (error) {
+        if (isActionCancelled(bot, context)) cancelled = true;
+        else operationError = error;
+    } finally {
+        try {
+            if (furnace) {
+                setActionPhase(context, 'confirming-furnace-snapshot');
+                await craftingSync.snapshotWindow(bot, furnace);
+                furnaceConfirmed = true;
+            }
+        } catch (error) {
+            bot.inventoryUnconfirmed = true;
+            cleanupError = error;
+        } finally {
+            try {
+                clickGuard?.release();
+                if (furnace) await closeOwnedFurnaceWindow(bot, furnace);
+            } catch (error) {
+                cleanupError ||= error;
+            } finally {
+                if (furnace) {
+                    try {
+                        setActionPhase(context, cancelled || isActionCancelled(bot, context)
+                            ? 'confirming-player-inventory-after-stop'
+                            : 'confirming-player-inventory');
+                        await craftingSync.snapshotInventory(bot);
+                        inventoryConfirmed = true;
+                    } catch (error) {
+                        bot.inventoryUnconfirmed = true;
+                        cleanupError ||= error;
+                    }
+                }
+                if (furnace && (!furnaceConfirmed || !inventoryConfirmed)) bot.inventoryUnconfirmed = true;
+            }
+        }
     }
-
-    console.log('clearing furnace...');
-    const furnace = await bot.openFurnace(furnaceBlock);
-    console.log('opened furnace...')
-    // take the items out of the furnace
-    let smelted_item, intput_item, fuel_item;
-    if (furnace.outputItem())
-        smelted_item = await furnace.takeOutput();
-    if (furnace.inputItem())
-        intput_item = await furnace.takeInput();
-    if (furnace.fuelItem())
-        fuel_item = await furnace.takeFuel();
-    console.log(smelted_item, intput_item, fuel_item)
-    let smelted_name = smelted_item ? `${smelted_item.count} ${smelted_item.name}` : `0 smelted items`;
-    let input_name = intput_item ? `${intput_item.count} ${intput_item.name}` : `0 input items`;
-    let fuel_name = fuel_item ? `${fuel_item.count} ${fuel_item.name}` : `0 fuel items`;
-    log(bot, `Cleared furnace, received ${smelted_name}, ${input_name}, and ${fuel_name}.`);
+    if (operationError) throw operationError;
+    if (cleanupError && !cancelled && !isActionCancelled(bot, context)) throw cleanupError;
+    if (cancelled || isActionCancelled(bot, context)) {
+        log(bot, `Furnace clearing interrupted before completion. Furnace snapshot ${furnaceConfirmed ? 'confirmed after stopping transfers' : 'unconfirmed'}, player inventory snapshot ${inventoryConfirmed ? 'confirmed after close' : 'unconfirmed'}${bot.inventoryUnconfirmed ? '; actions are gated until state is confirmed' : ''}.`);
+        return false;
+    }
+    if (!furnace || !furnaceConfirmed) {
+        log(bot, 'Furnace clearing result is unconfirmed.');
+        return false;
+    }
+    if (!inventoryConfirmed) {
+        log(bot, 'Furnace clearing result is unconfirmed; inventory snapshot failed and actions are gated.');
+        return false;
+    }
+    if (isActionCancelled(bot, context)) {
+        log(bot, 'Furnace clearing interrupted after close; inventory is confirmed but this operation is not reported as success.');
+        return false;
+    }
+    const mismatches = verifyInventoryDelta(bot, baseline, returnedItems);
+    if (mismatches.length) {
+        log(bot, `Furnace clearing incomplete; inventory transfer was not confirmed: ${JSON.stringify(mismatches)}`);
+        return false;
+    }
+    const smeltedName = smeltedItem ? `${smeltedItem.count} ${smeltedItem.name}` : '0 smelted items';
+    const inputName = inputItem ? `${inputItem.count} ${inputItem.name}` : '0 input items';
+    const fuelName = fuelItem ? `${fuelItem.count} ${fuelItem.name}` : '0 fuel items';
+    log(bot, `Cleared furnace, received ${smeltedName}, ${inputName}, and ${fuelName}; furnace and inventory snapshots confirmed.`);
     return true;
-
 }
 
 
