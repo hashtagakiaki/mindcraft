@@ -83,7 +83,15 @@ class GoalNear {
   constructor(x, y, z, range) { this.x = Math.floor(x); this.y = Math.floor(y); this.z = Math.floor(z); this.rangeSq = range * range; }
   heuristic(node) { const dx = this.x - node.x; const dy = this.y - node.y; const dz = this.z - node.z; return Math.hypot(dx, dz) + Math.abs(dy); }
 }
-export default { goals: { GoalNear, GoalFollow: class {}, GoalInvert: class {} }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } } };
+class GoalFollow {
+  constructor(entity, range) { this.entity = entity; this.x = Math.floor(entity.position.x); this.y = Math.floor(entity.position.y); this.z = Math.floor(entity.position.z); this.rangeSq = range * range; }
+  heuristic(node) { const dx = this.x - node.x; const dy = this.y - node.y; const dz = this.z - node.z; return Math.hypot(dx, dz) + Math.abs(dy); }
+}
+class GoalInvert {
+  constructor(goal) { this.goal = goal; }
+  heuristic(node) { return -this.goal.heuristic(node); }
+}
+export default { goals: { GoalNear, GoalFollow, GoalInvert }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } } };
 `)
 }
 
@@ -91,7 +99,7 @@ async function testNavigation(root) {
   await setupNavigationFixture(root)
   const skills = await import(pathToFileURL(path.join(root, 'src/agent/library/skills.js')))
   const targetBlock = { name: 'chest', position: { x: 4, y: 0, z: 0, toString() { return '4,0,0' }, offset() { return this } } }
-  const targetEntity = { name: 'cow', position: { x: 4, y: 0, z: 0 } }
+  const targetEntity = { name: 'cow', position: { x: 4, y: 0, z: 0, floored() { return { x: Math.floor(this.x), y: Math.floor(this.y), z: Math.floor(this.z) } } } }
   const makeBot = ({ result = true, reject = false, rejectAfter = 0, distance = 0 } = {}) => {
     const bot = {
       output: '', username: 'bot', game: { gameMode: 'survival' }, players: {}, navigation: { block: targetBlock, blocks: [], entities: [targetEntity] },

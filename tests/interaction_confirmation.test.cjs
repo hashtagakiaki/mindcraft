@@ -11,6 +11,7 @@ function makePosition(x, y, z, distance = 0) {
   return {
     x, y, z,
     clone() { return makePosition(x, y, z, distance) },
+    floored() { return makePosition(Math.floor(x), Math.floor(y), Math.floor(z), distance) },
     offset(dx, dy, dz) { return makePosition(x + dx, y + dy, z + dz, distance) },
     plus(vector) { return this.offset(vector.x, vector.y, vector.z) },
     distanceTo() { return distance },

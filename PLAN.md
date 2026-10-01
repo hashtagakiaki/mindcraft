@@ -298,6 +298,8 @@ Scheduling: eval apply/rollbackの旧process所有確認とprepare overlay適応
 - [ ] Task 8: 全workflowの検証をrunner・eval準備/切替へ組み込む
   Writes:
   - tests/run-tests.cjs
+  - tests/interaction_confirmation.test.cjs（overlay navigationの実position契約）
+  - tests/mining_integration.test.cjs（関連caller mock監査、必要時のみ）
   - tests/dependency_root.cjs（export runtime node_modules優先・dev共有input fallback）
   - tests/minecraft_protocol_overrides.test.mjs
   - tests/mining_sync.test.cjs
@@ -401,3 +403,7 @@ Scheduling: eval apply/rollbackの旧process所有確認とprepare overlay適応
 - Wave8 export失敗: bundle自体のnode_modulesは存在するが8fixturesがcheckout相対/絶対のeval dependency pathを採用し、temp export layoutでprotocol fixture import失敗。cwdをruntime rootに固定し、test-only共通resolverでbundle local node_modules優先/dev共有input fallbackへ修正する。互換symlinkだけの成功は受入にせず、新source SHAで再export/fullNode検証。gameplaycodeは変わらないため旧candidateの隔離live検証は独立継続できる。
 
 - Wave8 prepared再検証: navigation fixtureのGoalNear/position mockがoverlayのheuristic/floored契約を満たさず成功経路がfalse、try外baseline例外でdoor intervalが残りrunner未終了。source runner mockを実API互換に補完し、eval overlay baseline評価を既存try/finally内へ移して例外時cleanupを保持する。source workerはtests/run-tests.cjs、eval workerは既存overlay/testsを所有し、新SHAで再pin/export/fullNodeを必須とする。失敗runは成功と数えず専用PID/tempを回収する。
+
+- Wave8 navigation追加観測: GoalNear補完後もgoToPlayerのGoalFollow mockにheuristic欠落がありprepared成功navigationがfalse。eval finally修正でrunnerはexit1しinterval leakは解消。repin反復前にsource workerが全fixture goal APIを監査し、temp prepared runtimeへ変更済testのみコピーしてoverlay込み全suiteを事前検証する。最終受入はpush済み新SHAの再exportとする。
+
+- Wave8 caller mock監査追加: prepared navigation成功後、interaction fixture独自makePositionにもfloored欠落がありwater bucket pickupがfalse。interaction/mining integration fixtureのoverlay navigation callerを監査し実API互換を保持する。成功条件は変更せずsource/prepared全suiteを再確認する。
