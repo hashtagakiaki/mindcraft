@@ -14,7 +14,7 @@ Acceptance criteria:
 - 保存・停止・再計画・終了の観測結果を区別する。今回のように、正常作業後の再起動と中断失敗を同じ理由として集計しない。
 
 Constraints:
-- 今回は計画の改訂だけ。ユーザーが親による直接PLAN.md執筆を許可したため、親が編集する。feature実装・稼働bot操作・bundle切替は行わない。
+- ユーザーの$execによりsource/evalの実装と隔離検証を実行する。親は計画更新・検証・commitを担当し、task実装はLuna workerへ委任する。稼働bot操作・manual pin変更・bundle切替は実施しない。
 - source ownerは`hashtagakiaki/mindcraft`の`autonomy`、運用code ownerは`hashtagakiaki/mindcraft-eval`。各repoのAGENTS.mdを優先し、変更はown originへcommit/pushする。
 - canonical運用pathは`../play/config.json`。manual source pinはeval pinと独立する。計画時の稼働pinは`d34d12b1352ebc667b60e6f19a66f5ac05c1ddd9`という過去観測で、実行時には再確認する。
 - live play 40973/8098、tmux、world、Ollamaを開発検証で操作しない。依存は`../mindcraft-eval/runtime/upstream/node_modules`をread-only入力として使い、npm install/ciを行わない。credential、会話全文、world、runtimeをGitへ追加しない。
@@ -93,7 +93,7 @@ Full verification:
 
 ## Wave 1
 
-- [ ] Task 1: 中断・在庫同期・process回収の安全な境界を隔離実験で確定する
+- [x] Task 1: 中断・在庫同期・process回収の安全な境界を隔離実験で確定する
   Writes:
   - tests/shutdown_experiments.cjs
   - PLAN.md
@@ -312,3 +312,5 @@ Full verification:
 - 2026-10-02: 先の調査でwatchdog2回と精錬成功後再起動2回を区別。最後の!stop成功と後続newAction失敗を記録した。
 - 2026-10-02: Lunaがsource/runtime/eval全体を監査し、通常skill成功後の意図的再接続はsmeltのみと確認した。
 - 2026-10-02: ユーザーの「再接続は最終手段」に従い、親が直接全体計画を改訂。接続維持の停止・観測・有限再計画を主目的とし、終了/再接続は停止不能・接続喪失・明示操作に限定した。feature/live変更なし。
+
+- 2026-10-02 Wave1検証: Mineflayer 1.21.1のopenFurnace待機はdisconnect/interrupt flagではsettleせず、遅延clickはflag後にも送信された。raceの完了を操作停止と扱わず、旧bodyのsettleを新操作の開始条件にする。close後の遅延slot更新を観測し、既存craft fenceはfull window_itemsと応答確認が必要、statisticsだけでは在庫確定できないと確認した。専用Node process groupのTERM/KILLと消滅確認、tempdir回収は成功。既存起動にはIPCがなく、追加する場合は明示的な新契約とする。Verify exit 0、cleanup complete=true。
