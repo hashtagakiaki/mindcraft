@@ -481,6 +481,7 @@ async function testFarm(root) {
 }
 
 async function main() {
+  execFileSync(node, [path.join(__dirname, 'minecraft_protocol_overrides.test.mjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'place_store.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'place_rpc.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'place_actions.test.cjs')], { stdio: 'inherit' })
