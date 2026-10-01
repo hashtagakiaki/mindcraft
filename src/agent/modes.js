@@ -2,8 +2,19 @@ import * as skills from './library/skills.js';
 import * as world from './library/world.js';
 import * as mc from '../utils/mcdata.js';
 import settings from './settings.js'
-import convoManager from './conversation.js';
 import { isMiningProtected } from './library/mining_sync.js';
+
+const UNSTUCK_RECOVERY_TIMEOUT_MINUTES = 0.25;
+const NON_MOVEMENT_ACTION_PHASES = new Set([
+    'generating',
+    'staging',
+    'linting',
+    'waiting-for-smelting',
+    'furnace-inventory-baseline',
+    'confirming-furnace-snapshot',
+    'confirming-player-inventory',
+    'confirming-player-inventory-after-stop',
+]);
 
 async function say(agent, message) {
     agent.bot.modes.behavior_log += message + '\n';
@@ -107,6 +118,15 @@ const modes_list = [
                 return; // don't get stuck when idle
             }
             const bot = agent.bot;
+            const phase = agent.actions.currentAction?.phase;
+            if (NON_MOVEMENT_ACTION_PHASES.has(phase) || phase?.startsWith('furnace-') ||
+                phase === 'opening-furnace' || phase?.startsWith('collecting-furnace-')) {
+                this.prev_location = bot.entity.position.clone();
+                this.stuck_time = 0;
+                this.prev_dig_block = bot.targetDigBlock;
+                this.last_time = Date.now();
+                return;
+            }
             const cur_dig_block = bot.targetDigBlock;
             if (isMiningProtected(bot)) {
                 this.stuck_time = 0;
@@ -131,11 +151,9 @@ const modes_list = [
                 say(agent, 'I\'m stuck!');
                 this.stuck_time = 0;
                 execute(this, agent, async () => {
-                    const crashTimeout = setTimeout(() => { agent.cleanKill("Got stuck and couldn't get unstuck") }, 10000);
                     await skills.moveAway(bot, 5);
-                    clearTimeout(crashTimeout);
-                    say(agent, 'I\'m free.');
-                });
+                    if (!bot.interrupt_code) say(agent, 'I\'m free.');
+                }, UNSTUCK_RECOVERY_TIMEOUT_MINUTES, 'stuck');
             }
             this.last_time = Date.now();
         },
@@ -311,30 +329,75 @@ const modes_list = [
     }
 ];
 
-async function execute(mode, agent, func, timeout=-1) {
+async function execute(mode, agent, func, timeout=-1, stopReason=null) {
     if (agent.self_prompter.isActive())
         agent.self_prompter.stopLoop();
     let interrupted_action = agent.actions.currentActionLabel;
+    const interruptedActionId = agent.actions.currentAction?.id ?? null;
+    const intentEpoch = agent.actions.intentEpoch;
+    let stopResult = null;
+    let code_return = null;
     mode.active = true;
-    let code_return = await agent.actions.runAction(`mode:${mode.name}`, async () => {
-        await func();
-    }, { timeout });
-    mode.active = false;
-    console.log(`Mode ${mode.name} finished executing, code_return: ${code_return.message}`);
+    try {
+        if (stopReason && interruptedActionId != null) {
+            stopResult = await agent.actions.stop(stopReason);
+            if (!stopResult.stopped || agent.actions.userStopped || agent.actions.intentEpoch !== intentEpoch) {
+                if (mode.name === 'unstuck') {
+                    try {
+                        agent.onRecoveryResult?.({
+                            eventId: agent.actions.nextRecoveryEventId?.(),
+                            kind: 'unstuck', interruptedAction: interrupted_action, interruptedActionId,
+                            reason: stopResult.reason || 'stuck',
+                            recoveryActionId: null, stopResult, recoveryResult: null
+                        });
+                    } catch (error) { console.warn('Unstuck result hook failed:', error); }
+                }
+                return null;
+            }
+        }
+        try {
+            code_return = await agent.actions.runAction(`mode:${mode.name}`, async () => {
+                const context = agent.actions.getCancellationContext();
+                if (context) agent.actions.setPhase(`recovering:${mode.name}`, context.actionId);
+                await func();
+            }, { timeout });
+        } catch (error) {
+            if (mode.name !== 'unstuck') throw error;
+            code_return = {
+                success: false, message: error?.stack || String(error),
+                interrupted: false, timedout: false, reason: 'error', actionId: null,
+            };
+        }
+        console.log(`Mode ${mode.name} finished executing, code_return: ${code_return.message}`);
+        if (mode.name === 'unstuck') {
+            try {
+                agent.onRecoveryResult?.({
+                    eventId: agent.actions.nextRecoveryEventId?.(),
+                    kind: 'unstuck', interruptedAction: interrupted_action, interruptedActionId,
+                    reason: stopResult?.reason || code_return.reason || 'stuck',
+                    recoveryActionId: code_return.actionId, stopResult, recoveryResult: code_return
+                });
+            } catch (error) { console.warn('Unstuck result hook failed:', error); }
+        }
+    } finally {
+        mode.active = false;
+    }
 
     let should_reprompt = 
+        mode.name !== 'unstuck' && // unstuck reports through the bounded recovery coordinator
         interrupted_action && // it interrupted a previous action
         !agent.actions.resume_func && // there is no resume function
         !agent.self_prompter.isActive() && // self prompting is not on
+        code_return?.success && // failed recovery should not trigger another plan
         !code_return.interrupted; // this mode action was not interrupted by something else
 
     if (should_reprompt) {
         // auto prompt to respond to the interruption
-        let role = convoManager.inConversation() ? agent.last_sender : 'system';
         let logs = agent.bot.modes.flushBehaviorLog();
-        agent.handleMessage(role, `(AUTO MESSAGE)Your previous action '${interrupted_action}' was interrupted by ${mode.name}.
+        agent.handleMessage('system', `(AUTO MESSAGE)Your previous action '${interrupted_action}' was interrupted by ${mode.name}.
         Your behavior log: ${logs}\nRespond accordingly.`);
     }
+    return code_return;
 }
 
 let _agent = null;

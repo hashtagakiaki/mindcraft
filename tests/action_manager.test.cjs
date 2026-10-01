@@ -29,6 +29,7 @@ async function main() {
     let active = 0
     let maximum = 0
     let cleanKills = 0
+    const cleanKillMessages = []
     let selfPrompterStops = 0
     const interruptGate = deferred()
     const agent = {
@@ -38,7 +39,7 @@ async function main() {
       clearBotLogs() { this.bot.output = ''; this.bot.interrupt_code = false },
       requestInterrupt() { this.bot.interrupt_code = true; interruptGate.resolve() },
       history: { add() {} },
-      cleanKill() { cleanKills++ }
+      cleanKill(message) { cleanKills++; cleanKillMessages.push(message) }
     }
     const manager = new ActionManager(agent)
 
@@ -142,6 +143,7 @@ async function main() {
     }, { timeout: 0 })
     await until(() => manager.executing)
     const timedId = manager.actionId
+    assert.equal(manager.setPhase('generating', timedId), true)
     const savedSetTimeout = global.setTimeout
     const savedClearTimeout = global.clearTimeout
     const timers = []
@@ -156,15 +158,21 @@ async function main() {
       await Promise.resolve()
       watchdog = timers.find(timer => timer.delay === 10000)
       assert.ok(watchdog, 'unresponsive action uses the existing ten-second bound')
+      assert.equal(manager.setPhase('opening-furnace', timedId), true, 'stop cleanup can update the actual phase without losing the requested phase')
       watchdog.callback()
       await timeoutPromise
       assert.equal(cleanKills, 1)
+      assert.match(cleanKillMessages[0], /stopRequestedPhase=generating/)
+      assert.match(cleanKillMessages[0], /watchdogAtPhase=opening-furnace/)
       assert.equal(manager.executing, true, 'a mock cleanKill does not pretend the old body exited')
       timeoutGate.resolve()
       global.setTimeout = savedSetTimeout
       global.clearTimeout = savedClearTimeout
       const timedResult = await timed
       assert.equal(timedResult.reason, 'timeout')
+      assert.equal(timedResult.stopRequestedPhase, 'generating')
+      assert.equal(timedResult.watchdogAtPhase, 'opening-furnace')
+      assert.equal(timedResult.actionPhase, 'opening-furnace')
     } finally {
       global.setTimeout = savedSetTimeout
       global.clearTimeout = savedClearTimeout

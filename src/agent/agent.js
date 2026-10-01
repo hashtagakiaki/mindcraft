@@ -19,12 +19,47 @@ import { Task } from './tasks/tasks.js';
 import { speak } from './speak.js';
 import { log, validateNameFormat, handleDisconnection } from './connection_handler.js';
 
+const MAX_AUTOMATIC_RECOVERY_PLANS = 2;
+const MAX_RECOVERY_OUTPUT_CHARS = 500;
+const MAX_RECOVERY_EVENTS = 128;
+const RECOVERY_NON_REPLAN_REASONS = new Set(['user', 'user-stop', 'superseded', 'death', 'management', 'inventory-unconfirmed']);
+
+function inventorySummary(bot) {
+    if (bot?.inventoryUnconfirmed) return 'unknown (inventory state is unconfirmed)';
+    try {
+        if (typeof bot?.inventory?.items !== 'function') return 'unknown (inventory view unavailable)';
+        const counts = new Map();
+        for (const item of bot.inventory.items()) counts.set(item.name || String(item.type), (counts.get(item.name || String(item.type)) || 0) + item.count);
+        return [...counts.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([name, count]) => `${name} x${count}`).join(', ') || 'empty';
+    } catch { return 'unknown (inventory view unavailable)'; }
+}
+
+function positionSummary(bot) {
+    const position = bot?.entity?.position;
+    if (!position || ![position.x, position.y, position.z].every(Number.isFinite)) return 'unknown';
+    return `x=${position.x.toFixed(2)}, y=${position.y.toFixed(2)}, z=${position.z.toFixed(2)}`;
+}
+
+function actionResultOutput(event) {
+    const result = event.actionResult || event.stopResult?.actionResult || event.recoveryResult;
+    if (!result?.message) return 'none available';
+    const message = String(result.message);
+    return message.length > MAX_RECOVERY_OUTPUT_CHARS
+        ? `${message.slice(0, MAX_RECOVERY_OUTPUT_CHARS / 2)} ... ${message.slice(-MAX_RECOVERY_OUTPUT_CHARS / 2)}`
+        : message;
+}
+
 export class Agent {
     async start(load_mem=false, init_message=null, count_id=0) {
         this.last_sender = null;
         this.count_id = count_id;
         this._disconnectHandled = false;
         this._userIntentGeneration = 0;
+        this._messageGeneration = 0;
+        this._recoverySeen = new Set();
+        this._activeRecoveryId = null;
+        this._recoveryPromptCommand = false;
+        this._recoveryAdmissionId = null;
 
         // Initialize components
         this.actions = new ActionManager(this);
@@ -277,11 +312,139 @@ export class Agent {
         convoManager.endAllConversations();
     }
 
-    async handleMessage(source, message, max_responses=null) {
+    onRecoveryResult(event) {
+        const eventId = event.eventId ?? this.actions.nextRecoveryEventId();
+        if (this._recoverySeen.has(eventId)) return false;
+        this._recoverySeen.add(eventId);
+        if (this._recoverySeen.size > MAX_RECOVERY_EVENTS) this._recoverySeen.delete(this._recoverySeen.values().next().value);
+
+        const reason = event.reason || event.stopResult?.reason || event.actionResult?.reason || event.recoveryResult?.reason || 'unknown';
+        if (this.actions.userStopped || RECOVERY_NON_REPLAN_REASONS.has(reason)) return false;
+        if (event.stopResult && !event.stopResult.stopped) return false;
+        if (this.actions.recoveryPaused && this._activeRecoveryId) return false;
+
+        this.actions.pauseForRecovery();
+        this.self_prompter?.stopForRecovery();
+        const recoveryId = `recovery-${eventId}`;
+        this._activeRecoveryId = recoveryId;
+        const attempts = this.actions.recordRecoveryAttempt();
+        if (this.bot?.inventoryUnconfirmed) {
+            this._reportRecoveryPaused('Inventory state is unconfirmed; no recovery action was started. Confirm inventory state or use explicit !restart as a last resort.');
+            return true;
+        }
+        if (attempts > MAX_AUTOMATIC_RECOVERY_PLANS) {
+            this._reportRecoveryPaused(`Automatic recovery limit (${MAX_AUTOMATIC_RECOVERY_PLANS}) reached after ${reason}. The connection is still active; waiting for an explicit instruction.`);
+            return true;
+        }
+        void this._launchRecoveryPrompt(event, recoveryId, attempts).catch(error => {
+            console.error('Recovery prompt failed:', error);
+            this._reportRecoveryPaused(`Recovery planning failed (${error?.message || String(error)}). The connection is still active; waiting for an explicit instruction.`);
+        });
+        return true;
+    }
+
+    onRecoveryPlanActionStarted({ recoveryId }) {
+        if (recoveryId === this._activeRecoveryId) this._recoveryActionStartedId = recoveryId;
+    }
+
+    onRecoveryPlanActionSettled(event) {
+        queueMicrotask(() => {
+            void this._finishRecoveryPlanAction(event).catch(error => {
+                console.error('Recovery action completion failed:', error);
+                this._reportRecoveryPaused(`Recovery action completion could not be verified (${error?.message || String(error)}). Waiting for an explicit instruction.`);
+            });
+        });
+    }
+
+    async _launchRecoveryPrompt(event, recoveryId, attempts) {
+        if (this.actions.userStopped || recoveryId !== this._activeRecoveryId) return false;
+        if (this.bot?.inventoryUnconfirmed) {
+            this._reportRecoveryPaused('Inventory state is unconfirmed; no recovery action was started. Confirm inventory state or use explicit !restart as a last resort.');
+            return false;
+        }
+        const reason = event.reason || event.stopResult?.reason || event.actionResult?.reason || event.recoveryResult?.reason || 'unknown';
+        const phase = event.actionResult?.actionPhase || event.stopResult?.actionPhase || event.recoveryResult?.actionPhase || event.actionResult?.phase || event.stopResult?.phase || event.recoveryResult?.phase || 'unknown';
+        const prompt = `A previous action stopped safely and needs one bounded recovery plan.\n` +
+            `Reason: ${reason}; phase: ${phase}; automatic recovery plan ${attempts}/${MAX_AUTOMATIC_RECOVERY_PLANS}.\n` +
+            `Interrupted action: ${event.interruptedAction || 'unknown'} (id ${event.interruptedActionId ?? 'unknown'}).\n` +
+            `Observed position: ${positionSummary(this.bot)}.\n` +
+            `Current inventory view: ${inventorySummary(this.bot)}.\n` +
+            `Partial action output: ${actionResultOutput(event)}\n` +
+            `Make one safe next plan from this observed state. Do not repeat the same failed operation without new evidence. Do not use !restart; the Minecraft connection is active.`;
+        const generation = ++this._messageGeneration;
+        this._recoveryActionStartedId = null;
+        const usedCommand = await this.handleMessage('system', prompt, 1, { recoveryId, generation });
+        if (recoveryId === this._activeRecoveryId && generation === this._messageGeneration && !this._recoveryActionStartedId) {
+            this._reportRecoveryPaused(usedCommand
+                ? 'Recovery response did not start a new action. The connection is still active; waiting for an explicit instruction.'
+                : 'No recovery action was proposed. The connection is still active; waiting for an explicit instruction.');
+        }
+        return usedCommand;
+    }
+
+    async _finishRecoveryPlanAction(event) {
+        if (event.recoveryId !== this._activeRecoveryId || this.actions.userStopped) return;
+        if (this.bot?.inventoryUnconfirmed) {
+            this.actions.pauseForRecovery();
+            this._reportRecoveryPaused('Inventory state became unconfirmed during recovery; no further action was started. Confirm state or use explicit !restart as a last resort.');
+            return;
+        }
+        if (event.progressObserved) {
+            this.actions.clearRecoveryAfterProgress();
+            this._activeRecoveryId = null;
+            this._recoveryActionStartedId = null;
+            return;
+        }
+        const result = event.result || {};
+        const reason = result.reason || (result.success ? 'no-observed-progress' : 'recovery-action-failed');
+        if (RECOVERY_NON_REPLAN_REASONS.has(reason)) {
+            this._activeRecoveryId = null;
+            return;
+        }
+        const attempts = this.actions.recordRecoveryAttempt();
+        const nextEvent = {
+            eventId: `followup-${event.recoveryId}-${event.actionId}`,
+            kind: 'recovery-followup',
+            reason,
+            interruptedAction: event.actionLabel,
+            interruptedActionId: event.actionId,
+            actionResult: result,
+            stopResult: null,
+        };
+        if (attempts > MAX_AUTOMATIC_RECOVERY_PLANS) {
+            this._reportRecoveryPaused(`Automatic recovery limit (${MAX_AUTOMATIC_RECOVERY_PLANS}) reached after ${reason}. No observed position or inventory progress; the connection is still active and waiting for an explicit instruction.`);
+            return;
+        }
+        await this._launchRecoveryPrompt(nextEvent, event.recoveryId, attempts);
+    }
+
+    _reportRecoveryPaused(message) {
+        if (this._recoveryReportId === this._activeRecoveryId) return;
+        this._recoveryReportId = this._activeRecoveryId;
+        const report = `${message}\nCurrent position: ${positionSummary(this.bot)}. Current inventory view: ${inventorySummary(this.bot)}.`;
+        console.warn(report);
+        void this.openChat(report).catch(error => console.error('Recovery status report failed:', error));
+    }
+
+    async handleMessage(source, message, max_responses=null, internalOptions={}) {
         const isHumanMessage = !!source && source !== 'system' && source !== this.name && !convoManager.isOtherAgent(source);
-        if (isHumanMessage) this._userIntentGeneration = (this._userIntentGeneration || 0) + 1;
-        const generation = this._userIntentGeneration || 0;
-        const isCurrent = () => generation === (this._userIntentGeneration || 0);
+        const incomingCommand = isHumanMessage && typeof message === 'string' ? containsCommand(message) : null;
+        const isUserStop = isHumanMessage && incomingCommand === '!stop';
+        const isUserStfu = isHumanMessage && incomingCommand === '!stfu';
+        const isHumanIntent = isHumanMessage && !!message && !isUserStop && !isUserStfu &&
+            (!incomingCommand || (commandExists(incomingCommand) && isAction(incomingCommand)));
+        let generation = internalOptions.generation ?? this._messageGeneration;
+        if (isHumanIntent) {
+            this._userIntentGeneration = (this._userIntentGeneration || 0) + 1;
+            generation = ++this._messageGeneration;
+            this._activeRecoveryId = null;
+            this._recoveryReportId = null;
+            this.actions.beginUserIntent();
+        } else if (isUserStop) {
+            generation = ++this._messageGeneration;
+        }
+        const recoveryId = internalOptions.recoveryId || null;
+        const isCurrent = () => generation === this._messageGeneration && (!recoveryId || recoveryId === this._activeRecoveryId);
         await this.checkTaskDone();
         if (!isCurrent()) return false;
         if (!source || !message) {
@@ -303,17 +466,13 @@ export class Agent {
         if ((self_prompt || from_other_bot) && this.actions.userStopped)
             return false;
 
-        if (isHumanMessage) {
-            const incomingCommand = containsCommand(message);
-            const isStopCommand = incomingCommand === '!stop';
-            const isShutUpCommand = incomingCommand === '!stfu';
-            if (!isStopCommand && !isShutUpCommand) {
-                this.actions.beginUserIntent();
-                if (this.actions.executing) {
-                    const stopped = await this.actions.stop('superseded');
-                    if (!isCurrent() || !stopped.stopped) return false;
-                }
-            }
+        if (isHumanIntent && this.actions.executing) {
+            const stopped = await this.actions.stop('superseded');
+            if (!isCurrent() || !stopped.stopped) return false;
+        }
+        if (isUserStop) {
+            this._activeRecoveryId = null;
+            this._recoveryReportId = null;
         }
 
         if (!self_prompt && !from_other_bot) { // from user, check for forced commands
@@ -329,7 +488,18 @@ export class Agent {
                     // add the preceding message to the history to give context for newAction
                     this.history.add(source, message);
                 }
-                let execute_res = await executeCommand(this, message);
+                let execute_res;
+                const previousRecoveryCommand = this._recoveryPromptCommand;
+                const previousAdmissionId = this._recoveryAdmissionId;
+                if (recoveryId && isAction(user_command_name)) {
+                    this._recoveryPromptCommand = true;
+                    this._recoveryAdmissionId = recoveryId;
+                }
+                try { execute_res = await executeCommand(this, message); }
+                finally {
+                    this._recoveryPromptCommand = previousRecoveryCommand;
+                    this._recoveryAdmissionId = previousAdmissionId;
+                }
                 if (!isCurrent()) return false;
                 if (execute_res)
                     this.routeResponse(source, execute_res);
@@ -345,7 +515,7 @@ export class Agent {
         if (!isCurrent()) return false;
         console.log('received message from', source, ':', message);
 
-        const checkInterrupt = () => this.self_prompter.shouldInterrupt(self_prompt) || this.shut_up || convoManager.responseScheduledFor(source) || this.actions.userStopped;
+        const checkInterrupt = () => (!recoveryId && this.self_prompter.shouldInterrupt(self_prompt)) || this.shut_up || convoManager.responseScheduledFor(source) || this.actions.userStopped;
         
         let behavior_log = this.bot.modes.flushBehaviorLog().trim();
         if (behavior_log.length > 0) {
@@ -391,6 +561,12 @@ export class Agent {
                     continue;
                 }
 
+                if (command_name === '!restart') {
+                    if (recoveryId) this._reportRecoveryPaused('Automatic recovery cannot restart the agent. The connection is active and waiting for an explicit user instruction.');
+                    else console.warn('Ignored model-generated !restart; only an explicit human !restart command may restart the agent.');
+                    break;
+                }
+
                 if (checkInterrupt()) break;
                 this.self_prompter.handleUserPromptedCmd(self_prompt, isAction(command_name));
 
@@ -412,7 +588,18 @@ export class Agent {
                         this.routeResponse(source, pre_message);
                 }
 
-                let execute_res = await executeCommand(this, res);
+                let execute_res;
+                const previousRecoveryCommand = this._recoveryPromptCommand;
+                const previousAdmissionId = this._recoveryAdmissionId;
+                if (recoveryId && isAction(command_name)) {
+                    this._recoveryPromptCommand = true;
+                    this._recoveryAdmissionId = recoveryId;
+                }
+                try { execute_res = await executeCommand(this, res); }
+                finally {
+                    this._recoveryPromptCommand = previousRecoveryCommand;
+                    this._recoveryAdmissionId = previousAdmissionId;
+                }
                 if (!isCurrent()) return false;
 
                 console.log('Agent executed:', command_name, 'and got:', execute_res);

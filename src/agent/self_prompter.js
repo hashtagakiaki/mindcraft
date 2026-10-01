@@ -123,6 +123,11 @@ export class SelfPrompter {
         await this.stopLoop();
     }
 
+    stopForRecovery() {
+        this.interrupt = true;
+        this.state = STOPPED;
+    }
+
     async pause() {
         this.interrupt = true;
         this.state = PAUSED;

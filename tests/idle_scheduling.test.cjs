@@ -57,6 +57,7 @@ async function main() {
     let generationAtPrompt = null
     agent.name = 'FixtureBot'
     agent._userIntentGeneration = 0
+    agent._messageGeneration = 0
     agent.shut_up = false
     agent.checkTaskDone = async () => false
     agent.actions = {
@@ -82,7 +83,7 @@ async function main() {
     agent.prompter = {
       promptConvo() {
         promptCalls++
-        generationAtPrompt = agent._userIntentGeneration
+        generationAtPrompt = agent._messageGeneration
         return promptGate.promise
       }
     }
@@ -98,7 +99,7 @@ async function main() {
       const stopResponse = await agent.handleMessage('FixturePlayer', '!stop', 1)
       assert.equal(agent.actions.userStopped, true, '!stop sets the action gate')
       assert.equal(agent.actions.stopReason, 'user')
-      assert.ok(agent._userIntentGeneration > oldGeneration, 'new human instruction invalidates the pending response')
+      assert.ok(agent._messageGeneration > oldGeneration, '!stop invalidates the pending response without opening a user-intent gate')
       const suppressedSystem = await agent.handleMessage('system', 'resume old goal', 1)
       assert.equal(suppressedSystem, false, 'system-driven goal cannot restart after user stop')
       promptGate.resolve('!newAction("stale response")')

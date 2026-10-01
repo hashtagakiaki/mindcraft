@@ -198,13 +198,15 @@ Scheduling: Wave1/2の境界とAPI確認後、Wave3と並行できる。furnace/
 
 Scheduling: modesとrecovery fixtureはWave2/3の取消API/生成phase確認後に先行できる。agent/action_managerへの再計画結線はWave4受入後に実装する（同じ炉workerを再利用し、fixture failure repairとの順序を調整）。Task6 agent/manager結線と同時に同fileへ書かない。
 
-- [ ] Task 5: 詰まり・反復・時間切れを停止結果と有限の再計画へ戻す
+- [x] Task 5: 詰まり・反復・時間切れを停止結果と有限の再計画へ戻す
   Writes:
   - src/agent/modes.js
   - src/agent/action_manager.js
   - src/agent/agent.js
   - src/agent/self_prompter.js
   - tests/recovery_replanning.test.cjs
+  - tests/idle_scheduling.test.cjs（Task5 gateと現intent generationの互換検証）
+  - tests/action_manager.test.cjs（stop要求時phaseとwatchdog時phaseの識別検証）
   Reads:
   - src/agent/library/skills.js
   - src/agent/library/world.js
@@ -290,6 +292,7 @@ Scheduling: eval apply/rollbackの旧process所有確認とprepare overlay適応
 - [ ] Task 8: 全workflowの検証をrunner・eval準備/切替へ組み込む
   Writes:
   - tests/run-tests.cjs
+  - tests/shutdown_experiments.cjs（旧baseline ActionManager timer呼出しを現action契約に合わせる）
   - README.md
   - AGENTS.md
   - ../mindcraft-eval/scripts/prepare_mindcraft_play.py
@@ -352,3 +355,15 @@ Scheduling: eval apply/rollbackの旧process所有確認とprepare overlay適応
 - Wave7親lifecycle scope: supervisor workerがmindcraft.js/mindserver.js/place_store.js/place_store.test.cjsを所有し、管理transport workerはmindserver.jsを凍結する。shutdown受付gate→全bot/group終了await→store queue drain/lock解放→transport終了を一本化。終了未確認ならlockと親を維持して再試行可能にする。Task5 agent/manager結線の後にTask6同fileへ渡し、Task7 child結線は最後に行う。
 
 - Wave4受入: 実1.21.1 furnace/inventory pluginで成功/不足/部分結果/例外/遅延open・click/取消/外国window/確認欠落を観測。両snapshot確認時だけ次の明示intentを許可、炉欠落+player確認でもgate維持。getSkillDocs両entry復元、取消ログは確認済/未確認を区別。親のfurnace lifecycle/ActionManager再Verify exit 0。実craft sync admissionは確認済、実craft/equip出力はWave8隔離serverで検証する。
+
+- Wave8 baseline experiment修正: Task2後のcurrentAction無指定timer呼出しは無効となった。旧APIの10秒watchdog実験を現action identity/contextで再現するfixtureへ更新し、旧body未settle時の安全性とactual escalationを保つ。
+
+- Wave7 child scheduling: helper workerはowned_cli/Codexの確認後、history.js/init_agent.js/agent_shutdown.test.cjsのhistory・early-start fixtureを先行できる。Agent.shutdown結線はTask5/6のagent/manager受入後に同workerへ渡す。initはconstruct-before-connect＋同期termination gate、標準IPC/Signalを一経路へ渡し、終了中のlate startupでbotを作らない。Historyは要約世代失効・LLM不要final record・最後のsave結果を公開する。
+
+- Wave5検証補足: actual Agent/ActionManager recovery fixtureで参照command・lateLLM・intent race・有限2plans・progress reset・autonomous gate確認。idle fixtureの停止原因を同taskで調査修正する。stop要求時の実phaseとwatchdog状態を別fieldで保存し、生成/炉待機をstop-failed statusで隠さない。
+
+- Wave7 child終了期限: 親の協調shutdown猶予5秒より前に子はstop観測・LLM不要最終saveへ進む。未settle旧bodyはstopped:falseとして保持しowned窓への追加clickをせず接続終了/実child exitで隔離、親はPID/group消滅まで待つ。raceは観測期限だけで停止成功にしない。initが一意exitintent/exitを担当し、Agent.shutdownはcleanup outcomeを返す。cleanKillはinit入口へ委譲する。
+
+- 再接続明示性補足: 通常/recovery/systemのLLM回答で!restartを直接実行しない。literal human forced commandとUI Restart/設定変更を明示経路とし、接続喪失・停止不能fallbackはコード側証拠付き経路を使う。自然言語の「restart不要」promptだけを保証にしない。
+
+- Wave5受入: 実Agent/ActionManager fixturesで2plans上限、LLM-await中autonomous/resume拒否、無進捗停止、normal inventory合計/0.5block以上movementだけbudgetreset、slot分割/jitterはresetしない。参照commandは旧body/intentを変更せず、モデル!restart拒否・literal human!restart維持。unstuck timeoutはmode一経路通知。stopRequestedPhase/watchdogAtPhase/実actionPhaseをstatusと分け、元待機先を保持。idle fixtureの新message generation未初期化がNaNで待機した原因を修正。全focused+workerfullsuite Verify exit0、diffcheck0。
