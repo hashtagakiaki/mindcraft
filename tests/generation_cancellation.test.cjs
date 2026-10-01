@@ -3,6 +3,7 @@
 // Offline Codex adapter fixture. It executes only a temporary fake CLI and
 // owned Node grandchildren; it never calls Codex, Minecraft, or external APIs.
 const assert = require('node:assert/strict')
+const { spawn } = require('node:child_process')
 const { mkdtemp, readFile, readdir, rm, writeFile, chmod } = require('node:fs/promises')
 const fs = require('node:fs')
 const os = require('node:os')
@@ -11,8 +12,11 @@ const { pathToFileURL } = require('node:url')
 
 const nodeBinary = '/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node'
 const sourcePath = path.resolve(__dirname, '../src/models/codex.js')
+const helperPath = path.resolve(__dirname, '../src/process/owned_cli.js')
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 const activeProcessGroups = new Map()
+const activeBotProcesses = new Set()
+const activeHelperProcesses = new Set()
 
 async function waitForFile(file, timeoutMs = 3000) {
   const deadline = Date.now() + timeoutMs
@@ -31,6 +35,19 @@ function isRunning(pid) {
   } catch { return false }
 }
 
+function hasRunningSession(sessionId) {
+  try {
+    return fs.readdirSync('/proc').some(entry => {
+      if (!/^\d+$/.test(entry)) return false
+      try {
+        const stat = fs.readFileSync(`/proc/${entry}/stat`, 'utf8')
+        const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+        return fields[0] !== 'Z' && fields[0] !== 'X' && Number(fields[2]) === sessionId && Number(fields[3]) === sessionId
+      } catch { return false }
+    })
+  } catch { return true }
+}
+
 async function waitForStopped(pids, timeoutMs = 3000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -40,11 +57,291 @@ async function waitForStopped(pids, timeoutMs = 3000) {
   assert.fail(`owned fixture processes are still running: ${pids.filter(isRunning).join(', ')}`)
 }
 
+async function waitForSessionsStopped(sessionIds, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (sessionIds.every(sessionId => !hasRunningSession(sessionId))) return
+    await delay(20)
+  }
+  assert.fail(`owned fixture sessions are still running: ${sessionIds.filter(hasRunningSession).join(', ')}`)
+}
+
 function deferred() {
   let resolve
   let reject
   const promise = new Promise((done, fail) => { resolve = done; reject = fail })
   return { promise, resolve, reject }
+}
+
+function nextMessage(child, predicate, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => finish(new Error('timed out waiting for fixture IPC message')), timeoutMs)
+    const onMessage = message => { if (predicate(message)) finish(null, message) }
+    const onClose = () => finish(new Error('fixture bot closed before expected IPC message'))
+    const finish = (error, value) => {
+      clearTimeout(timeout)
+      child.removeListener('message', onMessage)
+      child.removeListener('close', onClose)
+      error ? reject(error) : resolve(value)
+    }
+    child.on('message', onMessage)
+    child.once('close', onClose)
+  })
+}
+
+function waitForClose(child, timeoutMs = 5000) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve()
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => finish(new Error('timed out waiting for fixture bot close')), timeoutMs)
+    const onClose = () => finish()
+    const finish = error => {
+      clearTimeout(timeout)
+      child.removeListener('close', onClose)
+      error ? reject(error) : resolve()
+    }
+    child.once('close', onClose)
+  })
+}
+
+async function runSupervisedFixtures(sandbox, tmpRoot, fakeCli) {
+  const botFile = path.join(sandbox, 'fixture-bot.mjs')
+  await writeFile(botFile, `import { pathToFileURL } from 'node:url'
+const { Codex } = await import(pathToFileURL(${JSON.stringify(sourcePath)}).href)
+const mode = process.argv[2]
+const marker = process.argv[3]
+const controller = new AbortController()
+process.on('message', message => {
+  if (message?.type === 'fixture-cancel') {
+    controller.abort('fixture cancellation')
+    process.send?.({ type: 'fixture-cancel-received' })
+  }
+})
+try {
+  const response = await new Codex().sendRequest([marker], mode, '***', { signal: controller.signal })
+  process.send?.({ type: 'fixture-result', ok: true, response }, () => process.disconnect())
+} catch (error) {
+  process.send?.({ type: 'fixture-result', ok: false, name: error.name, message: error.message }, () => process.disconnect())
+}
+`)
+  const env = { ...process.env, TMPDIR: tmpRoot, MINDCRAFT_CODEX_BIN: fakeCli, MINDCRAFT_CODEX_TIMEOUT_MS: '1500' }
+  const observations = {}
+
+  const spawnBot = (mode, marker) => {
+    const bot = spawn(nodeBinary, [botFile, mode, marker], {
+      env,
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc']
+    })
+    activeBotProcesses.add(bot)
+    bot.on('message', message => {
+      if (message?.type === 'mindcraft:owned-process' && Number.isSafeInteger(message.pid) && message.pid > 1) {
+        activeProcessGroups.set(message.pid, [message.pid])
+      }
+    })
+    bot.once('close', () => activeBotProcesses.delete(bot))
+    return bot
+  }
+  const readRegistration = async bot => {
+    const registration = await nextMessage(bot, message => message?.type === 'mindcraft:owned-process')
+    assert.equal(registration.role, 'cli')
+    assert.ok(Number.isSafeInteger(registration.pid) && registration.pid > 1)
+    assert.equal(typeof registration.requestId, 'string')
+    activeProcessGroups.set(registration.pid, [registration.pid])
+    return registration
+  }
+  const sendAck = (bot, registration, accepted) => bot.send({
+    type: 'mindcraft:owned-process-ack',
+    role: 'cli',
+    pid: registration.pid,
+    requestId: registration.requestId,
+    accepted
+  })
+  const readResult = bot => nextMessage(bot, message => message?.type === 'fixture-result')
+
+  // A matching directory prefix alone is insufficient authority for deletion.
+  {
+    const fakeDirectory = path.join(sandbox, 'mindcraft-codex-fake-prefix')
+    await fs.promises.mkdir(fakeDirectory)
+    const sentinel = path.join(fakeDirectory, 'keep-me')
+    await writeFile(sentinel, 'unowned fixture directory')
+    const helper = spawn(nodeBinary, [helperPath, 'unowned-request', fakeCli, '[]', fakeDirectory], {
+      cwd: fakeDirectory,
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc']
+    })
+    activeHelperProcesses.add(helper)
+    helper.once('close', () => activeHelperProcesses.delete(helper))
+    await new Promise(resolve => helper.once('spawn', resolve))
+    helper.kill('SIGTERM')
+    await waitForClose(helper)
+    assert.equal(await readFile(sentinel, 'utf8'), 'unowned fixture directory')
+    await rm(fakeDirectory, { recursive: true, force: true })
+    observations.fakeTempPrefixDidNotAuthorizeDelete = true
+  }
+
+  // The bot dies before parent ACK: the unstarted helper must see IPC EOF and
+  // leave no executable Codex process or request marker behind.
+  {
+    const marker = path.join(sandbox, 'pre-ack-cli-marker')
+    const bot = spawnBot('pre-ack', marker)
+    const registration = await readRegistration(bot)
+    const closed = waitForClose(bot)
+    bot.kill('SIGKILL')
+    await closed
+    await waitForStopped([registration.pid])
+    activeProcessGroups.delete(registration.pid)
+    assert.equal(fs.existsSync(marker), false)
+    assert.deepEqual(await readdir(tmpRoot), [], 'bot death before ACK must also clean its request tempdir')
+    observations.botDeathBeforeAck = { helperStopped: true, cliNeverStarted: true }
+  }
+
+  // Explicit denial and cancellation before a deliberately stale accepted ACK
+  // must both fail closed without launching the CLI.
+  {
+    const marker = path.join(sandbox, 'denied-cli-marker')
+    const bot = spawnBot('denied', marker)
+    const registration = await readRegistration(bot)
+    const result = readResult(bot)
+    sendAck(bot, registration, false)
+    const received = await result
+    await waitForClose(bot)
+    await waitForStopped([registration.pid])
+    activeProcessGroups.delete(registration.pid)
+    assert.equal(received.ok, false)
+    assert.match(received.message, /rejected/)
+    assert.equal(fs.existsSync(marker), false)
+    assert.deepEqual(await readdir(tmpRoot), [])
+    observations.deniedRegistration = { helperStopped: true, cliNeverStarted: true }
+  }
+  {
+    const marker = path.join(sandbox, 'stale-ack-cli-marker')
+    const bot = spawnBot('stale-ack', marker)
+    const registration = await readRegistration(bot)
+    const result = readResult(bot)
+    const cancellationNotice = nextMessage(bot, message => message?.type === 'fixture-cancel-received')
+    bot.send({ type: 'fixture-cancel' })
+    await cancellationNotice
+    sendAck(bot, registration, true)
+    const received = await result
+    await waitForClose(bot)
+    await waitForStopped([registration.pid])
+    activeProcessGroups.delete(registration.pid)
+    assert.equal(received.ok, false)
+    assert.equal(received.name, 'AbortError')
+    assert.equal(fs.existsSync(marker), false)
+    assert.deepEqual(await readdir(tmpRoot), [])
+    observations.cancelBeforeLateAck = { helperStopped: true, staleAckDidNotStartCli: true }
+  }
+
+  // An accepted helper can be cancelled; its leader and TERM-ignoring
+  // grandchild must be gone before the request settles.
+  {
+    const marker = path.join(sandbox, 'accepted-cancel.pids')
+    const bot = spawnBot('accepted-cancel', marker)
+    const registration = await readRegistration(bot)
+    const result = readResult(bot)
+    sendAck(bot, registration, true)
+    const processInfo = JSON.parse(await waitForFile(marker))
+    activeProcessGroups.set(registration.pid, [registration.pid, processInfo.parent, processInfo.child])
+    bot.send({ type: 'fixture-cancel' })
+    const received = await result
+    await waitForClose(bot)
+    await waitForStopped([registration.pid, processInfo.parent, processInfo.child])
+    activeProcessGroups.delete(registration.pid)
+    assert.equal(received.ok, false)
+    assert.equal(received.name, 'AbortError')
+    assert.equal(fs.existsSync(processInfo.dir), false, 'accepted cancellation must await removal of its request tempdir')
+    assert.deepEqual(await readdir(tmpRoot), [], `unexpected request tempdirs remain after accepted cancellation: ${processInfo.dir}`)
+    observations.acceptedCancellation = { helperCliGrandchildStopped: true, tempdirRemoved: true }
+  }
+
+  // A CLI leader can exit before its child. The helper owns the inherited
+  // group and must reap the surviving descendant even without a cancel call.
+  {
+    const marker = path.join(sandbox, 'leader-exit.pids')
+    const bot = spawnBot('leader-exit', marker)
+    const registration = await readRegistration(bot)
+    const result = readResult(bot)
+    sendAck(bot, registration, true)
+    const processInfo = JSON.parse(await waitForFile(marker))
+    activeProcessGroups.set(registration.pid, [registration.pid, processInfo.child])
+    const received = await result
+    await waitForClose(bot)
+    await waitForStopped([registration.pid, processInfo.child])
+    activeProcessGroups.delete(registration.pid)
+    assert.equal(received.ok, false)
+    assert.ok(/no assistant message|exited/.test(received.message))
+    assert.deepEqual(await readdir(tmpRoot), [])
+    observations.cliLeaderExit = { grandchildStoppedBeforeTempdirRemoval: true }
+  }
+  return observations
+}
+
+async function runProcIdentityFixtures(sandbox) {
+  const fixtureDir = path.join(sandbox, 'proc-identity')
+  await fs.promises.mkdir(fixtureDir, { recursive: true })
+  await writeFile(path.join(fixtureDir, 'package.json'), '{"type":"module"}')
+  await writeFile(path.join(fixtureDir, 'proc_mock.js'), `
+import * as fs from 'node:fs'
+let entries = []
+let stats = new Map()
+let errors = new Map()
+export function setProcFixture(nextEntries, nextStats, nextErrors = new Map()) {
+  entries = nextEntries
+  stats = nextStats
+  errors = nextErrors
+}
+export function readdirSync(target, ...args) {
+  return target === '/proc' ? entries : fs.readdirSync(target, ...args)
+}
+export function readFileSync(target, ...args) {
+  if (target.startsWith('/proc/') && target.endsWith('/stat')) {
+    const error = errors.get(target)
+    if (error) throw Object.assign(new Error(error), { code: error })
+    if (!stats.has(target)) throw Object.assign(new Error('gone'), { code: 'ENOENT' })
+    return stats.get(target)
+  }
+  return fs.readFileSync(target, ...args)
+}
+export const writeFileSync = fs.writeFileSync
+`)
+  let source = await readFile(sourcePath, 'utf8')
+  source = source.replace("import { readdirSync, readFileSync, writeFileSync } from 'fs';", "import { readdirSync, readFileSync, writeFileSync } from './proc_mock.js';")
+  source = source.replace('function inspectOwnedSession(', 'export function inspectOwnedSession(')
+  source = source.replace('function ownedSessionExists(', 'export function ownedSessionExists(')
+  const modulePath = path.join(fixtureDir, 'codex-proc-test.mjs')
+  await writeFile(modulePath, source)
+  const procMock = await import(pathToFileURL(path.join(fixtureDir, 'proc_mock.js')).href)
+  const adapter = await import(pathToFileURL(modulePath).href + `?test=${Date.now()}`)
+  const makeStat = (pid, pgid, sid, starttime) => {
+    const fields = Array(20).fill('0')
+    fields[0] = 'S'
+    fields[1] = '1'
+    fields[2] = String(pgid)
+    fields[3] = String(sid)
+    fields[19] = String(starttime)
+    return `${pid} (fixture) ${fields.join(' ')}`
+  }
+
+  const foreignGroup = 700001
+  procMock.setProcFixture(['700001', '700002'], new Map([
+    ['/proc/700001/stat', makeStat(700001, foreignGroup, foreignGroup, 22)],
+    ['/proc/700002/stat', makeStat(700002, foreignGroup, foreignGroup, 33)],
+  ]))
+  const foreignInspection = adapter.inspectOwnedSession(foreignGroup, '11')
+  assert.equal(adapter.ownedSessionExists(foreignGroup, '11'), false,
+    'recycled numeric group with a different leader starttime must be foreign even if it has children')
+  assert.equal(foreignInspection.foreign, true, JSON.stringify(foreignInspection))
+
+  const selfStat = fs.readFileSync('/proc/self/stat', 'utf8')
+  const fields = selfStat.slice(selfStat.lastIndexOf(')') + 2).split(' ')
+  const visibleGroup = Number(fields[2])
+  const inaccessible = `/proc/700003/stat`
+  procMock.setProcFixture(['700003'], new Map(), new Map([[inaccessible, 'EACCES']]))
+  assert.equal(adapter.ownedSessionExists(visibleGroup, '1'), true,
+    'unreadable process stat must remain unknown when kill(0) confirms the process group exists')
+  procMock.setProcFixture(['700004'], new Map([['/proc/700004/stat', 'invalid stat']]))
+  assert.equal(adapter.inspectOwnedSession(visibleGroup, '1').unknown, true,
+    'invalid proc stat must not be interpreted as group disappearance')
+  return { foreignPidReuseNotSignalledOrAwaited: true, unreadableAndMalformedProcStayUnknown: true }
 }
 
 async function loadSourceFixture(source, target, importReplacements, stubs) {
@@ -272,7 +569,10 @@ process.stdin.on('end', () => {
   }
   process.on('SIGTERM', () => {})
   const grandchild = require('node:child_process').spawn(${JSON.stringify(nodeBinary)}, ['-e', "process.on('SIGTERM',()=>{}); require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(()=>{},1000)", path.join(process.cwd(), 'grandchild.pid')], { stdio: 'ignore' })
-  fs.writeFileSync(request.turns[0], JSON.stringify({ parent: process.pid, child: grandchild.pid, dir: process.cwd() }))
+  const stat = fs.readFileSync('/proc/' + process.pid + '/stat', 'utf8')
+  const pgrp = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[2])
+  fs.writeFileSync(request.turns[0], JSON.stringify({ parent: process.pid, child: grandchild.pid, group: pgrp, dir: process.cwd() }))
+  if (mode === 'leader-exit') process.exit(0)
   if (mode === 'blocked') process.stdout.write(JSON.stringify({ type: 'item.started' }) + '\\n')
   if (mode === 'malformed') process.stdout.write('{not-json}\\n')
   setInterval(() => {}, 1000)
@@ -302,11 +602,11 @@ process.stdin.on('end', () => {
     const abortInfo = JSON.parse(await waitForFile(abortMarker))
     const abortDir = abortInfo.dir
     const pids = abortInfo
-    activeProcessGroups.set(pids.parent, [pids.parent, pids.child])
+    activeProcessGroups.set(pids.group, [pids.parent, pids.child])
     controller.abort(new Error('stop generation'))
     await assert.rejects(aborting, error => error.name === 'AbortError' && error.message === 'stop generation')
     await waitForStopped([pids.parent, pids.child])
-    activeProcessGroups.delete(pids.parent)
+    activeProcessGroups.delete(pids.group)
     assert.equal(fs.existsSync(abortDir), false, 'tempdir must be removed after owned process group exits')
     observed.abort = { leaderAndGrandchildStopped: true, tempdirRemovedAfterStop: true }
 
@@ -316,10 +616,10 @@ process.stdin.on('end', () => {
       const rejection = assert.rejects(request, expected)
       const modePids = JSON.parse(await waitForFile(marker))
       const requestDir = modePids.dir
-      activeProcessGroups.set(modePids.parent, [modePids.parent, modePids.child])
+      activeProcessGroups.set(modePids.group, [modePids.parent, modePids.child])
       await rejection
       await waitForStopped([modePids.parent, modePids.child])
-      activeProcessGroups.delete(modePids.parent)
+      activeProcessGroups.delete(modePids.group)
       assert.equal(fs.existsSync(requestDir), false, `${mode} tempdir should be removed after process cleanup`)
       observed[mode] = { leaderAndGrandchildStopped: true, tempdirRemoved: true }
     }
@@ -336,15 +636,35 @@ process.stdin.on('end', () => {
     const visionRejection = assert.rejects(vision, /timed out/, 'coding cancellation signal must not be wired to vision requests')
     visionController.abort()
     const visionPids = JSON.parse(await waitForFile(visionMarker))
-    activeProcessGroups.set(visionPids.parent, [visionPids.parent, visionPids.child])
+    activeProcessGroups.set(visionPids.group, [visionPids.parent, visionPids.child])
     await visionRejection
     await waitForStopped([visionPids.parent, visionPids.child])
-    activeProcessGroups.delete(visionPids.parent)
+    activeProcessGroups.delete(visionPids.group)
     observed.visionUnaffectedByCodingSignal = true
     assert.deepEqual(await readdir(tmpRoot), [], 'all request tempdirs must be removed')
+    observed.supervisedHelper = await runSupervisedFixtures(sandbox, tmpRoot, fakeCli)
+    observed.procIdentity = await runProcIdentityFixtures(sandbox)
     observed.coderPrompter = await runCoderPrompterFixtures(sandbox)
   } finally {
     let cleanupFailure = null
+    const stopTrackedChildren = async children => {
+      const live = [...children].filter(child => child.exitCode === null && child.signalCode === null)
+      for (const child of live) {
+        try { child.kill('SIGTERM') } catch {}
+      }
+      if (live.length) await delay(50)
+      for (const child of live.filter(child => child.exitCode === null && child.signalCode === null)) {
+        try { child.kill('SIGKILL') } catch {}
+      }
+      for (const child of live) {
+        try { await waitForClose(child, 3000) }
+        catch (error) { cleanupFailure ||= error }
+      }
+    }
+    // Stop bots first so IPC disconnect reaches any pre-start helper, then
+    // stop direct helper fixtures before scanning the owned process groups.
+    await stopTrackedChildren(activeBotProcesses)
+    await stopTrackedChildren(activeHelperProcesses)
     const outstandingPids = [...activeProcessGroups.values()].flat()
     for (const groupId of activeProcessGroups.keys()) {
       try { process.kill(-groupId, 'SIGTERM') } catch {}
@@ -356,8 +676,14 @@ process.stdin.on('end', () => {
       }
       try { await waitForStopped(outstandingPids) }
       catch (error) { cleanupFailure = error }
+      try { await waitForSessionsStopped([...activeProcessGroups.keys()]) }
+      catch (error) { cleanupFailure ||= error }
     }
     activeProcessGroups.clear()
+    try {
+      const remaining = await readdir(tmpRoot)
+      if (remaining.length) cleanupFailure ||= new Error(`request tempdirs remain after fixture cleanup: ${remaining.join(', ')}`)
+    } catch (error) { cleanupFailure ||= error }
     if (priorEnv.TMPDIR === undefined) delete process.env.TMPDIR
     else process.env.TMPDIR = priorEnv.TMPDIR
     if (priorEnv.MINDCRAFT_CODEX_BIN === undefined) delete process.env.MINDCRAFT_CODEX_BIN

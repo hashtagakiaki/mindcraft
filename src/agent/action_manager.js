@@ -14,6 +14,7 @@ export class ActionManager {
         this.timeoutEscalations = new Map();
         this.currentAction = null;
         this.userStopped = false;
+        this.shuttingDown = false;
         this.managementPaused = Boolean(agent.managementPaused);
         this.managementIntentRequired = Boolean(agent._managementInterruption);
         this.managementStopFailed = false;
@@ -25,6 +26,7 @@ export class ActionManager {
     }
 
     beginUserIntent() {
+        if (this.shuttingDown) return this.intentEpoch;
         if (this.managementPaused) return this.intentEpoch;
         this.intentEpoch++;
         this.userStopped = false;
@@ -65,6 +67,16 @@ export class ActionManager {
         return this.stop(reason);
     }
 
+    beginShutdown() {
+        if (this.shuttingDown) return this.currentAction ? this.stop('shutdown') : Promise.resolve({ stopped: true, reason: 'shutdown', actionId: null, phase: null });
+        this.shuttingDown = true;
+        this.userStopped = true;
+        this.intentEpoch++;
+        this.cancelResume();
+        this.agent.self_prompter?.stopForRecovery?.();
+        return this.stop('shutdown');
+    }
+
     restoreManagement(meta) {
         if (!meta?.isCurrentConnection?.() || this.managementStopFailed || this.currentAction) return false;
         this.managementPaused = false;
@@ -94,6 +106,7 @@ export class ActionManager {
     }
 
     async resumeAction(actionLabel, actionFn, timeout) {
+        if (this.shuttingDown) return this._rejectedResult('shutdown');
         if (this.managementPaused) return this._rejectedResult('management-paused');
         if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
         if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
@@ -102,6 +115,7 @@ export class ActionManager {
     }
 
     async runAction(actionLabel, actionFn, { timeout, resume = false } = {}) {
+        if (this.shuttingDown) return this._rejectedResult('shutdown');
         if (this.managementPaused) return this._rejectedResult('management-paused');
         if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
         if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
@@ -179,6 +193,7 @@ export class ActionManager {
     }
 
     async _executeResume(actionLabel = null, actionFn = null, timeout = 10) {
+        if (this.shuttingDown) return this._rejectedResult('shutdown');
         const newResume = actionFn != null;
         if (this.managementPaused) return this._rejectedResult('management-paused');
         if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
@@ -209,6 +224,7 @@ export class ActionManager {
             // A stop or newer user instruction invalidates actions that were
             // queued before it. Resume is never allowed to reopen a user stop.
             if (this.managementPaused) return this._rejectedResult('management-paused');
+            if (this.shuttingDown) return this._rejectedResult('shutdown');
             if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
             if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
             if (this.recoveryPaused && !this.isRecoveryAdmission(actionLabel, recoveryAdmissionId)) return this._rejectedResult('recovery-paused');
@@ -218,6 +234,7 @@ export class ActionManager {
                 if (!stopped.stopped) return this._rejectedResult('stop-failed', stopped);
             }
             if (this.managementPaused) return this._rejectedResult('management-paused');
+            if (this.shuttingDown) return this._rejectedResult('shutdown');
             if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
             if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
             if (this.recoveryPaused && !this.isRecoveryAdmission(actionLabel, recoveryAdmissionId)) return this._rejectedResult('recovery-paused');

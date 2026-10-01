@@ -42,6 +42,7 @@ class AgentConnection {
 export function registerAgent(settings, viewer_port) {
     let agentConnection = new AgentConnection(settings, viewer_port);
     agent_connections[settings.profile.name] = agentConnection;
+    return agentConnection;
 }
 
 export function logoutAgent(agentName) {
@@ -49,6 +50,13 @@ export function logoutAgent(agentName) {
         agent_connections[agentName].in_game = false;
         agentsStatusUpdate();
     }
+}
+
+export function unregisterAgent(agentName, expectedConnection = null) {
+    if (!agent_connections[agentName] || (expectedConnection && agent_connections[agentName] !== expectedConnection)) return false;
+    delete agent_connections[agentName];
+    agentsStatusUpdate();
+    return true;
 }
 
 // Initialize the server
@@ -61,6 +69,7 @@ export function createMindServer(host_public = false, port = 8080) {
     placeStoreError = null;
     let placeStoreLifecycle = null;
     let placeRpcClosing = false;
+    let hubClosing = false;
     if (Boolean(settings.place_state_dir) !== Boolean(settings.place_world_id)) {
         placeStoreError = Object.assign(new Error('place_state_dir and place_world_id must be configured together'), { code: 'INVALID_CONFIG' });
         console.error('Place store configuration is incomplete:', placeStoreError.message);
@@ -94,6 +103,10 @@ export function createMindServer(host_public = false, port = 8080) {
         agentsStatusUpdate(socket);
 
         socket.on('create-agent', async (settings, callback) => {
+            if (hubClosing) {
+                callback?.({ success: false, error: 'MindServer is shutting down' });
+                return;
+            }
             console.log('API create agent...');
             for (let key in settings_spec) {
                 if (!(key in settings)) {
@@ -118,11 +131,6 @@ export function createMindServer(host_public = false, port = 8080) {
                 }
                 let returned = await mindcraft.createAgent(settings);
                 callback({ success: returned.success, error: returned.error });
-                let name = settings.profile.name;
-                if (!returned.success && agent_connections[name]) {
-                    mindcraft.destroyAgent(name);
-                    delete agent_connections[name];
-                }
                 agentsStatusUpdate();
             }
             else {
@@ -193,44 +201,47 @@ export function createMindServer(host_public = false, port = 8080) {
         });
 
         socket.on('set-agent-settings', (agentName, settings) => {
+            if (hubClosing) return;
             const agent = agent_connections[agentName];
             if (agent) {
                 agent.setSettings(settingsForAgent(settings));
-                agent.socket.emit('restart-agent');
+                void reportAgentOperation(mindcraft.startAgent(agentName), `Restart agent after settings update (${agentName})`);
             }
         });
 
         socket.on('restart-agent', (agentName) => {
+            if (hubClosing) return;
             console.log(`Restarting agent: ${agentName}`);
-            agent_connections[agentName].socket.emit('restart-agent');
+            void reportAgentOperation(mindcraft.startAgent(agentName), `Restart agent (${agentName})`);
         });
 
         socket.on('stop-agent', (agentName) => {
-            mindcraft.stopAgent(agentName);
+            void reportAgentOperation(mindcraft.stopAgent(agentName), `Stop agent (${agentName})`);
         });
 
         socket.on('start-agent', (agentName) => {
-            mindcraft.startAgent(agentName);
+            if (hubClosing) return;
+            void reportAgentOperation(mindcraft.startAgent(agentName), `Start agent (${agentName})`);
         });
 
         socket.on('destroy-agent', (agentName) => {
             if (agent_connections[agentName]) {
-                mindcraft.destroyAgent(agentName);
+                void reportAgentOperation(mindcraft.destroyAgent(agentName), `Destroy agent (${agentName})`);
                 delete agent_connections[agentName];
+            } else {
+                void reportAgentOperation(mindcraft.destroyAgent(agentName), `Cancel pending agent creation (${agentName})`);
             }
             agentsStatusUpdate();
         });
 
         socket.on('stop-all-agents', () => {
             console.log('Killing all agents');
-            for (let agentName in agent_connections) {
-                mindcraft.stopAgent(agentName);
-            }
+            void reportAgentOperation(mindcraft.stopAllAgents('ui-stop-all'), 'Stop all agents');
         });
 
         socket.on('shutdown', () => {
             console.log('Shutting down');
-            void placeStoreLifecycle?.shutdown('SHUTDOWN');
+            void mindcraft.shutdown({ reason: 'ui-shutdown' });
             
         });
 
@@ -267,13 +278,25 @@ export function createMindServer(host_public = false, port = 8080) {
         server,
         socketServer: io,
         storePromise: placeStorePromise,
-        beforeClose: () => {
+        beforeClose: async reason => {
+            hubClosing = true;
             placeRpcClosing = true;
-            for (const agentName of Object.keys(agent_connections)) mindcraft.stopAgent(agentName);
+            return mindcraft.stopAllAgents(reason || 'parent-shutdown', { closing: true });
         }
+    });
+    mindcraft.setShutdownHandler(request => placeStoreLifecycle?.shutdown(request));
+    mindcraft.setTaskEndingHandler(outcome => {
+        void mindcraft.shutdown({ reason: 'task-ending', exitCode: outcome.code });
     });
 
     return server;
+}
+
+function reportAgentOperation(operation, label) {
+    return Promise.resolve(operation).catch(error => {
+        console.error(`${label} failed:`, error?.message || error);
+        return null;
+    });
 }
 
 function settingsForAgent(agentSettings) {

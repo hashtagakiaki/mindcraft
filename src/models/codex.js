@@ -1,13 +1,17 @@
 import { spawn } from 'child_process';
-import { readdirSync, readFileSync } from 'fs';
+import { randomUUID } from 'crypto';
+import { readdirSync, readFileSync, writeFileSync } from 'fs';
 import { mkdtemp, rm, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
 const requestTimeoutMs = Number(process.env.MINDCRAFT_CODEX_TIMEOUT_MS) || 120_000;
 const terminateGraceMs = 250;
 const processPollMs = 20;
+const ownershipAckTimeoutMs = 5000;
 const codexCommand = process.env.MINDCRAFT_CODEX_BIN || 'codex';
+const ownedCliHelperPath = fileURLToPath(new URL('../process/owned_cli.js', import.meta.url));
 
 export class Codex {
     static prefix = 'codex';
@@ -25,6 +29,7 @@ export class Codex {
     async #sendRequest(turns, systemMessage, stop_seq, imageBuffer=null, signal=null) {
         if (signal?.aborted) throw abortError(signal.reason);
 
+        const requestId = randomUUID();
         const workingDirectory = await mkdtemp(path.join(os.tmpdir(), 'mindcraft-codex-'));
         const prompt = [
             'You are the language model for a Minecraft agent. Return only the response text requested by the supplied system message.',
@@ -38,6 +43,7 @@ export class Codex {
         ];
 
         try {
+            writeFileSync(path.join(workingDirectory, '.mindcraft-codex-owner'), requestId, { flag: 'wx', mode: 0o600 });
             if (imageBuffer) {
                 const imagePath = path.join(workingDirectory, 'input-image.jpg');
                 await writeFile(imagePath, imageBuffer);
@@ -46,7 +52,7 @@ export class Codex {
             args.push(prompt);
             if (signal?.aborted) throw abortError(signal.reason);
 
-            const response = await runOwnedCodex(args, input, workingDirectory, signal);
+            const response = await runOwnedCodex(args, input, workingDirectory, signal, requestId);
             const stopIndex = response.indexOf(stop_seq);
             return stopIndex === -1 ? response : response.slice(0, stopIndex);
         } finally {
@@ -59,7 +65,7 @@ export class Codex {
     }
 }
 
-function runOwnedCodex(args, input, workingDirectory, signal) {
+function runOwnedCodex(args, input, workingDirectory, signal, requestId) {
     return new Promise((resolve, reject) => {
         let child;
         let stdout = '';
@@ -72,6 +78,7 @@ function runOwnedCodex(args, input, workingDirectory, signal) {
         let terminationTimer = null;
         let settled = false;
         let closeResult = null;
+        let ownedLeaderStarttime = null;
 
         const finish = (error, value) => {
             if (settled) return;
@@ -90,26 +97,31 @@ function runOwnedCodex(args, input, workingDirectory, signal) {
             }
             // detached:true gives this spawn a private process group/session;
             // signal it only while it still has live members in that session.
-            if (!ownedSessionExists(child.pid)) return;
-            try { process.kill(-child.pid, signalName); }
+            const session = inspectOwnedSession(child.pid, ownedLeaderStarttime);
+            if (!session.exists || session.unknown || session.foreign) return;
+            try {
+                if (session.leader) process.kill(-child.pid, signalName);
+                else for (const member of session.members) signalVerifiedMember(child.pid, member, signalName);
+            }
             catch (error) { if (error.code !== 'ESRCH') failure ||= error; }
         };
 
         const beginTermination = () => {
             if (terminationStarted) return;
             terminationStarted = true;
+            try { child?.send({ type: 'cancel', requestId }); } catch {}
             signalOwnedGroup('SIGTERM');
             terminationTimer = setTimeout(() => {
-                if (ownedSessionExists(child?.pid)) signalOwnedGroup('SIGKILL');
+                if (ownedSessionExists(child?.pid, ownedLeaderStarttime)) signalOwnedGroup('SIGKILL');
                 maybeFinish();
             }, terminateGraceMs);
         };
 
         const maybeFinish = async () => {
             if (!closeResult || settled) return;
-            if (ownedSessionExists(child?.pid)) {
+            if (ownedSessionExists(child?.pid, ownedLeaderStarttime)) {
                 if (!terminationStarted) beginTermination();
-                if (ownedSessionExists(child?.pid)) {
+                if (ownedSessionExists(child?.pid, ownedLeaderStarttime)) {
                     setTimeout(maybeFinish, processPollMs);
                     return;
                 }
@@ -134,10 +146,10 @@ function runOwnedCodex(args, input, workingDirectory, signal) {
         }, requestTimeoutMs);
 
         try {
-            child = spawn(codexCommand, args, {
+            child = spawn(process.execPath, [ownedCliHelperPath, requestId, codexCommand, JSON.stringify(args), workingDirectory], {
                 cwd: workingDirectory,
                 env: getCodexEnvironment(),
-                stdio: ['pipe', 'pipe', 'ignore'],
+                stdio: ['pipe', 'pipe', 'ignore', 'ipc'],
                 detached: process.platform !== 'win32'
             });
         } catch (error) {
@@ -149,6 +161,12 @@ function runOwnedCodex(args, input, workingDirectory, signal) {
         // An AbortSignal can be aborted between the caller's check and listener
         // registration only through synchronous user hooks; observe it again.
         if (signal?.aborted) onAbort();
+
+        child.once('spawn', () => {
+            try { ownedLeaderStarttime = readProcIdentity(child.pid).starttime; }
+            catch {}
+            if (terminationStarted) signalOwnedGroup('SIGTERM');
+        });
 
         child.stdout.setEncoding('utf8');
         child.stdout.on('data', chunk => {
@@ -174,6 +192,11 @@ function runOwnedCodex(args, input, workingDirectory, signal) {
                 }
             }
         });
+        child.on('message', message => {
+            if (message?.type === 'owned-cli-error' && message.requestId === requestId) {
+                failure = new Error(message.message || 'Could not start Codex CLI');
+            }
+        });
         child.on('error', error => {
             // A spawn error has no owned process group; wait for close before
             // resolving so the caller's finally can safely remove the tempdir.
@@ -185,33 +208,155 @@ function runOwnedCodex(args, input, workingDirectory, signal) {
         });
         child.stdin.on('error', () => {});
         child.stdin.end(input);
+
+        authorizeAndStart(child, requestId, signal).catch(error => {
+            if (error?.name === 'AbortError') cancelled = true;
+            else failure = error instanceof Error ? error : new Error(String(error));
+            try { child.send({ type: 'cancel', requestId }); } catch {}
+            beginTermination();
+        });
     });
 }
 
-function ownedSessionExists(sessionId) {
-    if (!sessionId || process.platform === 'win32') return false;
+async function authorizeAndStart(child, requestId, signal) {
+    if (typeof process.send === 'function') {
+        if (process.connected !== true) throw new Error('Agent parent IPC is disconnected');
+        await registerOwnedHelper(child, requestId, signal);
+    }
+    if (signal?.aborted) throw abortError(signal.reason);
+    await sendHelperMessage(child, { type: 'start', requestId });
+}
+
+function registerOwnedHelper(child, requestId, signal) {
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const timeout = setTimeout(() => finish(new Error('Timed out waiting for owned Codex helper registration')),
+            ownershipAckTimeoutMs);
+        const finish = error => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            process.removeListener('message', onParentMessage);
+            process.removeListener('disconnect', onDisconnect);
+            child.removeListener('close', onHelperClose);
+            signal?.removeEventListener('abort', onAbort);
+            error ? reject(error) : resolve();
+        };
+        const onParentMessage = message => {
+            if (message?.type !== 'mindcraft:owned-process-ack' || message.role !== 'cli' ||
+                message.pid !== child.pid || message.requestId !== requestId) return;
+            if (message.accepted === true) finish();
+            else finish(new Error('Agent parent rejected owned Codex helper registration'));
+        };
+        const onDisconnect = () => finish(new Error('Agent parent IPC disconnected before Codex helper start'));
+        const onHelperClose = () => finish(new Error('Owned Codex helper exited before registration ACK'));
+        const onAbort = () => finish(abortError(signal.reason));
+
+        process.on('message', onParentMessage);
+        process.once('disconnect', onDisconnect);
+        child.once('close', onHelperClose);
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) {
+            onAbort();
+            return;
+        }
+        if (process.connected !== true || !child.connected) {
+            finish(new Error('Agent or helper IPC is disconnected'));
+            return;
+        }
+        try {
+            process.send({ type: 'mindcraft:owned-process', role: 'cli', pid: child.pid, requestId }, error => {
+                if (error) finish(new Error(`Could not register owned Codex helper: ${error.message}`));
+            });
+        } catch (error) {
+            finish(new Error(`Could not register owned Codex helper: ${error.message}`));
+        }
+    });
+}
+
+function sendHelperMessage(child, message) {
+    return new Promise((resolve, reject) => {
+        if (!child.connected) {
+            reject(new Error('Owned Codex helper IPC is disconnected'));
+            return;
+        }
+        child.send(message, error => error ? reject(error) : resolve());
+    });
+}
+
+function inspectOwnedSession(sessionId, expectedLeaderStarttime) {
+    if (!sessionId || process.platform === 'win32') return { exists: false, members: [] };
+    let unknown = false;
+    let foreign = false;
+    let leader = null;
+    const members = [];
     try {
         // detached:true assigns this child PID as its private process group
-        // and session ID. Ignore zombies: they cannot execute or access files.
         const entries = readdirSync('/proc');
         for (const entry of entries) {
             if (!/^\d+$/.test(entry)) continue;
+            const pid = Number(entry);
+            let identity;
             try {
-                const stat = readFileSync(`/proc/${entry}/stat`, 'utf8');
-                const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-                const state = fields[0];
-                const processGroup = Number(fields[2]);
-                const session = Number(fields[3]);
-                if (processGroup === sessionId && session === sessionId && state !== 'Z' && state !== 'X') return true;
+                identity = readProcIdentity(pid);
             } catch {
-                // Process disappeared while reading /proc; continue the scan.
+                unknown = true;
+                continue;
+            }
+            if (!identity) continue;
+            if (pid === sessionId) {
+                if (identity.pgid !== sessionId || identity.sid !== sessionId ||
+                    (expectedLeaderStarttime && identity.starttime !== expectedLeaderStarttime)) {
+                    foreign = true;
+                    continue;
+                }
+                if (!expectedLeaderStarttime) unknown = true;
+                else leader = identity;
+            }
+            if (identity.pgid === sessionId && identity.sid === sessionId && identity.state !== 'Z' && identity.state !== 'X') {
+                members.push({ pid, identity });
             }
         }
-        return false;
     } catch {
+        unknown = true;
+    }
+    return { exists: members.length > 0 || unknown, unknown, foreign, leader, members };
+}
+
+function ownedSessionExists(sessionId, expectedLeaderStarttime) {
+    const inspected = inspectOwnedSession(sessionId, expectedLeaderStarttime);
+    if (inspected.foreign) return false;
+    if (inspected.unknown) {
         try { process.kill(-sessionId, 0); return true; }
         catch (error) { return error.code !== 'ESRCH'; }
     }
+    return inspected.exists;
+}
+
+function signalVerifiedMember(sessionId, member, signalName) {
+    let current;
+    try { current = readProcIdentity(member.pid); }
+    catch { return; }
+    if (!current || current.starttime !== member.identity.starttime || current.pgid !== sessionId || current.sid !== sessionId) return;
+    try { process.kill(member.pid, signalName); }
+    catch (error) { if (error.code !== 'ESRCH') throw error; }
+}
+
+function readProcIdentity(pid) {
+    let stat;
+    try { stat = readFileSync(`/proc/${pid}/stat`, 'utf8'); }
+    catch (error) {
+        if (error.code === 'ENOENT' || error.code === 'ESRCH') return null;
+        throw error;
+    }
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+    const state = fields[0];
+    const pgid = Number(fields[2]);
+    const sid = Number(fields[3]);
+    const starttime = fields[19];
+    if (!/^[A-Za-z]$/.test(state || '') || !Number.isSafeInteger(pgid) || !Number.isSafeInteger(sid) ||
+        !/^\d+$/.test(starttime || '')) throw new Error(`Invalid /proc/${pid}/stat identity`);
+    return { state, pgid, sid, starttime };
 }
 
 function abortError(reason) {

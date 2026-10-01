@@ -1,4 +1,4 @@
-import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs';
+import { writeFileSync, readFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from 'fs';
 import { NPCData } from './npc/data.js';
 import settings from './settings.js';
 
@@ -13,6 +13,10 @@ export class History {
         mkdirSync(`./bots/${this.name}/histories`, { recursive: true });
 
         this.turns = [];
+        this.pendingHistoryChunks = [];
+        this.summaryEpoch = 0;
+        this.shutdownStarted = false;
+        this.shutdownSavePromise = null;
 
         // Natural language memory as a summary of recent messages + previous memory
         this.memory = '';
@@ -31,15 +35,20 @@ export class History {
     }
 
     async summarizeMemories(turns) {
+        const epoch = this.summaryEpoch;
         console.log("Storing memories...");
-        this.memory = await this.agent.prompter.promptMemSaving(turns);
+        let memory = await this.agent.prompter.promptMemSaving(turns);
+        if (this.shutdownStarted || epoch !== this.summaryEpoch) return false;
 
-        if (this.memory.length > 500) {
-            this.memory = this.memory.slice(0, 500);
-            this.memory += '...(Memory truncated to 500 chars. Compress it more next time)';
+        if (memory.length > 500) {
+            memory = memory.slice(0, 500);
+            memory += '...(Memory truncated to 500 chars. Compress it more next time)';
         }
 
+        if (this.shutdownStarted || epoch !== this.summaryEpoch) return false;
+        this.memory = memory;
         console.log("Memory updated to: ", this.memory);
+        return true;
     }
 
     async appendFullHistory(to_store) {
@@ -59,6 +68,7 @@ export class History {
     }
 
     async add(name, content) {
+        if (this.shutdownStarted) return false;
         let role = 'assistant';
         if (name === 'system') {
             role = 'system';
@@ -74,23 +84,68 @@ export class History {
             while (this.turns.length > 0 && this.turns[0].role === 'assistant')
                 chunk.push(this.turns.shift()); // remove until turns starts with system/user message
 
-            await this.summarizeMemories(chunk);
+            this.pendingHistoryChunks.push(chunk);
+            const epoch = this.summaryEpoch;
+            let summarized;
+            try { summarized = await this.summarizeMemories(chunk); }
+            catch (error) {
+                if (this.shutdownStarted || epoch !== this.summaryEpoch) return false;
+                throw error;
+            }
+            if (!summarized || this.shutdownStarted) return false;
             await this.appendFullHistory(chunk);
+            this.pendingHistoryChunks = this.pendingHistoryChunks.filter(pending => pending !== chunk);
         }
+        return true;
     }
 
-    async save() {
+    beginShutdown() {
+        if (this.shutdownStarted) return this.summaryEpoch;
+        this.shutdownStarted = true;
+        this.summaryEpoch += 1;
+        return this.summaryEpoch;
+    }
+
+    async saveShutdownRecord(reason, outcome = {}) {
+        if (this.shutdownSavePromise) return this.shutdownSavePromise;
+        this.beginShutdown();
+        this.shutdownSavePromise = (async () => {
+            const pending = this.pendingHistoryChunks.flat();
+            this.pendingHistoryChunks = [];
+            this.turns = [...pending, ...this.turns];
+            const detail = typeof outcome === 'string' ? outcome : JSON.stringify(outcome);
+            this.turns.push({ role: 'system', content: `Agent shutdown (${reason || 'unspecified'}). Final outcome: ${detail}. Natural language shutdown summary skipped.` });
+            try {
+                await this.save({ final: true });
+                return { saved: true, memoryPath: this.memory_fp };
+            } catch (error) {
+                return { saved: false, memoryPath: this.memory_fp, error: error.message };
+            }
+        })();
+        return this.shutdownSavePromise;
+    }
+
+    async save(options = {}) {
+        if (this.shutdownStarted && options.final !== true) return { saved: false, skipped: 'shutdown in progress' };
         try {
             const data = {
                 memory: this.memory,
                 turns: this.turns,
-                self_prompting_state: this.agent.self_prompter.state,
-                self_prompt: this.agent.self_prompter.isStopped() ? null : this.agent.self_prompter.prompt,
-                taskStart: this.agent.task.taskStartTime,
+                self_prompting_state: this.agent.self_prompter?.state ?? null,
+                self_prompt: !this.agent.self_prompter || this.agent.self_prompter.isStopped() ? null : this.agent.self_prompter.prompt,
+                taskStart: this.agent.task?.taskStartTime ?? null,
                 last_sender: this.agent.last_sender
             };
-            writeFileSync(this.memory_fp, JSON.stringify(data, null, 2));
+            const temporaryPath = `${this.memory_fp}.tmp-${process.pid}-${this.summaryEpoch}`;
+            try {
+                writeFileSync(temporaryPath, JSON.stringify(data, null, 2));
+                renameSync(temporaryPath, this.memory_fp);
+            } catch (error) {
+                try { unlinkSync(temporaryPath); } catch {}
+                throw error;
+            }
             console.log('Saved memory to:', this.memory_fp);
+            return { saved: true, memoryPath: this.memory_fp };
         } catch (error) {
             console.error('Failed to save history:', error);
             throw error;

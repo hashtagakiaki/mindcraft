@@ -492,9 +492,10 @@ export class PlaceStore {
     }
 }
 
-export function attachPlaceStoreLifecycle({ server, socketServer, storePromise, processObject = process, beforeClose = () => {} }) {
+export function attachPlaceStoreLifecycle({ server, socketServer, storePromise, processObject = process, beforeClose = async () => {} }) {
     let closeStorePromise = null;
     let shutdownPromise = null;
+    let shutdownCompleted = false;
     const closeStore = () => {
         if (!closeStorePromise) closeStorePromise = Promise.resolve(storePromise).then((store) => store?.close());
         return closeStorePromise;
@@ -507,18 +508,37 @@ export function attachPlaceStoreLifecycle({ server, socketServer, storePromise, 
         removeSignalHandlers();
         closeStore().catch((error) => console.error('Place store close failed:', error.message));
     };
-    const shutdown = (signal) => {
+    const shutdown = (request = 'SHUTDOWN') => {
+        if (shutdownCompleted) return shutdownPromise;
         if (shutdownPromise) return shutdownPromise;
-        shutdownPromise = (async () => {
-            beforeClose();
-            await closeStore();
-            await new Promise((resolve, reject) => {
-                try { socketServer.close(resolve); } catch (error) { reject(error); }
-            });
-            processObject.exit(signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 0);
-        })().catch((error) => {
-            console.error('MindServer shutdown failed:', error.message);
-            processObject.exit(1);
+        const normalized = typeof request === 'string' ? { reason: request } : { ...request };
+        const attempt = (async () => {
+            try {
+                const cleanup = await beforeClose(normalized.reason);
+                if (cleanup === false || cleanup?.groupsGone === false || cleanup?.ok === false) {
+                    return { closed: false, reason: 'agent-cleanup-incomplete', cleanup };
+                }
+                await closeStore();
+                await new Promise((resolve, reject) => {
+                    try { socketServer.close(resolve); } catch (error) { reject(error); }
+                });
+                const exitCode = Number.isInteger(normalized.exitCode)
+                    ? normalized.exitCode
+                    : normalized.reason === 'SIGINT' ? 130 : normalized.reason === 'SIGTERM' ? 143 : 0;
+                processObject.exit(exitCode);
+                return { closed: true, exitCode, cleanup };
+            } catch (error) {
+                console.error('MindServer shutdown incomplete:', error.message);
+                return { closed: false, reason: 'shutdown-incomplete', error };
+            }
+        })();
+        shutdownPromise = attempt.then(result => {
+            if (result.closed) shutdownCompleted = true;
+            else shutdownPromise = null;
+            return result;
+        }, error => {
+            shutdownPromise = null;
+            throw error;
         });
         return shutdownPromise;
     };

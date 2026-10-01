@@ -301,6 +301,20 @@ export class Task {
         this.available_agents = []
     }
 
+    isTaskExecutionBlocked() {
+        return this.agent?._shutdownStarted === true || this.agent?.isShutdownStarted?.() === true ||
+            this.agent?.managementPaused === true || this.agent?.actions?.managementPaused === true ||
+            this.agent?.actions?.managementIntentRequired === true || this.agent?.actions?.userStopped === true;
+    }
+
+    captureTaskSetupGuard() {
+        const managementGeneration = this.agent?._managementGeneration ?? 0;
+        const intentEpoch = this.agent?.actions?.intentEpoch ?? 0;
+        return () => !this.isTaskExecutionBlocked() &&
+            managementGeneration === (this.agent?._managementGeneration ?? 0) &&
+            intentEpoch === (this.agent?.actions?.intentEpoch ?? 0);
+    }
+
     updateAvailableAgents(agents) {
         this.available_agents = agents
     }
@@ -396,41 +410,52 @@ export class Task {
         return false;
     }
 
-    async setAgentGoal() {
+    async setAgentGoal(canContinue = this.captureTaskSetupGuard()) {
+        if (!canContinue()) return false;
         let agentGoal = this.getAgentGoal();
         if (agentGoal && this.data.agent_count + this.data.human_count > 1) {
             agentGoal += "You have to collaborate with other agents/bots, namely " + this.available_agents.filter(n => n !== this.name).join(', ') + " to complete the task as soon as possible by dividing the work among yourselves.";
             console.log(`Setting goal for agent ${this.agent.count_id}: ${agentGoal}`);
         }
+        if (!canContinue()) return false;
         await executeCommand(this.agent, `!goal("${agentGoal}")`);
+        return canContinue();
     }
 
     async initBotTask() {
+        const canContinue = this.captureTaskSetupGuard();
+        if (!canContinue()) return false;
         await this.agent.bot.chat(`/clear ${this.name}`);
+        if (!canContinue()) return false;
         console.log(`Cleared ${this.name}'s inventory.`);
 
         //wait for a bit so inventory is cleared
         await new Promise((resolve) => setTimeout(resolve, 500));
+        if (!canContinue()) return false;
 
         if (this.data === null)
             return;
         
         if (this.task_type === 'cooking') {
-            this.initiator = new CookingTaskInitiator(this.data, this.agent.bot);
+            this.initiator = new CookingTaskInitiator(this.data, this.agent.bot, () => !!canContinue());
         } else {
             this.initiator = null;
         }
 
         //wait for a bit so bots are teleported
         await new Promise((resolve) => setTimeout(resolve, 3000));
+        if (!canContinue()) return false;
 
         if (this.agent.count_id === 0 && this.data.human_count > 0) {
             console.log('Clearing human player inventories');
             for (let i = 0; i < this.data.human_count; i++) {
+                if (!canContinue()) return false;
                 const username = this.data.usernames[i];
                 await this.agent.bot.chat(`/clear ${username}`);
+                if (!canContinue()) return false;
             }
             await new Promise((resolve) => setTimeout(resolve, 500));
+            if (!canContinue()) return false;
         }
 
         if (this.data.initial_inventory) {
@@ -451,14 +476,17 @@ export class Task {
                 
                 const starting_idx = this.data.agent_count;
                 for (let i = 0; i < this.data.human_count; i++) {
+                    if (!canContinue()) return false;
                     const username = this.data.usernames[i];
                     const inventory = this.data.initial_inventory[starting_idx + i];
                     console.log(Object.keys(inventory));
                     for (let key of Object.keys(inventory)) {
+                        if (!canContinue()) return false;
                         const itemName = key.toLowerCase();
                         const quantity = inventory[key];
                         console.log(`Give ${username} ${quantity} ${itemName}`);
                         await this.agent.bot.chat(`/give ${username} ${itemName} ${quantity}`);
+                        if (!canContinue()) return false;
                     }
                 }
             }
@@ -466,49 +494,63 @@ export class Task {
 
             // Assign inventory items
             for (let key of Object.keys(initialInventory)) {
+                if (!canContinue()) return false;
                 const itemName = key.toLowerCase();
                 const quantity = initialInventory[key];
                 await this.agent.bot.chat(`/give ${this.name} ${itemName} ${quantity}`);
+                if (!canContinue()) return false;
                 console.log(`Gave ${this.name} ${quantity} ${itemName}`);
             }
 
             // Wait briefly for inventory commands to complete
             await new Promise((resolve) => setTimeout(resolve, 500));
+            if (!canContinue()) return false;
         }
 
         if (this.initiator && this.agent.count_id === 0) {
-            await this.initiator.init();
+            if (!(await this.initiator.init())) return false;
+            if (!canContinue()) return false;
         }
 
-        await this.teleportBots();
+        if (!canContinue() || !(await this.teleportBots(canContinue))) return false;
 
         if (this.data.agent_count && this.data.agent_count > 1) {
             // TODO wait for other bots to join
             await new Promise((resolve) => setTimeout(resolve, 10000));
+            if (!canContinue()) return false;
             if (this.available_agents.length < this.data.agent_count) {
                 console.log(`Missing ${this.data.agent_count - this.available_agents.length} bot(s).`);
-                this.agent.killAll();
+                this.agent.killAll(`Task cannot continue: missing ${this.data.agent_count - this.available_agents.length} bot(s).`);
+                return false;
             }
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
+        if (!canContinue()) return false;
         if (this.data.conversation && this.agent.count_id === 0) {
             let other_name = this.available_agents.filter(n => n !== this.name)[0];
             let waitCount = 0;
             while (other_name === undefined && waitCount < 20) {
+                if (!canContinue()) return false;
                 other_name = this.available_agents.filter(n => n !== this.name)[0];
                 await new Promise((resolve) => setTimeout(resolve, 1000));
+                if (!canContinue()) return false;
                 waitCount++;
             }
             if (other_name === undefined && this.data.agent_count > 1) {
                 console.log('No other agents found. Task unsuccessful.');
-                this.agent.killAll();
+                this.agent.killAll('Task cannot continue: no other agents were found.');
+                return false;
             }
+            if (!canContinue()) return false;
             await executeCommand(this.agent, `!startConversation("${other_name}", "${this.data.conversation}")`);
+            if (!canContinue()) return false;
         }
-        await this.setAgentGoal();
+        if (!canContinue()) return false;
+        return await this.setAgentGoal(canContinue);
     }
     
-    async teleportBots() {
+    async teleportBots(canContinue = this.captureTaskSetupGuard()) {
+        if (!canContinue()) return false;
         console.log('\n\nTeleporting bots');
         function getRandomOffset(range) {
             return Math.floor(Math.random() * (range * 2 + 1)) - range;
@@ -530,14 +572,17 @@ export class Task {
         // go the human if there is one and not required for the task
         if (human_player_name && this.data.human_count === 0) {
             console.log(`Teleporting ${this.name} to human ${human_player_name}`)
+            if (!canContinue()) return false;
             bot.chat(`/tp ${this.name} ${human_player_name}`)
         }
         else {
             console.log(`Teleporting ${this.name} to ${this.available_agents[0]}`)
+            if (!canContinue()) return false;
             bot.chat(`/tp ${this.name} ${this.available_agents[0]}`);
         }
 
         await new Promise((resolve) => setTimeout(resolve, 200));
+        if (!canContinue()) return false;
 
         // now all bots are teleport on top of each other (which kinda looks ugly)
         // Thus, we need to teleport them to random distances to make it look better
@@ -553,16 +598,20 @@ export class Task {
             const pos = getPosition(bot);
             const xOffset = getRandomOffset(5);
             const zOffset = getRandomOffset(5);
+            if (!canContinue()) return false;
             bot.chat(`/tp ${this.name} ${Math.floor(pos.x + xOffset)} ${pos.y + 3} ${Math.floor(pos.z + zOffset)}`);
             await new Promise((resolve) => setTimeout(resolve, 200));
+            if (!canContinue()) return false;
         }
 
         if (this.data.agent_count && this.data.agent_count > 1) {
             // TODO wait for other bots to join
             await new Promise((resolve) => setTimeout(resolve, 10000));
+            if (!canContinue()) return false;
             if (this.available_agents.length < this.data.agent_count) {
                 console.log(`Missing ${this.data.agent_count - this.available_agents.length} bot(s).`);
-                this.agent.killAll();
+                this.agent.killAll(`Task cannot continue: missing ${this.data.agent_count - this.available_agents.length} bot(s).`);
+                return false;
             }
         }
 
@@ -575,14 +624,18 @@ export class Task {
                 const nearbyPosition = result.nearbyPosition;
                 console.log("nearby position", nearbyPosition);
                 const first_coord = this.data.blueprint.levels[0].coordinates;
+                if (!canContinue()) return false;
                 bot.chat(`/tp @a ${first_coord[0]} ${first_coord[1]} ${first_coord[2]}`);
                 if (this.agent.agent_id === 0 && this.data.human_count > 0) {
                     for (let i = 0; i < this.data.human_count; i++) {
+                        if (!canContinue()) return false;
                         const username = this.data.usernames[i];
                         await bot.chat(`/tp ${username} ${nearbyPosition.x} ${nearbyPosition.y} ${nearbyPosition.z}`);
+                        if (!canContinue()) return false;
                     }
                 }
                 for (const command of commands) {
+                    if (!canContinue()) return false;
                     bot.chat(command);
                 }
             }
@@ -590,5 +643,6 @@ export class Task {
                 console.log('no construction blueprint?')
             }
         }
+        return true;
     }
 }

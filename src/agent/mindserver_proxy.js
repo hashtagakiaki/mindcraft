@@ -80,7 +80,8 @@ export class MindServerProxy {
         this.socket.on('restart-agent', () => {
             if (!this.managementReady) return;
             console.log(`Restarting agent: ${this.agent?.name}`);
-            this.agent?.cleanKill?.();
+            if (this.agent?.requestShutdown) this.agent.requestShutdown('explicit-restart', { restartIntent: true, code: 0 });
+            else this.agent?.cleanKill?.('Explicit restart requested.', 0);
         });
         this.socket.on('send-message', (data) => {
             if (!this.managementReady) return;

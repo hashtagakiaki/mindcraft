@@ -54,7 +54,10 @@ export const actionsList = [
         name: '!stop',
         description: 'Force stop all actions and commands that are currently executing.',
         perform: async function (agent) {
-            await agent.actions.stop();
+            const result = await agent.actions.stop('user');
+            if (!result?.stopped) {
+                return `Stop failed during ${result?.actionPhase || result?.phase || 'unknown phase'}; the bot is still connected and the action may still be running.`;
+            }
             agent.clearBotLogs();
             agent.actions.cancelResume();
             agent.bot.emit('idle');
@@ -77,7 +80,8 @@ export const actionsList = [
         name: '!restart',
         description: 'Restart the agent process.',
         perform: async function (agent) {
-            agent.cleanKill();
+            if (agent.requestShutdown) return agent.requestShutdown('explicit-restart', { restartIntent: true, code: 0 });
+            return agent.cleanKill('Explicit restart requested.', 0);
         }
     },
     {

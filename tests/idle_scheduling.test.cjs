@@ -19,7 +19,7 @@ async function main() {
     const npc = await readFile(path.join(__dirname, '../src/agent/npc/controller.js'), 'utf8')
     const actions = await readFile(path.join(__dirname, '../src/agent/action_manager.js'), 'utf8')
     assert.match(agentSource, /if \(this\._idleResumeTimer\) return;/, 'idle resume timer is coalesced')
-    assert.match(agentSource, /this\._idleResumeTimer = null;\s*if \(!this\.managementPaused && !this\.actions\.managementIntentRequired && this\.isIdle\(\)\)/, 'resume callback clears its timer before checking management and idle state')
+    assert.match(agentSource, /this\._idleResumeTimer = null;\s*if \(!this\._shutdownStarted && !this\.managementPaused && !this\.actions\.managementIntentRequired && this\.isIdle\(\)\)/, 'resume callback clears its timer before checking shutdown, management, and idle state')
     assert.match(agentSource, /this\.actions\.userStopped\)/, 'user stop blocks self/system response handling')
     assert.match(agentSource, /if \(!isCurrent\(\)\) return false;/, 'stale user generation returns before applying a response')
     assert.match(actions, /if \(this\.userStopped\) return this\._rejectedResult\('user-stop'\)/, 'idle/resume work cannot reopen the user stop gate')

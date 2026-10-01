@@ -253,7 +253,7 @@ Scheduling: proxy/mindserver/testの管理接続部分はWave2確認後に他の
 
 Scheduling: supervisor部分（agent_process.jsとagent_process.test.cjs）はWave1のprocess所有確認後に並行実装できる。親子は標準Node IPCのshutdown request/exit intent/owned CLI登録を追加する。hub/store lifecycle結線は管理transport slice受入後に先行し、init_agent/agent結線はWave3/5/6完了後に同Task内で検証する。親desired stateはIPCのrestartIntentより優先し、child closeだけで子孫消滅と見なさない。
 
-- [ ] Task 7: 停止不能時だけ使う終了経路と親の再起動判断を統一する
+- [x] Task 7: 停止不能時だけ使う終了経路と親の再起動判断を統一する
   Writes:
   - src/agent/agent.js
   - src/agent/history.js
@@ -265,10 +265,13 @@ Scheduling: supervisor部分（agent_process.jsとagent_process.test.cjs）はWa
   - src/agent/mindserver_proxy.js
   - src/agent/action_manager.js
   - src/agent/commands/actions.js
+  - src/agent/tasks/tasks.js（既開始task初期化・teleport・goalのshutdown後継続拒否）
+  - src/agent/tasks/cooking_tasks.js（Task初期化から呼ぶasync world setupのcommand直前gate）
   - src/mindcraft/mindcraft.js
   - src/mindcraft/mindserver.js
   - src/mindcraft/place_store.js
   - tests/agent_shutdown.test.cjs
+  - tests/idle_scheduling.test.cjs（shutdown gate付きidle条件検証、既存functional coverage維持）
   - tests/agent_process.test.cjs
   - tests/place_store.test.cjs
   Reads:
@@ -374,3 +377,13 @@ Scheduling: eval apply/rollbackの旧process所有確認とprepare overlay適応
 - Wave6結線割当: Task5 commit7003d2f受入後、管理workerがagent.js/action_manager.js/proxy/testを所有。pauseManagementは同期gate・世代失効・resume取消後に協調stopを観測、restoreはcurrent connection token確認後に管理gateのみ解除する。userStopped/recoveryPaused/inventory unknownは解除しない。startup/NPC/idle/selfprompt/lateLLM/queuedcommandが管理gateを迂回しないことを実Agent+manager fixtureで確認。
 
 - Wave6受入: 実Socket.IO+Agent/Manager fixtureで管理切断時のactive body協調停止、queued action/resume破棄、世代を跨ぐLLM/翻訳応答失効を確認。復旧時は同設定/namespaceのみ管理gate解除、user stop等とfresh intent要求を維持。literal chat stopと新指示を実listenerから検証、kill0。management/manager/recovery/generation/idle Verify exit0、diffcheck0。
+
+- Wave7 full child割当: Task6 ce53699受入後、generation workerへAgent/Manager/commands/proxy結線を解放。先行actual Agent fixtureはshutdown未実装、restartの旧body待ち、stop成功誤報、終了後翻訳実行を赤結果で確認。本体修正後に同fixtureを緑化し、管理/再計画/生成/idle回帰を検証する。
+
+- Wave7 caller監査追加: task.initBotTaskはAgent spawnから未awaitで起動し、内部delay後にgive/teleport/goal commandを実行する。Agent入口gateだけでは終了中の継続を防げないためTask初期化と関連callerへshutdown guardを追加しactualTask fixtureで確認する。旧task完了の全体停止・正常exitとcode>1の異常全体終了を区別し、task-completeを無条件code2へ変更しない。
+
+- Wave7 caller補足: 管理喪失も既開始Task setupの停止条件に含める。CookingTaskInitiatorのawait後world commandも同じTask側のcanContinue確認へ結線し、mockbot上actual setupで終了/管理pause後command0を確認する。world生成変更は隔離fixture内mockのみ。
+
+- Wave7 Task epoch境界: 既開始setupはuser stopと新intent、管理disconnectと復旧を跨いで再開しない。各setup invocationのepoch/管理世代を捕捉し、canContinueで現在flagだけでなく失効を確認する。init falseをcallerが無視して旧goalを再設定しない。task-completeはcode0標準IPCでglobal終了、通知後の実exit異常codeは親が保持する。
+
+- Wave7受入: actualAgent/Managerで2.8s観測期限はstop:false、旧body未settleでもsuccessor拒否/late transfer click0、保存/end一度、abort listener再入も同Promiseを確認。history要約失効/atomic final save/保存失敗、init IPC/Signal/早期startup、Task/Cooking世代跨ぎcommand0を検証。実Node bot/helper/CLI/TERM無視孫、foreign PID、所有不明保持、親hub create race/PlaceStore drainとlock順序、task-complete0/通知後exit1/code>1保持は各fixtureで確認。最新Node20fullsuite/focused Verify exit0、diffcheck0。

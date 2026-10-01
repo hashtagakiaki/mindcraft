@@ -22,6 +22,19 @@ import { log, validateNameFormat, handleDisconnection } from './connection_handl
 const MAX_AUTOMATIC_RECOVERY_PLANS = 2;
 const MAX_RECOVERY_OUTPUT_CHARS = 500;
 const MAX_RECOVERY_EVENTS = 128;
+const AGENT_SHUTDOWN_STOP_GRACE_MS = 2800;
+const STANDALONE_EXIT_INTENT_FLUSH_MS = 500;
+const SHUTDOWN_MESSAGE_MAX_CHARS = 1000;
+
+async function sendStandaloneExitIntent(outcome) {
+    if (typeof process.send !== 'function' || process.connected !== true) return;
+    await new Promise(resolve => {
+        let settled = false;
+        const finish = () => { if (settled) return; settled = true; clearTimeout(timer); resolve(); };
+        const timer = setTimeout(finish, STANDALONE_EXIT_INTENT_FLUSH_MS);
+        try { process.send({ type: 'mindcraft:exit-intent', ...outcome }, finish); } catch { finish(); }
+    });
+}
 const RECOVERY_NON_REPLAN_REASONS = new Set(['user', 'user-stop', 'superseded', 'death', 'management', 'inventory-unconfirmed']);
 
 function inventorySummary(bot) {
@@ -56,9 +69,101 @@ export class Agent {
         this._managementGeneration = 0;
         this._managementStopFailed = false;
         this._managementWaiters = new Set();
+        this._shutdownStarted = false;
+        this._shutdownPromise = null;
+        this._botEnded = false;
+    }
+
+    isShutdownStarted() { return this._shutdownStarted; }
+
+    shutdown(reason = 'shutdown', options = {}) {
+        if (this._shutdownPromise) return this._shutdownPromise;
+        const intent = {
+            reason: String(reason || 'shutdown'),
+            restartIntent: options.restartIntent === true,
+            code: Number.isInteger(options.code) ? options.code : 0,
+            message: typeof options.message === 'string' ? options.message.slice(0, SHUTDOWN_MESSAGE_MAX_CHARS) : null,
+        };
+        this._shutdownStarted = true;
+        this._shutdownIntent = intent;
+        this._managementGeneration++;
+        this._messageGeneration = (this._messageGeneration || 0) + 1;
+        this._activeRecoveryId = null;
+        this._recoveryPromptCommand = false;
+        this._recoveryAdmissionId = null;
+        if (this.npc?.data) {
+            this.npc.data.goals = [];
+            this.npc.data.curr_goal = null;
+            this.npc.data.do_set_goal = false;
+            this.npc.temp_goals = [];
+        }
+        for (const resolve of (this._managementWaiters || [])) resolve(false);
+        this._managementWaiters?.clear?.();
+        if (this._idleResumeTimer) { clearTimeout(this._idleResumeTimer); this._idleResumeTimer = null; }
+        if (this.npc?.idleTimer) { clearTimeout(this.npc.idleTimer); this.npc.idleTimer = null; }
+        this.self_prompter?.stopForRecovery?.();
+        clearTimeout(this._spawnTimeout);
+        clearTimeout(this._updateLoopTimer);
+        this.history?.beginShutdown?.();
+
+        this._shutdownPromise = Promise.resolve().then(async () => {
+            let stopResult = { stopped: true, reason: 'shutdown', actionId: null, phase: null };
+            try {
+                const stopping = this.actions?.beginShutdown?.() ?? this.actions?.stop?.('shutdown');
+                if (stopping) {
+                    let timer;
+                    const deadline = new Promise(resolve => { timer = setTimeout(() => resolve(null), AGENT_SHUTDOWN_STOP_GRACE_MS); });
+                    const settled = await Promise.race([Promise.resolve(stopping), deadline]);
+                    clearTimeout(timer);
+                    if (settled) stopResult = settled;
+                    else {
+                        const context = this.actions?.getCancellationContext?.();
+                        stopResult = {
+                            stopped: false,
+                            reason: context?.reason || 'shutdown-timeout',
+                            actionId: context?.actionId ?? this.actions?.currentAction?.id ?? null,
+                            phase: this.actions?.currentAction?.phaseStatus || context?.phase || 'unknown',
+                            actionPhase: context?.phase || this.actions?.currentAction?.phase || 'unknown',
+                            stopRequestedPhase: this.actions?.currentAction?.stopRequestedPhase || context?.phase || 'unknown',
+                            watchdogAtPhase: this.actions?.currentAction?.watchdogAtPhase || null,
+                        };
+                    }
+                }
+            } catch (error) {
+                stopResult = { stopped: false, reason: 'shutdown-error', error: String(error?.message || error), actionId: this.actions?.currentAction?.id ?? null, phase: this.actions?.currentAction?.phase || 'unknown' };
+            }
+            const safeOutcome = { reason: intent.reason, restartIntent: intent.restartIntent, code: intent.code, message: intent.message || null, taskResult: this.taskResult || null, stopped: stopResult.stopped, stopResult };
+            let saveResult = { saved: false, skipped: 'history unavailable' };
+            try { saveResult = await (this.history?.saveShutdownRecord?.(intent.reason, safeOutcome) ?? saveResult); }
+            catch (error) { saveResult = { saved: false, error: String(error?.message || error) }; }
+            let ended = false;
+            if (!this._botEnded && this.bot?.end) {
+                this._botEnded = true;
+                try { this.bot.end(`Agent shutdown: ${intent.reason}`); ended = true; }
+                catch (error) { console.error('Could not end Minecraft connection:', error); }
+            }
+            return { ...safeOutcome, saveResult, ended };
+        });
+        return this._shutdownPromise;
+    }
+
+    cleanKill(message = 'Agent stopped.', code = 1) {
+        const taskEnding = code > 1;
+        const explicitRestart = code === 0;
+        const reason = explicitRestart ? 'explicit-restart' : 'stop-failed';
+        const intent = { reason, restartIntent: explicitRestart || !taskEnding, code, message: String(message || '') };
+        if (this.requestShutdown) return this.requestShutdown(intent.reason, intent);
+        return this.shutdown(intent.reason, intent).then(async outcome => {
+            if (typeof process.send === 'function' && process.connected) {
+                await sendStandaloneExitIntent(outcome);
+            }
+            process.exit(code);
+            return outcome;
+        });
     }
 
     pauseManagement(reason = 'management') {
+        if (this._shutdownStarted) return Promise.resolve({ stopped: false, reason: 'shutdown' });
         this.managementPaused = true;
         this._managementInterruption = true;
         this._managementGeneration++;
@@ -93,6 +198,7 @@ export class Agent {
     }
 
     restoreManagement(meta) {
+        if (this._shutdownStarted) return false;
         if (!meta?.isCurrentConnection?.() || this._managementStopFailed) return false;
         if (this.actions && !this.actions.restoreManagement(meta)) return false;
         if (!meta.isCurrentConnection()) {
@@ -106,11 +212,13 @@ export class Agent {
     }
 
     waitForManagementReady() {
+        if (this._shutdownStarted) return Promise.resolve(false);
         if (!this.managementPaused) return Promise.resolve(true);
         return new Promise(resolve => this._managementWaiters.add(resolve));
     }
 
     async start(load_mem=false, init_message=null, count_id=0) {
+        if (this._shutdownStarted) return;
         this.last_sender = null;
         this.count_id = count_id;
         this._disconnectHandled = false;
@@ -133,7 +241,8 @@ export class Agent {
         const nameCheck = validateNameFormat(this.name);
         if (!nameCheck.success) {
             log(this.name, nameCheck.msg);
-            process.exit(1);
+            if (this.requestShutdown) await this.requestShutdown('startup-error', { restartIntent: true, code: 1 });
+            else await this.shutdown('startup-error', { restartIntent: true, code: 1 });
             return;
         }
         
@@ -145,7 +254,7 @@ export class Agent {
         this.self_prompter = new SelfPrompter(this);
         convoManager.initAgent(this);
         await this.prompter.initExamples();
-        await this.waitForManagementReady();
+        if (this._shutdownStarted || !(await this.waitForManagementReady())) return;
 
         // load mem first before doing task
         let save_data = null;
@@ -163,7 +272,8 @@ export class Agent {
         blacklistCommands(this.blocked_actions);
 
         console.log(this.name, 'logging into minecraft...');
-        await this.waitForManagementReady();
+        if (this._shutdownStarted || !(await this.waitForManagementReady())) return;
+        if (this._shutdownStarted) return;
         this.bot = initBot(this.name);
         Object.defineProperty(this.bot, 'inventoryUnconfirmed', {
             configurable: true,
@@ -198,7 +308,8 @@ export class Agent {
             // handleDisconnection handles logging to console and server
             const { type } = handleDisconnection(this.name, reason);
      
-            process.exit(1);
+            if (this.requestShutdown) void this.requestShutdown('connection-lost', { restartIntent: true, code: 1 });
+            else void this.shutdown('connection-lost', { restartIntent: true, code: 1 });
         };
         
         // Bind events
@@ -215,6 +326,7 @@ export class Agent {
         initModes(this);
 
         this.bot.on('login', () => {
+            if (this._shutdownStarted) return;
             console.log(this.name, 'logged in!');
             serverProxy.login();
             if (this.managementPaused) return;
@@ -226,49 +338,53 @@ export class Agent {
                 this.bot.chat(`/skin clear`);
         });
 		const spawnTimeoutDuration = settings.spawn_timeout;
-        const spawnTimeout = setTimeout(() => {
+        this._spawnTimeout = setTimeout(() => {
             const msg = `Bot has not spawned after ${spawnTimeoutDuration} seconds. Exiting.`;
             log(this.name, msg);
-            process.exit(1);
+            if (this.requestShutdown) void this.requestShutdown('startup-error', { restartIntent: true, code: 1 });
+            else void this.shutdown('startup-error', { restartIntent: true, code: 1 });
         }, spawnTimeoutDuration * 1000);
         this.bot.once('spawn', async () => {
             try {
-                clearTimeout(spawnTimeout);
-                await this.waitForManagementReady();
+                clearTimeout(this._spawnTimeout);
+                this._spawnTimeout = null;
+                if (this._shutdownStarted || !(await this.waitForManagementReady())) return;
                 addBrowserViewer(this.bot, count_id);
                 console.log('Initializing vision intepreter...');
                 this.vision_interpreter = new VisionInterpreter(this, settings.allow_vision);
 
                 // wait for a bit so stats are not undefined
                 await new Promise((resolve) => setTimeout(resolve, 1000));
-                await this.waitForManagementReady();
+                if (this._shutdownStarted || !(await this.waitForManagementReady())) return;
                 
                 console.log(`${this.name} spawned.`);
                 this.clearBotLogs();
               
                 await this._setupEventHandlers(save_data, init_message);
-                await this.waitForManagementReady();
+                if (this._shutdownStarted || !(await this.waitForManagementReady())) return;
                 this.startEvents();
               
                 if (!load_mem) {
                     if (settings.task && !this._managementInterruption) {
-                        this.task.initBotTask();
-                        this.task.setAgentGoal();
+                        const initialized = await this.task.initBotTask();
+                        if (initialized === false || this._shutdownStarted) return;
                     }
                 } else {
                     // set the goal without initializing the rest of the task
                     if (settings.task && !this._managementInterruption) {
-                        this.task.setAgentGoal();
+                        const goalSet = await this.task.setAgentGoal();
+                        if (goalSet === false || this._shutdownStarted) return;
                     }
                 }
 
                 await new Promise((resolve) => setTimeout(resolve, 10000));
-                await this.waitForManagementReady();
+                if (this._shutdownStarted || !(await this.waitForManagementReady())) return;
                 this.checkAllPlayersPresent();
 
             } catch (error) {
                 console.error('Error in spawn event:', error);
-                process.exit(0);
+                if (this.requestShutdown) void this.requestShutdown('startup-error', { restartIntent: true, code: 1 });
+                else void this.shutdown('startup-error', { restartIntent: true, code: 1 });
             }
         });
     }
@@ -284,6 +400,7 @@ export class Agent {
         ];
         
         const respondFunc = async (username, message) => {
+            if (this._shutdownStarted) return;
             if (message === "") return;
             if (username === this.name) return;
             if (settings.only_chat_with.length > 0 && !settings.only_chat_with.includes(username)) return;
@@ -301,9 +418,13 @@ export class Agent {
                     console.warn('received whisper from other bot??')
                 }
                 else {
+                    if (preserveStopCommand) {
+                        await this.handleMessage(username, message);
+                        return;
+                    }
                     let translation = await handleEnglishTranslation(message);
-                    if (!preserveStopCommand && (managementPausedAtReceipt || managementGeneration !== (this._managementGeneration || 0))) return;
-                    this.handleMessage(username, translation);
+                    if (this._shutdownStarted || managementPausedAtReceipt || managementGeneration !== (this._managementGeneration || 0)) return;
+                    await this.handleMessage(username, translation);
                 }
             } catch (error) {
                 console.error('Error handling message:', error);
@@ -336,6 +457,7 @@ export class Agent {
             } else {
                 await this.self_prompter.handleLoad(save_data.self_prompt, save_data.self_prompting_state);
             }
+            if (this._shutdownStarted) return;
         }
         if (save_data?.last_sender) {
             this.last_sender = save_data.last_sender;
@@ -349,6 +471,7 @@ export class Agent {
         }
         else if (init_message) {
             await this.handleMessage('system', init_message, 2);
+            if (this._shutdownStarted) return;
         }
         else {
             this.openChat("Hello world! I am "+this.name);
@@ -356,6 +479,7 @@ export class Agent {
     }
 
     checkAllPlayersPresent() {
+        if (this._shutdownStarted) return;
         if (!this.task || !this.task.agent_names) {
           return;
         }
@@ -389,7 +513,7 @@ export class Agent {
     }
 
     onRecoveryResult(event) {
-        if (this.managementPaused || this.actions.managementIntentRequired) return false;
+        if (this._shutdownStarted || this.managementPaused || this.actions.managementIntentRequired) return false;
         const eventId = event.eventId ?? this.actions.nextRecoveryEventId();
         if (this._recoverySeen.has(eventId)) return false;
         this._recoverySeen.add(eventId);
@@ -421,10 +545,12 @@ export class Agent {
     }
 
     onRecoveryPlanActionStarted({ recoveryId }) {
+        if (this._shutdownStarted) return;
         if (recoveryId === this._activeRecoveryId) this._recoveryActionStartedId = recoveryId;
     }
 
     onRecoveryPlanActionSettled(event) {
+        if (this._shutdownStarted) return;
         queueMicrotask(() => {
             void this._finishRecoveryPlanAction(event).catch(error => {
                 console.error('Recovery action completion failed:', error);
@@ -434,7 +560,7 @@ export class Agent {
     }
 
     async _launchRecoveryPrompt(event, recoveryId, attempts) {
-        if (this.managementPaused || this.actions.managementIntentRequired) return false;
+        if (this._shutdownStarted || this.managementPaused || this.actions.managementIntentRequired) return false;
         if (this.actions.userStopped || recoveryId !== this._activeRecoveryId) return false;
         if (this.bot?.inventoryUnconfirmed) {
             this._reportRecoveryPaused('Inventory state is unconfirmed; no recovery action was started. Confirm inventory state or use explicit !restart as a last resort.');
@@ -452,7 +578,7 @@ export class Agent {
         const generation = ++this._messageGeneration;
         this._recoveryActionStartedId = null;
         const usedCommand = await this.handleMessage('system', prompt, 1, { recoveryId, generation });
-        if (recoveryId === this._activeRecoveryId && generation === this._messageGeneration && !this._recoveryActionStartedId) {
+        if (!this._shutdownStarted && recoveryId === this._activeRecoveryId && generation === this._messageGeneration && !this._recoveryActionStartedId) {
             this._reportRecoveryPaused(usedCommand
                 ? 'Recovery response did not start a new action. The connection is still active; waiting for an explicit instruction.'
                 : 'No recovery action was proposed. The connection is still active; waiting for an explicit instruction.');
@@ -461,7 +587,7 @@ export class Agent {
     }
 
     async _finishRecoveryPlanAction(event) {
-        if (this.managementPaused || this.actions.managementIntentRequired) return;
+        if (this._shutdownStarted || this.managementPaused || this.actions.managementIntentRequired) return;
         if (event.recoveryId !== this._activeRecoveryId || this.actions.userStopped) return;
         if (this.bot?.inventoryUnconfirmed) {
             this.actions.pauseForRecovery();
@@ -498,6 +624,7 @@ export class Agent {
     }
 
     _reportRecoveryPaused(message) {
+        if (this._shutdownStarted) return;
         if (this._recoveryReportId === this._activeRecoveryId) return;
         this._recoveryReportId = this._activeRecoveryId;
         const report = `${message}\nCurrent position: ${positionSummary(this.bot)}. Current inventory view: ${inventorySummary(this.bot)}.`;
@@ -506,12 +633,17 @@ export class Agent {
     }
 
     async handleMessage(source, message, max_responses=null, internalOptions={}) {
+        if (this._shutdownStarted) return false;
         const isHumanMessage = !!source && source !== 'system' && source !== this.name && !convoManager.isOtherAgent(source);
         const incomingCommand = isHumanMessage && typeof message === 'string' ? containsCommand(message) : null;
         const isUserStop = isHumanMessage && incomingCommand === '!stop';
         const isUserRestart = isHumanMessage && incomingCommand === '!restart';
         const isUserStfu = isHumanMessage && incomingCommand === '!stfu';
         const isSafeQuery = isHumanMessage && !!incomingCommand && commandExists(incomingCommand) && !isAction(incomingCommand);
+        if (isUserRestart) {
+            void this.cleanKill('Explicit restart requested.', 0);
+            return true;
+        }
         const isHumanIntent = isHumanMessage && !!message && !isUserStop && !isUserStfu &&
             (!incomingCommand || (commandExists(incomingCommand) && isAction(incomingCommand)));
         if (this.managementPaused && !isUserStop && !isUserRestart && !isSafeQuery) return false;
@@ -528,10 +660,10 @@ export class Agent {
         }
         const recoveryId = internalOptions.recoveryId || null;
         const managementGeneration = this._managementGeneration || 0;
-        const isCurrent = () => generation === this._messageGeneration && (!recoveryId || recoveryId === this._activeRecoveryId) &&
+        const isCurrent = () => !this._shutdownStarted && generation === this._messageGeneration && (!recoveryId || recoveryId === this._activeRecoveryId) &&
             (isUserStop || isUserRestart || isSafeQuery || ((!this.managementPaused && !this.actions?.managementPaused) && managementGeneration === (this._managementGeneration || 0)));
         if (!this.managementPaused && !this.actions?.managementIntentRequired) await this.checkTaskDone();
-        if (!isCurrent()) return false;
+        if (this._shutdownStarted || !isCurrent()) return false;
         if (!source || !message) {
             console.warn('Received empty message from', source);
             return false;
@@ -600,7 +732,7 @@ export class Agent {
         if (!isCurrent()) return false;
         console.log('received message from', source, ':', message);
 
-        const checkInterrupt = () => this.managementPaused || this.actions.managementPaused || this.actions.managementIntentRequired || (!recoveryId && this.self_prompter.shouldInterrupt(self_prompt)) || this.shut_up || convoManager.responseScheduledFor(source) || this.actions.userStopped;
+        const checkInterrupt = () => this._shutdownStarted || this.managementPaused || this.actions.managementPaused || this.actions.managementIntentRequired || (!recoveryId && this.self_prompter.shouldInterrupt(self_prompt)) || this.shut_up || convoManager.responseScheduledFor(source) || this.actions.userStopped;
         
         let behavior_log = this.bot.modes.flushBehaviorLog().trim();
         if (behavior_log.length > 0) {
@@ -708,7 +840,7 @@ export class Agent {
     }
 
     async routeResponse(to_player, message) {
-        if (this.shut_up) return;
+        if (this._shutdownStarted || this.shut_up) return;
         let self_prompt = to_player === 'system' || to_player === this.name;
         if (self_prompt && this.last_sender) {
             // this is for when the agent is prompted by system while still in conversation
@@ -728,6 +860,7 @@ export class Agent {
     }
 
     async openChat(message) {
+        if (this._shutdownStarted) return;
         let to_translate = message;
         let remaining = '';
         let command_name = containsCommand(message);
@@ -737,6 +870,7 @@ export class Agent {
             remaining = message.substring(translate_up_to);
         }
         message = (await handleTranslation(to_translate)).trim() + " " + remaining;
+        if (this._shutdownStarted) return;
         // newlines are interpreted as separate chats, which triggers spam filters. replace them with spaces
         message = message.replaceAll('\n', ' ');
 
@@ -755,6 +889,7 @@ export class Agent {
     }
 
     startEvents() {
+        if (this._shutdownStarted) return;
         // Custom events
         this.bot.on('time', () => {
             if (this.bot.time.timeOfDay == 0)
@@ -784,8 +919,10 @@ export class Agent {
         // Use connection handler for runtime disconnects
         this.bot.on('end', (reason) => {
             if (!this._disconnectHandled) {
+                this._disconnectHandled = true;
                 const { msg } = handleDisconnection(this.name, reason);
-                this.cleanKill(msg);
+                if (this.requestShutdown) void this.requestShutdown('connection-lost', { restartIntent: true, code: 1 });
+                else void this.shutdown('connection-lost', { restartIntent: true, code: 1 });
             }
         });
         this.bot.on('death', () => {
@@ -794,8 +931,10 @@ export class Agent {
         });
         this.bot.on('kicked', (reason) => {
             if (!this._disconnectHandled) {
+                this._disconnectHandled = true;
                 const { msg } = handleDisconnection(this.name, reason);
-                this.cleanKill(msg);
+                if (this.requestShutdown) void this.requestShutdown('connection-lost', { restartIntent: true, code: 1 });
+                else void this.shutdown('connection-lost', { restartIntent: true, code: 1 });
             }
         });
         this.bot.on('messagestr', async (message, _, jsonMsg) => {
@@ -822,14 +961,14 @@ export class Agent {
             }
         });
         this.bot.on('idle', () => {
-            if (this.managementPaused || this.actions.managementIntentRequired) return;
+            if (this._shutdownStarted || this.managementPaused || this.actions.managementIntentRequired) return;
             this.bot.clearControlStates();
             this.bot.pathfinder.stop(); // clear any lingering pathfinder
             this.bot.modes.unPauseAll();
             if (this._idleResumeTimer) return;
             this._idleResumeTimer = setTimeout(() => {
                 this._idleResumeTimer = null;
-                if (!this.managementPaused && !this.actions.managementIntentRequired && this.isIdle()) {
+                if (!this._shutdownStarted && !this.managementPaused && !this.actions.managementIntentRequired && this.isIdle()) {
                     this.actions.resumeAction().catch(error => console.error('Resume action failed:', error));
                 }
             }, 1000);
@@ -841,12 +980,12 @@ export class Agent {
         // This update loop ensures that each update() is called one at a time, even if it takes longer than the interval
         const INTERVAL = 300;
         let last = Date.now();
-        setTimeout(async () => {
-            while (true) {
+        this._updateLoopTimer = setTimeout(async () => {
+            while (!this._shutdownStarted) {
                 let start = Date.now();
                 await this.update(start - last);
                 let remaining = INTERVAL - (Date.now() - start);
-                if (remaining > 0) {
+                if (remaining > 0 && !this._shutdownStarted) {
                     await new Promise((resolve) => setTimeout(resolve, remaining));
                 }
                 last = start;
@@ -857,9 +996,9 @@ export class Agent {
     }
 
     async update(delta) {
-        if (this.managementPaused || this.actions.managementIntentRequired) return;
+        if (this._shutdownStarted || this.managementPaused || this.actions.managementIntentRequired) return;
         await this.bot.modes.update();
-        if (this.managementPaused || this.actions.managementIntentRequired) return;
+        if (this._shutdownStarted || this.managementPaused || this.actions.managementIntentRequired) return;
         this.self_prompter.update(delta);
         if (!this.managementPaused && !this.actions.managementIntentRequired) await this.checkTaskDone();
     }
@@ -869,27 +1008,25 @@ export class Agent {
     }
     
 
-    cleanKill(msg='Killing agent process...', code=1) {
-        this.history.add('system', msg);
-        this.bot.chat(code > 1 ? 'Restarting.': 'Exiting.');
-        this.history.save();
-        process.exit(code);
-    }
     async checkTaskDone() {
-        if (this.managementPaused || this.actions?.managementIntentRequired) return;
+        if (this._shutdownStarted || this.managementPaused || this.actions?.managementIntentRequired) return;
         if (this.task.data) {
             let res = this.task.isDone();
             if (res) {
-                await this.history.add('system', `Task ended with score : ${res.score}`);
-                await this.history.save();
-                // await new Promise(resolve => setTimeout(resolve, 3000)); // Wait 3 second for save to complete
                 console.log('Task finished:', res.message);
-                this.killAll();
+                this.taskResult = { score: res.score, message: String(res.message || '') };
+                this.killAll(`Task ended with score: ${res.score}. ${res.message || ''}`);
             }
         }
     }
 
-    killAll() {
-        serverProxy.shutdown();
+    killAll(message = 'Task complete.') {
+        const intent = { restartIntent: false, code: 0, message: String(message || '') };
+        if (this.requestShutdown) return this.requestShutdown('task-complete', intent);
+        return this.shutdown('task-complete', intent).then(async outcome => {
+            if (typeof process.send === 'function' && process.connected) await sendStandaloneExitIntent(outcome);
+            process.exit(0);
+            return outcome;
+        });
     }
 }
