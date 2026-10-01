@@ -8,6 +8,7 @@ import { containsCommand, commandExists, executeCommand, truncCommandMessage, is
 import { ActionManager } from './action_manager.js';
 import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
+import { createPlacesFacade } from './places.js';
 import { SelfPrompter } from './self_prompter.js';
 import convoManager from './conversation.js';
 import { handleTranslation, handleEnglishTranslation } from '../utils/translator.js';
@@ -42,7 +43,8 @@ export class Agent {
         this.history = new History(this);
         this.coder = new Coder(this);
         this.npc = new NPCContoller(this);
-        this.memory_bank = new MemoryBank();
+        this.places = createPlacesFacade(this, serverProxy);
+        this.memory_bank = new MemoryBank(serverProxy, this.name, () => this.places.isEnabled());
         this.self_prompter = new SelfPrompter(this);
         convoManager.initAgent(this);
         await this.prompter.initExamples();
@@ -475,14 +477,24 @@ export class Agent {
         this.bot.on('messagestr', async (message, _, jsonMsg) => {
             if (jsonMsg.translate && jsonMsg.translate.startsWith('death') && message.startsWith(this.name)) {
                 console.log('Agent died: ', message);
-                let death_pos = this.bot.entity.position;
-                this.memory_bank.rememberPlace('last_death_position', death_pos.x, death_pos.y, death_pos.z);
+                let death_pos = this.bot.entity?.position;
                 let death_pos_text = null;
-                if (death_pos) {
-                    death_pos_text = `x: ${death_pos.x.toFixed(2)}, y: ${death_pos.y.toFixed(2)}, z: ${death_pos.x.toFixed(2)}`;
+                let deathPlaceSaved = false;
+                if (death_pos && ['x', 'y', 'z'].every((axis) => Number.isFinite(death_pos[axis]))) {
+                    try {
+                        await this.memory_bank.rememberPlace('last_death_position', death_pos.x, death_pos.y, death_pos.z, {
+                            dimension: this.bot.game.dimension,
+                            kind: 'other',
+                            purpose: 'death location'
+                        });
+                        deathPlaceSaved = true;
+                    } catch (error) {
+                        console.error('Failed to save death location:', error.message);
+                    }
+                    death_pos_text = `x: ${death_pos.x.toFixed(2)}, y: ${death_pos.y.toFixed(2)}, z: ${death_pos.z.toFixed(2)}`;
                 }
-                let dimention = this.bot.game.dimension;
-                this.handleMessage('system', `You died at position ${death_pos_text || "unknown"} in the ${dimention} dimension with the final message: '${message}'. Your place of death is saved as 'last_death_position' if you want to return. Previous actions were stopped and you have respawned.`);
+                let dimension = this.bot.game.dimension;
+                this.handleMessage('system', `You died at position ${death_pos_text || "unknown"} in the ${dimension} dimension with the final message: '${message}'. ${deathPlaceSaved ? "Your place of death is saved as 'last_death_position' if you want to return." : 'The death location could not be confirmed or saved.'} Previous actions were stopped and you have respawned.`);
             }
         });
         this.bot.on('idle', () => {

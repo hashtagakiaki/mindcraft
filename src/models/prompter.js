@@ -156,9 +156,22 @@ export class Prompter {
                 msg.role !== 'system' && msg.content.includes('!newAction(')
             )?.content?.match(/!newAction\((.*?)\)/)?.[1] || '';
 
+            const codeDocs = await this.skill_libary.getRelevantSkillDocs(code_task_content, settings.relevant_docs_count);
+            const placeDocs = this.agent.places?.isEnabled() ? `
+#### PLACE MEMORY SDK
+The ` + '`places`' + ` object is a restricted, async SDK. It does not expose the bot, socket, filesystem, or state directory.
+- ` + '`places.find(text, options?)`' + ` searches this dimension and returns stable IDs, with purpose/kind filters.
+- ` + '`places.inspect(placeId)`' + ` returns verification and output-storage details; inspect candidates before choosing.
+- ` + '`places.rememberHere(name, kind?, purpose?)`' + ` records the bot's current point (kind ` + '`base`' + ` is only a representative point).
+- ` + '`places.rememberObservedAt(name, kind, purpose, position)`' + ` records a currently loaded block only when it matches the kind (farm=farmland, storage=chest/trapped chest).
+- ` + '`places.rememberReported(name, kind, purpose, {x,y,z}, dimension?)`' + ` records coordinates as unverified.
+- ` + '`places.verify(placeId)`' + ` requires a loaded target block in the current dimension.
+- ` + '`places.goTo(placeId)`' + ` and ` + '`places.tendFarm(farmId, options?)`' + ` use existing movement and farm actions by stable ID.
+- ` + '`places.setOutputStorage(fromId, storageId)`' + ` sets an explicit same-dimension relation to a storage record.
+Treat missing or stale observations as uncertain. Do not claim reported coordinates were observed, and do not invent IDs; search or inspect first.` : '';
             prompt = prompt.replaceAll(
                 '$CODE_DOCS',
-                await this.skill_libary.getRelevantSkillDocs(code_task_content, settings.relevant_docs_count)
+                codeDocs + placeDocs
             );
         }
         if (prompt.includes('$EXAMPLES') && examples !== null)
@@ -222,6 +235,7 @@ export class Prompter {
 
             let prompt = this.profile.conversing;
             prompt = await this.replaceStrings(prompt, messages, this.convo_examples);
+            if (this.agent.places) prompt += `\n\nPLACE MEMORY CONTEXT\n${this.agent.places.getPromptContext()}`;
             let generation;
 
             try {
@@ -269,6 +283,7 @@ export class Prompter {
         await this.checkCooldown();
         let prompt = this.profile.coding;
         prompt = await this.replaceStrings(prompt, messages, this.coding_examples);
+        if (this.agent.places) prompt += `\n\nPLACE MEMORY CONTEXT\n${this.agent.places.getPromptContext()}`;
 
         let resp = await this.code_model.sendRequest(messages, prompt);
         this.awaiting_coding = false;

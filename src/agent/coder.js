@@ -82,7 +82,7 @@ export class Coder {
 
             try {
                 console.log('Executing code...');
-                await executionModule.main(this.agent.bot);
+                await executionModule.main(this.agent.bot, this.agent.places?.sdk);
 
                 const code_output = this.agent.actions.getBotOutputSummary();
                 const summary = "Agent wrote this code: \n```" + this._sanitizeCode(code) + "```\nCode Output:\n" + code_output;
@@ -112,7 +112,7 @@ export class Coder {
     async  _lintCode(code) {
         let result = '#### CODE ERROR INFO ###\n';
         const codeNoComments = code.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
-        const skillRegex = /((?:skills|world)\.(.*?))\(/g;
+        const skillRegex = /((?:skills|world|places)\.(.*?))\(/g;
         const skills = [];
         let match;
         while ((match = skillRegex.exec(codeNoComments)) !== null) {
@@ -120,7 +120,8 @@ export class Coder {
         }
         const allDocs = await this.agent.prompter.skill_libary.getAllSkillDocs();
         const knownSkills = new Set(allDocs.map(doc => doc.split('\n')[0]));
-        const missingSkills = skills.filter(skill => !knownSkills.has(skill));
+        const allowedPlaceMethods = new Set(['places.find', 'places.inspect', 'places.resolveAlias', 'places.goToAlias', 'places.rememberHere', 'places.rememberObservedAt', 'places.rememberReported', 'places.verify', 'places.setOutputStorage', 'places.setAlias', 'places.setHome', 'places.goTo', 'places.tendFarm']);
+        const missingSkills = skills.filter(skill => !knownSkills.has(skill) && !allowedPlaceMethods.has(skill));
         if (missingSkills.length > 0) {
             result += 'These functions do not exist:\n';
             result += missingSkills.join('\n');
@@ -186,6 +187,7 @@ export class Coder {
             skills,
             log: skills.log,
             world,
+            places: this.agent.places?.sdk,
             Vec3,
         });
         const mainFn = compartment.evaluate(src);

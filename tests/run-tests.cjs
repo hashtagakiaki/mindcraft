@@ -483,6 +483,8 @@ async function testFarm(root) {
 async function main() {
   execFileSync(node, [path.join(__dirname, 'place_store.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'place_rpc.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'place_actions.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'place_agent.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'action_manager.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'idle_scheduling.test.cjs')], { stdio: 'inherit' })
   const temp = await mkdtemp(path.join(os.tmpdir(), 'mindcraft-owned-tests-'))

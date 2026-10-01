@@ -210,7 +210,7 @@ Full verification:
 
 ## Wave 3
 
-- [ ] Task 5: 場所記憶を会話commandとnewActionへ接続する。
+- [x] Task 5: 場所記憶を会話commandとnewActionへ接続する。
   Writes:
   - src/agent/memory_bank.js
   - src/agent/agent.js
@@ -310,6 +310,7 @@ Full verification:
 
 ## Plan updates
 
+- 2026-10-01: Task 5は既存bookmark syntax/async死亡記録、個人home・alias、場所command、最大5候補のcoding context、制限SDKのSES実行/lint、current pointとloaded blockと報告座標の区別を実装。記録失敗は作業結果と分けてcommand返却、guard/境界fixture・全source suite・syntax/diff checks成功。
 - 2026-10-01: Task 5 fixtureのnode_modules全体symlink配下writeが共有cheerioの2fileを変更したため検証を停止。package-lockのintegrity一致cacheからpackage.json復旧、注入index.js削除、全228file一致とreal load smoke成功。fixtureはpackage単位read-only symlinkと一時directory内write guardへ変更し、full suiteを再実行する。install/ci・live操作なし。
 - 2026-10-01: Task 6は既存farm skillに遅延storage解決・収納直前照合hookを追加。収納delta、partial/open/deposit failure、観測RPC中relation変更、relation消失時fallback禁止、観測missing/unloaded/到達不能、zero-workをfixtureで確認、focused/full suiteとsyntax/diff checks成功。
 - 2026-10-01: Task 5のSES実行templateもplaces引数に対応させる必要があるためbots/execTemplate.jsをWritesへ追加。実行/lint両templateとCoderを同じ契約で検証する。

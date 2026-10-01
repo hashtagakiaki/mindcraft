@@ -221,9 +221,9 @@ export const queryList = [
     },
     {
         name: '!savedPlaces',
-        description: 'List all saved locations.',
+        description: 'List saved location names or persistent place names and personal aliases.',
         perform: async function (agent) {
-            return "Saved place names: " + agent.memory_bank.getKeys();
+            return "Saved place names: " + await agent.memory_bank.getKeys();
         }
     }, 
     {

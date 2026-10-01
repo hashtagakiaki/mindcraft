@@ -159,12 +159,13 @@ export const actionsList = [
     },
     {
         name: '!rememberHere',
-        description: 'Save the current location with a given name.',
+        description: 'Save the bot current position as an observed place under a personal name; when persistent place memory is disabled this remains a session bookmark.',
         params: {'name': { type: 'string', description: 'The name to remember the location as.' }},
         perform: async function (agent, name) {
+            if (agent.places.isEnabled()) return agent.places.sdk.rememberHere(name);
             const pos = agent.bot.entity.position;
-            agent.memory_bank.rememberPlace(name, pos.x, pos.y, pos.z);
-            return `Location saved as "${name}".`;
+            await agent.memory_bank.rememberPlace(name, pos.x, pos.y, pos.z, { dimension: agent.bot.game.dimension });
+            return `Session bookmark saved as "${name}".`;
         }
     },
     {
@@ -172,13 +173,143 @@ export const actionsList = [
         description: 'Go to a saved location.',
         params: {'name': { type: 'string', description: 'The name of the location to go to.' }},
         perform: runAsAction(async (agent, name) => {
-            const pos = agent.memory_bank.recallPlace(name);
+            if (agent.places.isEnabled()) {
+                const result = await agent.places.sdk.goToAlias(name);
+                skills.log(agent.bot, JSON.stringify(result));
+                return;
+            }
+            const pos = await agent.memory_bank.recallPlace(name);
             if (!pos) {
             skills.log(agent.bot, `No location named "${name}" saved.`);
             return;
             }
             await skills.goToPosition(agent.bot, pos[0], pos[1], pos[2], 1);
         })
+    },
+    {
+        name: '!findPlace',
+        description: 'Search saved places in the current dimension by name, alias, kind, or purpose. Use the returned stable ID with !inspectPlace or place SDK calls; multiple matches must be selected by ID.',
+        params: { 'query': { type: 'string', description: 'A place name, kind, or purpose such as forest, mine, village, food, or home.' } },
+        perform: async (agent, query) => agent.places.sdk.find(query)
+    },
+    {
+        name: '!inspectPlace',
+        description: 'Inspect a saved place by stable ID, including its verification state and related output storage.',
+        params: { 'place_id': { type: 'string', description: 'The stable place ID returned by !findPlace.' } },
+        perform: async (agent, place_id) => agent.places.sdk.inspect(place_id)
+    },
+    {
+        name: '!recordPlaceHere',
+        description: 'Record the bot current position as an observed point with a purpose. Use !recordPlaceBlock to record a farm, storage, forest, village, mine, base, or resource target.',
+        params: {
+            'name': { type: 'string', description: 'A useful place name.' },
+            'purpose': { type: 'string', description: 'A use tag such as food, wood, iron, shelter, or trading.' }
+        },
+        perform: async (agent, name, purpose) => agent.places.sdk.rememberHere(name, 'other', purpose)
+    },
+    {
+        name: '!recordPlaceBlock',
+        description: 'Record a loaded target block at supplied coordinates only when it matches the requested place kind. Farm requires farmland; storage requires a chest or trapped chest.',
+        params: {
+            'name': { type: 'string', description: 'A useful place name.' },
+            'kind': { type: 'string', description: 'Place kind: base, farm, storage, forest, village, mine, resource, or other.' },
+            'purpose': { type: 'string', description: 'A use tag such as food, wood, iron, shelter, or trading.' },
+            'x': { type: 'float', description: 'Loaded target block x coordinate.' },
+            'y': { type: 'float', description: 'Loaded target block y coordinate.' },
+            'z': { type: 'float', description: 'Loaded target block z coordinate.' }
+        },
+        perform: async (agent, name, kind, purpose, x, y, z) => agent.places.sdk.rememberObservedAt(name, kind, purpose, { x, y, z })
+    },
+    {
+        name: '!recordReportedPlace',
+        description: 'Save user-reported coordinates as unverified. This does not claim the bot observed the location.',
+        params: {
+            'name': { type: 'string', description: 'A place name.' },
+            'kind': { type: 'string', description: 'Place kind: base, farm, storage, forest, village, mine, resource, or other.' },
+            'purpose': { type: 'string', description: 'A use tag.' },
+            'x': { type: 'float', description: 'Reported x coordinate.' },
+            'y': { type: 'float', description: 'Reported y coordinate.' },
+            'z': { type: 'float', description: 'Reported z coordinate.' },
+            'dimension': { type: 'string', description: 'Dimension identifier such as overworld, the_nether, the_end, or a namespaced identifier.' }
+        },
+        perform: async (agent, name, kind, purpose, x, y, z, dimension) => agent.places.sdk.rememberReported(name, kind, purpose, { x, y, z }, dimension)
+    },
+    {
+        name: '!verifyPlace',
+        description: 'Inspect a loaded target block in the current dimension. A matching kind becomes observed; a known mismatch becomes missing; an unloaded block remains unchanged.',
+        params: { 'place_id': { type: 'string', description: 'The stable place ID.' } },
+        perform: async (agent, place_id) => {
+            const result = await agent.places.sdk.verify(place_id);
+            if (result.status === 'missing') return `Place ${place_id} was marked missing after observing ${result.observedBlock} at its saved position.`;
+            if (result.status === 'not_nearby') return `Place ${place_id} remains unchanged; the bot is too far away to confirm its saved point.`;
+            if (result.status === 'observed_point') return `The bot is at the saved representative point for ${place_id}; this does not verify a structure around it.`;
+            return `Place ${place_id} was observed in the current world view.`;
+        }
+    },
+    {
+        name: '!setOutputStorage',
+        description: 'Set an explicit output_storage relation between two stable place IDs. The target must be a saved storage place in the same dimension.',
+        params: {
+            'place_id': { type: 'string', description: 'Farm or resource place ID.' },
+            'storage_id': { type: 'string', description: 'Storage place ID.' }
+        },
+        perform: async (agent, place_id, storage_id) => {
+            await agent.places.sdk.setOutputStorage(place_id, storage_id);
+            return `Output storage for ${place_id} is now ${storage_id}.`;
+        }
+    },
+    {
+        name: '!setPlaceHome',
+        description: 'Set this bot personal home preference by stable place ID.',
+        params: { 'place_id': { type: 'string', description: 'The saved home place ID.' } },
+        perform: async (agent, place_id) => {
+            await agent.places.sdk.setHome(place_id);
+            return `Personal home set to ${place_id}.`;
+        }
+    },
+    {
+        name: '!setPlaceAlias',
+        description: 'Set a personal alias for a saved place ID. Alias names are private to this bot.',
+        params: {
+            'alias': { type: 'string', description: 'Personal name such as home or last_death_position.' },
+            'place_id': { type: 'string', description: 'The saved place stable ID.' }
+        },
+        perform: async (agent, alias, place_id) => {
+            await agent.places.sdk.setAlias(alias, place_id);
+            return `Personal alias "${alias}" now refers to ${place_id}.`;
+        }
+    },
+    {
+        name: '!goToPlace',
+        description: 'Travel to a saved place by stable ID after confirming its dimension.',
+        params: { 'place_id': { type: 'string', description: 'The stable place ID.' } },
+        perform: async (agent, place_id) => {
+            let outcome;
+            const run = await agent.actions.runAction('action:goToPlace', async () => {
+                outcome = await agent.places.sdk.goTo(place_id);
+                skills.log(agent.bot, JSON.stringify(outcome));
+            });
+            if (!outcome) return run.message || `Could not confirm travel to ${place_id}.`;
+            if (outcome.recordError) return `Movement result: ${outcome.status}. The place visit could not be saved (${outcome.recordError}); do not repeat the movement just to retry the record.`;
+            return outcome.ok ? `Visited ${place_id}.` : `Could not confirm travel to ${place_id}: ${outcome.status ?? 'unknown status'}.`;
+        }
+    },
+    {
+        name: '!tendSavedFarm',
+        description: 'Tend a saved farm by stable ID. Its linked output storage relation is checked before depositing.',
+        params: { 'farm_id': { type: 'string', description: 'The stable saved farm ID.' } },
+        perform: async (agent, farm_id) => {
+            let outcome;
+            const run = await agent.actions.runAction('action:tendSavedFarm', async () => {
+                outcome = await agent.places.sdk.tendFarm(farm_id);
+                skills.log(agent.bot, JSON.stringify(outcome));
+            });
+            if (!outcome) return run.message || `Farm action needs attention: unknown status.`;
+            const counts = `harvested ${outcome.harvested ?? 0}, planted ${outcome.planted ?? 0}, stored ${outcome.stored ?? 0}`;
+            const ledgerWarnings = [outcome.relationRecordError, ...(outcome.observationErrors ?? [])].filter(Boolean);
+            if (ledgerWarnings.length) return `Farm action result ${outcome.status}: ${counts}. Place-state recording had an error (${ledgerWarnings.join('; ')}); review the saved relation/observation without repeating completed farm work.`;
+            return outcome.ok ? `Farm action ${outcome.status}; ${counts}.` : `Farm action needs attention: ${outcome.status ?? 'unknown status'}; ${counts}.`;
+        }
     },
     {
         name: '!givePlayer',
