@@ -5,6 +5,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import * as mindcraft from './mindcraft.js';
 import { readFileSync } from 'fs';
+import settings from '../../settings.js';
+import { attachPlaceStoreLifecycle, PlaceStore } from './place_store.js';
+import { attachPlaceRpc } from './place_rpc.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Mindserver is:
@@ -14,6 +17,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let io;
 let server;
+let placeStorePromise = null;
+let placeStoreError = null;
 const agent_connections = {};
 const agent_listeners = [];
 
@@ -50,6 +55,21 @@ export function createMindServer(host_public = false, port = 8080) {
     server = http.createServer(app);
     io = new Server(server);
 
+    placeStorePromise = null;
+    placeStoreError = null;
+    let placeStoreLifecycle = null;
+    let placeRpcClosing = false;
+    if (Boolean(settings.place_state_dir) !== Boolean(settings.place_world_id)) {
+        placeStoreError = Object.assign(new Error('place_state_dir and place_world_id must be configured together'), { code: 'INVALID_CONFIG' });
+        console.error('Place store configuration is incomplete:', placeStoreError.message);
+    } else if (settings.place_state_dir && settings.place_world_id) {
+        placeStorePromise = PlaceStore.open({ stateDir: settings.place_state_dir, worldId: settings.place_world_id });
+        placeStorePromise.catch((error) => {
+            placeStoreError = error;
+            console.error('Place store failed to initialize:', error.message);
+        });
+    }
+
     // Serve static files
     const __dirname = path.dirname(fileURLToPath(import.meta.url));
     app.use(express.static(path.join(__dirname, 'public')));
@@ -57,7 +77,17 @@ export function createMindServer(host_public = false, port = 8080) {
     // Socket.io connection handling
     io.on('connection', (socket) => {
         let curAgentName = null;
+        let processAgentName = null;
         console.log('Client connected');
+
+        attachPlaceRpc(socket, {
+            getAgentName: () => processAgentName && agent_connections[processAgentName]?.socket === socket ? processAgentName : null,
+            getPlaceStore: async () => {
+                if (placeStoreError) throw placeStoreError;
+                return placeStorePromise;
+            },
+            isClosing: () => placeRpcClosing
+        });
 
         agentsStatusUpdate(socket);
 
@@ -101,7 +131,7 @@ export function createMindServer(host_public = false, port = 8080) {
 
         socket.on('get-settings', (agentName, callback) => {
             if (agent_connections[agentName]) {
-                callback({ settings: agent_connections[agentName].settings });
+                callback({ settings: settingsForAgent(agent_connections[agentName].settings) });
             } else {
                 callback({ error: `Agent '${agentName}' not found.` });
             }
@@ -110,6 +140,7 @@ export function createMindServer(host_public = false, port = 8080) {
         socket.on('connect-agent-process', (agentName) => {
             if (agent_connections[agentName]) {
                 agent_connections[agentName].socket = socket;
+                processAgentName = agentName;
                 agentsStatusUpdate();
             }
         });
@@ -119,6 +150,7 @@ export function createMindServer(host_public = false, port = 8080) {
                 agent_connections[agentName].socket = socket;
                 agent_connections[agentName].in_game = true;
                 curAgentName = agentName;
+                processAgentName = agentName;
                 agentsStatusUpdate();
             }
             else {
@@ -127,10 +159,11 @@ export function createMindServer(host_public = false, port = 8080) {
         });
 
         socket.on('disconnect', () => {
-            if (agent_connections[curAgentName]) {
-                console.log(`Agent ${curAgentName} disconnected`);
-                agent_connections[curAgentName].in_game = false;
-                agent_connections[curAgentName].socket = null;
+            const disconnectedName = curAgentName ?? processAgentName;
+            if (disconnectedName && agent_connections[disconnectedName]?.socket === socket) {
+                console.log(`Agent ${disconnectedName} disconnected`);
+                agent_connections[disconnectedName].in_game = false;
+                agent_connections[disconnectedName].socket = null;
                 agentsStatusUpdate();
             }
             if (agent_listeners.includes(socket)) {
@@ -150,7 +183,7 @@ export function createMindServer(host_public = false, port = 8080) {
         socket.on('set-agent-settings', (agentName, settings) => {
             const agent = agent_connections[agentName];
             if (agent) {
-                agent.setSettings(settings);
+                agent.setSettings(settingsForAgent(settings));
                 agent.socket.emit('restart-agent');
             }
         });
@@ -185,14 +218,7 @@ export function createMindServer(host_public = false, port = 8080) {
 
         socket.on('shutdown', () => {
             console.log('Shutting down');
-            for (let agentName in agent_connections) {
-                mindcraft.stopAgent(agentName);
-            }
-            // wait 2 seconds
-            setTimeout(() => {
-                console.log('Exiting MindServer');
-                process.exit(0);
-            }, 2000);
+            void placeStoreLifecycle?.shutdown('SHUTDOWN');
             
         });
 
@@ -225,7 +251,27 @@ export function createMindServer(host_public = false, port = 8080) {
         console.log(`MindServer running on port ${port} on host ${host}`);
     });
 
+    placeStoreLifecycle = attachPlaceStoreLifecycle({
+        server,
+        socketServer: io,
+        storePromise: placeStorePromise,
+        beforeClose: () => {
+            placeRpcClosing = true;
+            for (const agentName of Object.keys(agent_connections)) mindcraft.stopAgent(agentName);
+        }
+    });
+
     return server;
+}
+
+function settingsForAgent(agentSettings) {
+    const result = { ...agentSettings };
+    delete result.place_state_dir;
+    delete result.place_world_id;
+    delete result.place_memory_enabled;
+    result.place_memory_enabled = Boolean(settings.place_state_dir && settings.place_world_id);
+    result.place_world_id = result.place_memory_enabled ? settings.place_world_id : null;
+    return result;
 }
 
 function agentsStatusUpdate(socket) {

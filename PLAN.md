@@ -47,7 +47,7 @@ Approach:
 
 ## 1. 台帳の正本とscope
 MindServer内にPlaceStoreを一つ置き、botは既存Socket.IO経由で照会・更新する。子プロセスがJSONを直接書かない。小さな台帳はNode標準fsのJSONで十分で、更新を直列化し、一時ファイル→rename後にackを返す。保存失敗では成功を返さず、直前の状態を維持する。破損時は原本を保存してエラーとし、空台帳で上書きしない。revisionを持ち、古いrevisionでの関係上書きは競合として再照会する。
-place_state_dir（絶対path）とplace_world_id（明示namespace）はlauncher settingsが正本。settings.jsの既定値とpublic/settings_spec.jsonをそろえ、親が登録したagent settingsからscopeを確定する。LLM/RPC payloadからstate pathや別worldを任意指定させない。同一state dirには一つのMindServerだけが書く契約とし、二重起動はlockで拒否する。lock方式はTask 1で決める。
+place_state_dir（絶対path）とplace_world_id（明示namespace）はlauncher settingsが正本。settings.jsのglobal既定値を正本とし、親が登録したagentへ同一scopeを供給する。public/settings_spec.jsonはper-agent gearフォームなのでglobal scope項目を載せない。LLM/RPC payloadからstate pathや別worldを任意指定させない。同一state dirには一つのMindServerだけが書く契約とし、二重起動はlockで拒否する。lock方式はTask 1で決める。
 playでは既存run_dirを運用上のsave境界とし、run_dir/place-state/をbundle外のstate rootとする。place_world_idはそのstate rootの小さなmetadataに一度割り当てたUUID。server/worldは書き換えない。同じrunのbundle準備は同じrootとIDをsettingsへ渡す。別のsaveを同じrunに交換する場合はnamespaceを更新する明示操作が必要で、worldが変わったことをprotocolから自動検出できるとは保証しない。path/seed/host:portを恒久的world IDと推測しない。
 汎用source利用ではoperatorが両設定を指定する。未設定なら既存bookmarkはsession内で利用できるが永続/shared記録機能は無効で、その状態を照会に表示する。evalの使い捨てcaseは独自state root/IDを使いplayと共有しない。place stateの読込みはload_memoryから独立して、親store開始時に行う。runtime切替・rollbackも同じschemaのstoreを使い、feature以前のruntimeに戻す場合は台帳を削除せず未使用で保持する。
 設定は親起動/agent registration時に有効になる。UIからstate dir/world IDを個別botだけ変更して分裂させない。変更には親を再起動する運用とし、実際のplay activationは別途明示依頼で行う。
@@ -150,14 +150,13 @@ Full verification:
 
 ## Wave 2
 
-- [ ] Task 3: 共有PlaceStoreと中央hubのRPCを実装する。
+- [x] Task 3: 共有PlaceStoreと中央hubのRPCを実装する。
   Writes:
   - src/mindcraft/place_store.js
   - src/mindcraft/place_rpc.js（必要時のみ）
   - src/mindcraft/mindserver.js
   - src/agent/mindserver_proxy.js
   - settings.js
-  - src/mindcraft/public/settings_spec.json
   - tests/place_store.test.cjs
   - tests/place_rpc.test.cjs
   - tests/run-tests.cjs
@@ -183,7 +182,7 @@ Full verification:
   Commit:
   - `feat: add shared persistent place store`
 
-- [ ] Task 4: bundle外の場所stateとworld namespaceを準備設定へ接続する。
+- [x] Task 4: bundle外の場所stateとworld namespaceを準備設定へ接続する。
   Writes:
   - ../mindcraft-eval/scripts/prepare_mindcraft_play.py
   - ../mindcraft-eval/scripts/place_state.py（必要な場合のみ）
@@ -209,6 +208,68 @@ Full verification:
   Commit:
   - `feat: preserve place state across play bundles`
 
+## Wave 3
+
+- [ ] Task 5: 場所記憶を会話commandとnewActionへ接続する。
+  Writes:
+  - src/agent/memory_bank.js
+  - src/agent/agent.js
+  - src/agent/commands/actions.js
+  - src/agent/commands/queries.js
+  - src/agent/places.js
+  - src/agent/coder.js
+  - src/models/prompter.js
+  - bots/lintTemplate.js
+  - tests/place_agent.test.cjs
+  - tests/run-tests.cjs
+  - README.md
+  - AGENTS.md
+  Reads:
+  - src/agent/mindserver_proxy.js
+  - src/mindcraft/place_store.js
+  - src/agent/place_actions.js（Task 6 interface）
+  - src/agent/commands/index.js
+  Change:
+  - 既存bookmark/死亡地点callerをasync永続ackへ接続し、global未設定時はsession内で従来syntaxを保つ。個人alias/home/deathを分離。
+  - 用途検索/詳細照会/場所登録/関係設定commandと制限付きplaces facadeを同一clientへ接続。
+  - observed登録はbot位置またはloaded対象blockを確認し、ユーザー報告を観測済みとしない。
+  - 検索/選択IDを会話とcodingへ引き継ぎ、docs/prompt/lintへ公開。未確認/複数候補/設定無効を明示し、関連候補だけを渡す。
+  - facade.goTo/place.tendFarmはTask 6 createPlaceActions(agent, client)へ委譲し、薄い既存skill接続を共有する。
+  - 自動記録は確認できた採取/有用な直接観測から同一APIを利用する導線をprompt/docsとfixtureで示す。
+  Verify:
+  - `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/place_agent.test.cjs`
+  - `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs`
+  - `git diff --check`
+  Expected:
+  - 既存syntaxと新commandから同一place IDが返り、SESから検索/記録/再訪を呼べる。異dimensionと未確認更新を誤って成功扱いしない。
+  Commit:
+  - `feat: connect place memory to agent commands and actions`
+
+- [ ] Task 6: 場所IDから既存移動・farm skillを使うadapterを実装する。
+  Writes:
+  - src/agent/place_actions.js
+  - src/agent/library/skills.js
+  - tests/place_actions.test.cjs
+  Reads:
+  - src/agent/mindserver_proxy.js
+  - src/mindcraft/place_store.js
+  - tests/run-tests.cjs
+  - tests/farm_skill.test.cjs
+  Change:
+  - createPlaceActions(agent, client)でbound goTo(placeId)/tendFarm(farmId, options)を公開。store/RPC既存APIを使い、LLMに座標を再入力させない。
+  - inspectPlaceの同snapshot relationからstorageを解決し、同world/dimensionとloaded対象を確認して既存tendNearbyFarmへ渡す。
+  - 明示relation優先、未登録storage候補は用途適合/一意の場合のみ選択。曖昧/消失は確認を要する結果で止め、収穫物を保持。
+  - 遠方chestは移動/読込み後確認。既存deposit結果をserver-backed inventory/container更新で確認してからobserved関係を記録する。
+  - 関係revision変更時再解決し、対象消失/未ロード/到達失敗を区別。台帳更新失敗後に作業を繰り返さない。
+  Verify:
+  - `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/place_actions.test.cjs`
+  - `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs`
+  - `git diff --check`
+  Expected:
+  - 正しい畑/保管先を既存skillで使用し、部分収納/失敗/zero countsを成功確認と混同しない。従来座標指定farmも維持。
+  Commit:
+  - `feat: reuse saved places for navigation and farm work`
+
 ## Deferred work
 
 - Wave 1の契約確定後、sourceにschema/PlaceStore、単一writer/保存/namespace、clientと設定を実装する。独立fixtureで4bot共有、再起動、競合、破損保持を確認する。
@@ -220,6 +281,9 @@ Full verification:
 
 ## Plan updates
 
+- 2026-10-01: Task 3のstore/RPC/alias/preferences/inspect/visit、global固定設定、保存失敗・競合・restart・SIGINT/TERM・shutdown queue drainを検証。full source suiteとsyntax/diff checks成功。実applyがUIport閉後kill-sessionするためstore releaseをHTTP closeより先行させた。Task 5/6はcoreへ依存する並列scopeとして具体化。
+- 2026-10-01: public settings_specは全項目をper-agent gearへ露出するためglobal scope設定は掲載しない。root設定をhubの正本としてagent返信/RPCを固定し、UI payload上書きのfixtureをTask 3へ追加。
+- 2026-10-01: Task 4でrun-level namespaceのatomic初期化/明示更新、global bundle設定、旧台帳保持を実装。24並行initializer、同run/別run/破損保持/rollback fixtureとeval全68テスト成功。source接続とpin/export検証は後続task。
 - 2026-10-01: Task 1で4client/保存失敗と回復/再読込/SES facade/host timeoutを確認しcleanup済み。初期timeoutはprobe shutdown順の問題で、transport仮説を否定。metadataはworld.jsonのworld_id、台帳はworlds/<world_id>.jsonでTask 3/4を整合。
 - 2026-10-01: Task 2 filesystem fixtureで同run/bundle間のstate共有、別run分離、4bot一致、load_memory独立を確認しcleanup済み。現行prepareには未実装。metadata並行初期化は未検証のため実装fixtureで検証する。source/eval baseline suitesも成功。
 - 2026-10-01: `$exec` により実装を開始。Wave 1の2実験を独立workerへ割り当て、結果を確認してDeferredを具体化する。

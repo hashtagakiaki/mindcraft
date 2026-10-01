@@ -2,6 +2,9 @@ import { io } from 'socket.io-client';
 import convoManager from './conversation.js';
 import { setSettings } from './settings.js';
 import { getFullState } from './library/full_state.js';
+import { PlaceRpcError, requestPlaceRpc } from '../mindcraft/place_rpc.js';
+
+const PLACE_RPC_TIMEOUT_MS = 5000;
 
 // agent's individual connection to the mindserver
 // always connect to localhost
@@ -119,6 +122,55 @@ class MindServerProxy {
 
     getSocket() {
         return this.socket;
+    }
+
+    requestPlace(operation, payload = {}, expectedRevision) {
+        if (!this.connected || !this.socket) return Promise.reject(new PlaceRpcError('DISCONNECTED', 'MindServer is not connected'));
+        return requestPlaceRpc(this.socket, operation, payload, expectedRevision, PLACE_RPC_TIMEOUT_MS);
+    }
+
+    async queryPlaces(criteria = {}) {
+        return (await this.requestPlace('query', criteria)).value;
+    }
+
+    async getPlace(placeId) {
+        return (await this.requestPlace('get', { placeId })).value;
+    }
+
+    async inspectPlace(placeId) {
+        return (await this.requestPlace('inspect', { placeId })).value;
+    }
+
+    async resolvePlaceAlias(alias) {
+        return (await this.requestPlace('resolve_alias', { alias })).value;
+    }
+
+    async getPlacePreferences() {
+        return (await this.requestPlace('preferences')).value;
+    }
+
+    async rememberPlace(place, { alias, expectedRevision } = {}) {
+        return this.requestPlace('remember', { place, alias }, expectedRevision);
+    }
+
+    async updatePlaceObservation(observation, expectedRevision) {
+        return this.requestPlace('observation', observation, expectedRevision);
+    }
+
+    async recordPlaceVisit(visit, expectedRevision) {
+        return this.requestPlace('visit', visit, expectedRevision);
+    }
+
+    async setPlaceRelation(relation, expectedRevision) {
+        return this.requestPlace('relation', relation, expectedRevision);
+    }
+
+    async setPlaceAlias(alias, placeId, expectedRevision) {
+        return this.requestPlace('alias', { alias, placeId }, expectedRevision);
+    }
+
+    async setPlacePreference(preference, expectedRevision) {
+        return this.requestPlace('preference', preference, expectedRevision);
     }
 }
 

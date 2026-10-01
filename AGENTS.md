@@ -12,6 +12,7 @@
 | Purpose | Command |
 |---|---|
 | Offline craft/farm/mining regression tests | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs` |
+| Place store/RPC focused fixtures | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/place_store.test.cjs` and `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/place_rpc.test.cjs` |
 | Syntax check | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node --check main.js` |
 | Whitespace check | `git diff --check` |
 | Worktree status | `git status --short` |
@@ -27,6 +28,8 @@
 | Evaluation and case templates | `/home/akito/workspace/project/minecraft-autonomy/mindcraft-eval/` |
 
 - `mindcraft-eval/runtime/upstream/codex-oauth.json` を読まない、コピーしない、stage/logに含めない。keys、`.env`、profiles、bot logs、conversations、memory、worlds、server jars、runtime modules、生成resultを追加しない。
+- PlaceStoreはroot `settings.js` の `place_state_dir` と `place_world_id` だけをscope正本として使う。絶対pathとUUIDを両方設定するか、両方nullにする。片方だけの設定は起動後のRPCで明示errorになる。これらはstartup-onlyで、個別agent/UI設定からscopeを指定しない。place stateは `load_memory` と独立し、worldごとに `place_state_dir/worlds/<place_world_id>.json` へ保存する。
+- 同一state rootには一つのMindServerだけが書く。通常のSIGINT/SIGTERMとUI shutdownではhub停止時にlockを解放する。crash後に `.place-store.lock` が残ったら、PIDと実行中MindServerを確認してwriterが存在しない場合に限り手動削除する。writerがいる間にlockを削除しない。
 - ユーザー作成のworld template/saveはread-only。live確認は既存CaseServer copyだけで行い、templateを生成・編集しない。
 - smokeや通常検証では稼働中play server `40973`、UI `8098`、tmux session、4体のbotを操作しない。ユーザーが明示承認したbot-only切替に限り親Node・4bot・UIの停止/起動を許可する。Minecraft server/worldとOllamaは切替対象外。test目的でplay起動scriptを実行しない。
 - 隔離Minecraft live確認はCaseServerのloopback `25569` / `25570`だけを使う。`25566`は禁止。productionやsystem serviceを変更しない。
