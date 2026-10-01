@@ -19,6 +19,7 @@ export class SelfPrompter {
                 return 'No prompt specified. Ignoring request.';
             prompt = this.prompt;
         }
+        this.interrupt = false;
         this.state = ACTIVE;
         this.prompt = prompt;
         this.startLoop();
@@ -83,7 +84,6 @@ export class SelfPrompter {
         }
         console.log('self prompt loop stopped')
         this.loop_active = false;
-        this.interrupt = false;
     }
 
     update(delta) {
@@ -106,39 +106,38 @@ export class SelfPrompter {
     }
 
     async stopLoop() {
-        // you can call this without await if you don't need to wait for it to finish
-        if (this.interrupt)
-            return;
         console.log('stopping self-prompt loop')
         this.interrupt = true;
         while (this.loop_active) {
             await new Promise(r => setTimeout(r, 500));
         }
-        this.interrupt = false;
+        if (this.state === ACTIVE)
+            this.interrupt = false;
     }
 
     async stop(stop_action=true) {
         this.interrupt = true;
-        if (stop_action)
-            await this.agent.actions.stop();
-        this.stopLoop();
         this.state = STOPPED;
+        if (stop_action)
+            await this.agent.actions.stop('user');
+        await this.stopLoop();
     }
 
     async pause() {
         this.interrupt = true;
-        await this.agent.actions.stop();
-        this.stopLoop();
         this.state = PAUSED;
+        await this.agent.actions.stop('user');
+        await this.stopLoop();
     }
 
     shouldInterrupt(is_self_prompt) { // to be called from handleMessage
-        return is_self_prompt && (this.state === ACTIVE || this.state === PAUSED) && this.interrupt;
+        return is_self_prompt && this.interrupt;
     }
 
     handleUserPromptedCmd(is_self_prompt, is_action) {
         // if a user messages and the bot responds with an action, stop the self-prompt loop
         if (!is_self_prompt && is_action) {
+            this.state = STOPPED;
             this.stopLoop();
             // this stops it from responding from the handlemessage loop and the self-prompt loop at the same time
         }

@@ -118,7 +118,7 @@ Full verification:
 
 ## Wave 2
 
-- [ ] Task 2: 操作単位の停止と再開の契約を作る
+- [x] Task 2: 操作単位の停止と再開の契約を作る
   Writes:
   - src/agent/action_manager.js
   - src/agent/agent.js
@@ -143,6 +143,8 @@ Full verification:
 
 ## Wave 3
 
+Scheduling: Codex adapterのowned process取消はWave1検証だけに依存するため、Wave2と並行できる。coder/prompter統合はWave2のAPI検証後に開始し、Task3全体の検証・commitは統合後に行う。WritesはWave2と交差しない。
+
 - [ ] Task 3: 生成待ちを取り消し、古い回答の実行を防ぐ
   Writes:
   - src/agent/coder.js
@@ -165,6 +167,8 @@ Full verification:
   - `fix: cancel code generation without reconnecting the bot`
 
 ## Wave 4
+
+Scheduling: Wave1/2の境界とAPI確認後、Wave3と並行できる。furnace/action commandのWritesはcoder/prompter/adapterと交差しない。
 
 - [ ] Task 4: 炉操作を中断可能にし、精錬後の無条件再接続を削除する
   Writes:
@@ -314,3 +318,5 @@ Full verification:
 - 2026-10-02: ユーザーの「再接続は最終手段」に従い、親が直接全体計画を改訂。接続維持の停止・観測・有限再計画を主目的とし、終了/再接続は停止不能・接続喪失・明示操作に限定した。feature/live変更なし。
 
 - 2026-10-02 Wave1検証: Mineflayer 1.21.1のopenFurnace待機はdisconnect/interrupt flagではsettleせず、遅延clickはflag後にも送信された。raceの完了を操作停止と扱わず、旧bodyのsettleを新操作の開始条件にする。close後の遅延slot更新を観測し、既存craft fenceはfull window_itemsと応答確認が必要、statisticsだけでは在庫確定できないと確認した。専用Node process groupのTERM/KILLと消滅確認、tempdir回収は成功。既存起動にはIPCがなく、追加する場合は明示的な新契約とする。Verify exit 0、cleanup complete=true。
+
+- 2026-10-02 Wave2検証: getCancellationContext(actionId)はsignal/phase/reason/settledを公開、setPhaseは現操作だけ更新する。停止Promiseを共有し、旧body settle前に新bodyを開始しない。userStopped/intentEpochでqueued actionとresumeを失効、新しい人間指示だけゲートを解除する。実Agent.handleMessageの遅い回答を!stopで失効させるfixture、既存resume、古いtimeout/watchdog、協調timeoutを確認。両Verify exit 0。Wave3 adapter部分とWave4はWrites非交差のため並行化する。

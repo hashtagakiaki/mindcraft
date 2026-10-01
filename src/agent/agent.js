@@ -24,6 +24,7 @@ export class Agent {
         this.last_sender = null;
         this.count_id = count_id;
         this._disconnectHandled = false;
+        this._userIntentGeneration = 0;
 
         // Initialize components
         this.actions = new ActionManager(this);
@@ -254,7 +255,12 @@ export class Agent {
     }
 
     async handleMessage(source, message, max_responses=null) {
+        const isHumanMessage = !!source && source !== 'system' && source !== this.name && !convoManager.isOtherAgent(source);
+        if (isHumanMessage) this._userIntentGeneration = (this._userIntentGeneration || 0) + 1;
+        const generation = this._userIntentGeneration || 0;
+        const isCurrent = () => generation === (this._userIntentGeneration || 0);
         await this.checkTaskDone();
+        if (!isCurrent()) return false;
         if (!source || !message) {
             console.warn('Received empty message from', source);
             return false;
@@ -271,6 +277,22 @@ export class Agent {
         const self_prompt = source === 'system' || source === this.name;
         const from_other_bot = convoManager.isOtherAgent(source);
 
+        if ((self_prompt || from_other_bot) && this.actions.userStopped)
+            return false;
+
+        if (isHumanMessage) {
+            const incomingCommand = containsCommand(message);
+            const isStopCommand = incomingCommand === '!stop';
+            const isShutUpCommand = incomingCommand === '!stfu';
+            if (!isStopCommand && !isShutUpCommand) {
+                this.actions.beginUserIntent();
+                if (this.actions.executing) {
+                    const stopped = await this.actions.stop('superseded');
+                    if (!isCurrent() || !stopped.stopped) return false;
+                }
+            }
+        }
+
         if (!self_prompt && !from_other_bot) { // from user, check for forced commands
             const user_command_name = containsCommand(message);
             if (user_command_name) {
@@ -285,7 +307,8 @@ export class Agent {
                     this.history.add(source, message);
                 }
                 let execute_res = await executeCommand(this, message);
-                if (execute_res) 
+                if (!isCurrent()) return false;
+                if (execute_res)
                     this.routeResponse(source, execute_res);
                 return true;
             }
@@ -296,9 +319,10 @@ export class Agent {
 
         // Now translate the message
         message = await handleEnglishTranslation(message);
+        if (!isCurrent()) return false;
         console.log('received message from', source, ':', message);
 
-        const checkInterrupt = () => this.self_prompter.shouldInterrupt(self_prompt) || this.shut_up || convoManager.responseScheduledFor(source);
+        const checkInterrupt = () => this.self_prompter.shouldInterrupt(self_prompt) || this.shut_up || convoManager.responseScheduledFor(source) || this.actions.userStopped;
         
         let behavior_log = this.bot.modes.flushBehaviorLog().trim();
         if (behavior_log.length > 0) {
@@ -308,10 +332,12 @@ export class Agent {
             }
             behavior_log = 'Recent behaviors log: \n' + behavior_log;
             await this.history.add('system', behavior_log);
+            if (!isCurrent()) return false;
         }
 
         // Handle other user messages
         await this.history.add(source, message);
+        if (!isCurrent()) return false;
         this.history.save();
 
         if (!self_prompt && this.self_prompter.isActive()) // message is from user during self-prompting
@@ -320,6 +346,8 @@ export class Agent {
             if (checkInterrupt()) break;
             let history = this.history.getHistory();
             let res = await this.prompter.promptConvo(history);
+            if (!isCurrent()) return false;
+            if (checkInterrupt()) break;
 
             console.log(`${this.name} full response to ${source}: ""${res}""`);
 
@@ -362,6 +390,7 @@ export class Agent {
                 }
 
                 let execute_res = await executeCommand(this, res);
+                if (!isCurrent()) return false;
 
                 console.log('Agent executed:', command_name, 'and got:', execute_res);
                 used_command = true;
@@ -466,7 +495,7 @@ export class Agent {
         });
         this.bot.on('death', () => {
             this.actions.cancelResume();
-            this.actions.stop();
+            this.actions.stop('death');
         });
         this.bot.on('kicked', (reason) => {
             if (!this._disconnectHandled) {
