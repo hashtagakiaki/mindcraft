@@ -2,7 +2,7 @@
 
 ## Personal development fork
 
-This repository is the `hashtagakiaki/mindcraft` development fork used as the source owner for craft synchronization, farm skills, and server-confirmed mining. The `autonomy` branch is the fork's default branch and starts from upstream stable commit `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`. Evaluation and play tooling export the full commit SHA pinned in `mindcraft-eval/mindcraft-source.json`. Craft synchronization, `tendNearbyFarm`, and mining sync are maintained here as normal source; play overlays remain owned by eval.
+This repository is the `hashtagakiaki/mindcraft` development fork used as the source owner for craft synchronization, farm skills, and server-confirmed mining. The `autonomy` branch is the fork's default branch and starts from upstream stable commit `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`. Evaluation exports the full SHA pinned in `mindcraft-eval/mindcraft-source.json`; manual play exports its independent pin in `play/mindcraft-source.json` through [mindcraft-play](../mindcraft-play/README.md). Craft synchronization, `tendNearbyFarm`, and mining sync are maintained here as normal source; play overlays are owned by `mindcraft-play`.
 
 When Mineflayer's packet parser raises `PartialReadError`, the bot records up to eight distinct failing inbound frames per process at `bots/<bot>/logs/partial-read-errors.jsonl`. Records include the protocol state, packet ID when readable, frame length and SHA-256, a frame capture (up to 256 KiB), and the parser stack. These files are private runtime data and may contain item metadata or book text; do not commit or share them without inspecting and redacting the contents.
 
