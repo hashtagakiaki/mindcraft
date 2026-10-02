@@ -9,6 +9,7 @@ import { plugin as autoEat } from 'mineflayer-auto-eat';
 import plugin from 'mineflayer-armor-manager';
 import { miningSyncPlugin } from '../agent/library/mining_sync.js';
 import { createMinecraftConnectionProtocolOptions } from './minecraft_protocol_overrides.js';
+import { capturePartialReadErrors } from './partial_read_capture.js';
 const armorManager = plugin;
 let mc_version = settings.minecraft_version;
 let mcdata = null;
@@ -70,6 +71,9 @@ export function initBot(username) {
     }
 
     const bot = createBot(options);
+
+    // Capture the complete framed packet before FullPacketParser logs and drops it.
+    capturePartialReadErrors(bot);
 
     // Throttle position packets to avoid kicks on Paper/Spigot servers
     // Paper enforces stricter packet rate limits than vanilla, causing ECONNRESET

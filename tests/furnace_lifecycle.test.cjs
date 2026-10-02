@@ -45,6 +45,7 @@ async function loadRuntime() {
     ['src/agent/action_manager.js', 'src/agent/action_manager.js'],
     ['src/agent/settings.js', 'src/agent/settings.js'],
     ['src/utils/mcdata.js', 'src/utils/mcdata.js'],
+    ['src/utils/partial_read_capture.js', 'src/utils/partial_read_capture.js'],
     ['src/utils/minecraft_protocol_overrides.js', 'src/utils/minecraft_protocol_overrides.js'],
     ['settings.js', 'settings.js']
   ]
