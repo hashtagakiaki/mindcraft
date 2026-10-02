@@ -22,6 +22,8 @@
 
 ## パスと実行境界
 
+- 共通規約はroot `settings.js` の `bot_rules_file`（absolute pathまたはnull）が正本。MindServerが全agentへ同じpathを渡し、個別profile/UIで上書きしない。意思決定ごとに再読込し、読込失敗時は規約なしのmodel requestを送らない。`tests/bot_rules.test.cjs` はoffline suiteに含まれる。稼働中actionや自動reflexを強制変更する仕組みではない。
+
 | Role | Path |
 |---|---|
 | Personal source checkout | `/home/akito/workspace/project/minecraft-autonomy/mindcraft/` |

@@ -9,6 +9,7 @@ const settings = {
     "auto_open_ui": true, // opens UI in browser on startup
     "place_state_dir": null, // absolute shared state root; set by the operator, not individual agents
     "place_world_id": null, // UUID namespace for the Minecraft save
+    "bot_rules_file": null, // absolute shared Markdown path; reread for every decision
     
     "base_profile": "assistant", // survival, assistant, creative, or god_mode
     "profiles": [
