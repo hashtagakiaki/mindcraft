@@ -96,49 +96,77 @@ async function main() {
 
   const html = await fs.readFile(path.join(repo, 'src/mindcraft/public/index.html'), 'utf8')
   for (const match of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) new vm.Script(match[1])
-  // Exercise the actual selection UI with disposable DOM/socket doubles.
+  // Exercise actual card selection and per-card sending with disposable DOM/socket doubles.
   class Element extends EventEmitter {
-    constructor() { super(); this.children = []; this.value = ''; this.checked = false; this.disabled = false }
+    constructor() { super(); this.value = ''; this.disabled = false; this.dataset = {}; this.classes = new Set(); this.classList = { toggle: (name, enabled) => enabled ? this.classes.add(name) : this.classes.delete(name) } }
     addEventListener(event, listener) { this.on(event, listener) }
-    append(...children) { this.children.push(...children) }
-    replaceChildren() { this.children = [] }
-    querySelectorAll() { return this.children.flatMap(label => label.children || []).filter(input => input instanceof Element && input.checked) }
-    querySelector() { return this.querySelectorAll()[0] || null }
+    setAttribute(name, value) { this[name] = value }
     click() { this.emit('click') }
   }
-  const elements = Object.fromEntries(['groupAll', 'groupMessage', 'groupSend', 'groupRecipients', 'groupResult'].map(id => [id, new Element()]))
+  const elements = Object.fromEntries(['selectionModeBtn', 'selectAllBotsBtn', 'selectionSummary', 'groupResult', ...agents.flatMap(agent => [`agent-${agent.name}`, `messageInput-${agent.name}`, `sendBtn-${agent.name}`])].map(id => [id, new Element()]))
+  const agentsDiv = new Element()
+  const document = new Element()
+  document.getElementById = id => elements[id]
   const uiSocket = new EventEmitter()
   uiSocket.connected = true
   let uiDelivery
+  let failSend = false
   uiSocket.on('send-message', (targets, data, callback) => {
     uiDelivery = { targets: Array.isArray(targets) ? Array.from(targets) : targets, data }
-    callback({ success: true, recipients: ['Bot2', 'Bot3'] })
+    callback(failSend ? { success: false, error: 'Unavailable recipient' } : { success: true, recipients: Array.isArray(targets) ? Array.from(targets) : [targets] })
   })
-  const ui = vm.createContext({ socket: uiSocket, currentAgents: agents,
-    document: { getElementById: id => elements[id], createElement: () => new Element(), createTextNode: text => text } })
-  const uiStart = html.indexOf('        const groupAll =')
-  const uiEnd = html.indexOf('        function onMsgInputChange', uiStart)
-  vm.runInContext(html.slice(uiStart, uiEnd) + '\nrenderGroupRecipients();', ui)
-  const choices = elements.groupRecipients.children.map(label => label.children[0])
-  assert.equal(choices[2].disabled, true)
-  choices[0].checked = choices[1].checked = true
-  elements.groupMessage.value = 'build together'
-  elements.groupMessage.emit('input')
-  assert.equal(elements.groupSend.disabled, false)
-  elements.groupSend.click()
+  const ui = vm.createContext({ socket: uiSocket, currentAgents: agents, agentsDiv, document })
+  const uiStart = html.indexOf('        function sendMessage(n, m,')
+  const uiEnd = html.indexOf('        function toggleDetails', uiStart)
+  vm.runInContext(html.slice(uiStart, uiEnd), ui)
+  const input = elements['messageInput-Bot2']
+  input.value = 'build together'
+  const clickCard = (name, interactive = false) => agentsDiv.emit('click', { target: { closest: selector => selector === '.agent' ? { dataset: { agentName: name } } : interactive ? {} : null } })
+  elements.selectionModeBtn.click()
+  clickCard('Bot2'); clickCard('Bot3'); clickCard('Bot4')
+  assert.equal(elements['agent-Bot2'].classes.has('selected'), true)
+  assert.equal(elements['agent-Bot3'].classes.has('selected'), true)
+  assert.equal(elements['agent-Bot4'].classes.has('selected'), false)
+  clickCard('Bot2', true)
+  assert.equal(elements['agent-Bot2'].classes.has('selected'), true, 'editing and controls do not deselect cards')
+  assert.equal(elements['sendBtn-Bot2'].disabled, false)
+  vm.runInContext("sendMessage('Bot2', document.getElementById('messageInput-Bot2').value, true)", ui)
   assert.deepEqual(uiDelivery.targets, ['Bot2', 'Bot3'])
-  assert.equal(elements.groupMessage.value, '')
+  assert.equal(input.value, '')
   assert.match(elements.groupResult.textContent, /Bot2, Bot3/)
-  elements.groupAll.checked = true
-  elements.groupAll.emit('change')
-  elements.groupMessage.value = '!stop'
-  elements.groupMessage.emit('input')
-  elements.groupMessage.emit('keydown', { key: 'Enter' })
-  assert.equal(uiDelivery.targets, '@all')
-  assert.equal(uiDelivery.data.message, '!stop')
+  elements['messageInput-Bot3'].value = 'from another selected card'
+  vm.runInContext("sendMessage('Bot3', document.getElementById('messageInput-Bot3').value, true)", ui)
+  assert.deepEqual(uiDelivery.targets, ['Bot2', 'Bot3'], 'any selected card input sends to the whole group')
+  vm.runInContext("sendMessage('Bot2', '!stop')", ui)
+  assert.equal(uiDelivery.targets, 'Bot2', 'individual control buttons retain their scope')
+  clickCard('Bot2')
+  input.value = 'retained instruction'
+  vm.runInContext("onMsgInputChange('Bot2')", ui)
+  assert.equal(elements['sendBtn-Bot2'].disabled, true, 'unselected input cannot send to selected bots')
+  elements.selectAllBotsBtn.click()
+  assert.equal(elements['sendBtn-Bot2'].disabled, false)
+  failSend = true
+  vm.runInContext("sendMessage('Bot2', document.getElementById('messageInput-Bot2').value, true)", ui)
+  assert.equal(input.value, 'retained instruction', 'errors keep the draft')
+  failSend = false
+  vm.runInContext("currentAgents = currentAgents.filter(agent => agent.name !== 'Bot3'); updateSelectionUI()", ui)
+  vm.runInContext("sendMessage('Bot2', '!stats', true)", ui)
+  assert.deepEqual(uiDelivery.targets, ['Bot2'], 'removed recipients leave the selection')
+  elements.selectionModeBtn.click()
+  assert.equal(elements['agent-Bot2'].classes.has('selected'), false)
+  vm.runInContext("sendMessage('Bot2', 'single', true)", ui)
+  assert.equal(uiDelivery.targets, 'Bot2', 'leaving selection mode restores individual sending')
+  const ctrl = editable => ({ key: 'Control', repeat: false, target: { closest: () => editable ? {} : null } })
+  document.emit('keydown', ctrl(true))
+  assert.equal(elements.selectionModeBtn['aria-pressed'], 'false', 'Ctrl editing shortcuts keep normal mode')
+  document.emit('keydown', ctrl(false))
+  assert.equal(elements.selectionModeBtn['aria-pressed'], 'true', 'Ctrl enters selection mode')
+  clickCard('Bot2')
+  document.emit('keyup', ctrl(false))
+  assert.equal(elements['agent-Bot2'].classes.has('selected'), true, 'releasing Ctrl retains the selection')
   uiSocket.connected = false
   uiSocket.emit('disconnect')
-  assert.equal(elements.groupSend.disabled, true)
+  assert.equal(elements['sendBtn-Bot2'].disabled, true)
   console.log('group addressing, hub delivery, Minecraft routing, command context and UI selection tests passed')
 }
 main().catch(error => { console.error(error); process.exitCode = 1 })

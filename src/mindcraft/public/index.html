@@ -306,6 +306,8 @@
             border-top: 1px solid #3a3a3a;
         }
         .footer-left { color: #cccccc; font-style: italic; }
+        .agent.selectable { cursor: pointer; }
+        .agent.selected { outline: 3px solid #66bb6a; outline-offset: -3px; }
     </style>
 </head>
 <body>
@@ -316,16 +318,12 @@
         </div>
         <div class="title-spacer"></div>
     </div>
-    <section style="margin:16px; padding:16px; background:#242424; border-radius:8px;">
-        <h2>Send to multiple bots</h2>
-        <label><input id="groupAll" type="checkbox"> All connected bots (@all)</label>
-        <div id="groupRecipients" style="display:flex; gap:16px; flex-wrap:wrap; margin:12px 0;"></div>
-        <div style="display:flex; gap:8px;">
-            <input id="groupMessage" type="text" placeholder="Instruction (or @Bot2,@Bot3 instruction)" style="flex:1; min-width:0;">
-            <button id="groupSend" class="start-btn" disabled>Send</button>
-        </div>
-        <p id="groupResult" role="status"></p>
-    </section>
+    <div style="margin:16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+        <button id="selectionModeBtn" class="neutral-btn" aria-pressed="false" title="Enter selection mode with Ctrl">Select bots</button>
+        <button id="selectAllBotsBtn" class="neutral-btn" hidden>Select all connected</button>
+        <span id="selectionSummary" role="status"></span>
+        <span id="groupResult" role="status"></span>
+    </div>
     <div id="agents"></div>
 
     <div class="page-footer">
@@ -769,7 +767,7 @@
             const invOpen = inventoryOpen[agent.name] === true;
             const invStyle = invOpen ? '' : 'display:none;';
             return `
-                    <div class="agent" id="agent-${agent.name}">
+                    <div class="agent${selectionMode && agent.in_game && agent.socket_connected ? ' selectable' : ''}${selectedBots.has(agent.name) ? ' selected' : ''}" id="agent-${agent.name}" data-agent-name="${agent.name}">
                         <div class="agent-grid">
                             <div class="cell title" style="grid-column: 1 / -1; display:flex; align-items:center; justify-content:space-between;">
                                 <span><span class="status-icon ${agent.in_game ? 'online' : 'offline'}">●</span>${agent.name}${agent.socket_connected && !agent.in_game ? '<span style="margin-left:6px;color:#f0ad4e;">joining...</span>' : ''}
@@ -794,7 +792,7 @@
                             <div id="lastMessage-${agent.name}" class="last-message" style="grid-column: 1 / -1;"><strong>Last Message:</strong> ${lastMessage}</div>
                         </div>
                         <div class="controls-row">
-                            <button class="start-btn" id="sendBtn-${agent.name}" disabled onclick="sendMessage('${agent.name}', document.getElementById('messageInput-${agent.name}').value)">Send</button>
+                            <button class="start-btn" id="sendBtn-${agent.name}" disabled onclick="sendMessage('${agent.name}', document.getElementById('messageInput-${agent.name}').value, true)">Send</button>
                             <input class="msg-input" type="text" id="messageInput-${agent.name}" placeholder="Enter message..." 
                                 oninput="onMsgInputChange('${agent.name}')"
                                 onkeydown="if(event.key === 'Enter') document.getElementById('sendBtn-${agent.name}').click()"
@@ -878,7 +876,7 @@
 
             // Update current agents list
             currentAgents = agents;
-            renderGroupRecipients();
+            updateSelectionUI();
 
             // If agentsDiv is empty, do a full render
             if (!agentsDiv.children.length) {
@@ -946,62 +944,75 @@
                 socket.emit('shutdown');
             }
         }
-        function sendMessage(n, m) {
-            if (!m || !m.trim()) return;
-            socket.emit('send-message', n, { from: 'ADMIN', message: m }, result => {
-                if (!result.success) { alert(result.error); return; }
+        function sendMessage(n, m, useSelection = false) {
+            if (!m || !m.trim() || !socket.connected) return;
+            if (useSelection && selectionMode && !selectedBots.has(n) && !m.trimStart().startsWith('@')) return;
+            const targets = useSelection && selectionMode ? [...selectedBots] : n;
+            socket.emit('send-message', targets, { from: 'ADMIN', message: m }, result => {
+                document.getElementById('groupResult').textContent = result.success ? `Sent to: ${result.recipients.join(', ')}` : result.error;
+                if (!result.success) return;
                 const input = document.getElementById(`messageInput-${n}`);
-                const btn = document.getElementById(`sendBtn-${n}`);
                 if (input && input.value === m) input.value = '';
-                if (btn) onMsgInputChange(n);
+                onMsgInputChange(n);
             });
         }
 
-        const groupAll = document.getElementById('groupAll');
-        const groupMessage = document.getElementById('groupMessage');
-        const groupSend = document.getElementById('groupSend');
-        const groupRecipients = document.getElementById('groupRecipients');
-        function updateGroupSend() {
-            const selected = groupAll.checked || !!groupRecipients.querySelector('input:checked') || groupMessage.value.trim().startsWith('@');
-            groupSend.disabled = !socket.connected || !selected || !groupMessage.value.trim();
-        }
-        function renderGroupRecipients() {
-            const selected = new Set([...groupRecipients.querySelectorAll('input:checked')].map(input => input.value));
-            groupRecipients.replaceChildren();
-            for (const agent of currentAgents) {
-                const label = document.createElement('label');
-                const input = document.createElement('input');
-                input.type = 'checkbox';
-                input.value = agent.name;
-                input.disabled = groupAll.checked || !agent.in_game || !agent.socket_connected;
-                input.checked = selected.has(agent.name) && agent.in_game && agent.socket_connected;
-                input.addEventListener('change', updateGroupSend);
-                label.append(input, document.createTextNode(` ${agent.name}`));
-                groupRecipients.append(label);
+        let selectionMode = false;
+        const selectedBots = new Set();
+        const selectionModeBtn = document.getElementById('selectionModeBtn');
+        const selectAllBotsBtn = document.getElementById('selectAllBotsBtn');
+        function updateSelectionUI() {
+            for (const name of selectedBots) {
+                if (!currentAgents.some(agent => agent.name === name && agent.in_game && agent.socket_connected)) selectedBots.delete(name);
             }
-            updateGroupSend();
+            selectionModeBtn.textContent = selectionMode ? 'Done selecting' : 'Select bots';
+            selectionModeBtn.setAttribute('aria-pressed', String(selectionMode));
+            selectAllBotsBtn.hidden = !selectionMode;
+            document.getElementById('selectionSummary').textContent = selectionMode
+                ? (selectedBots.size ? `Recipients: ${[...selectedBots].join(', ')} — send from any selected bot's input.` : 'Click bot cards to select recipients.') : '';
+            for (const agent of currentAgents) {
+                const card = document.getElementById(`agent-${agent.name}`);
+                if (card) {
+                    card.classList.toggle('selectable', selectionMode && agent.in_game && agent.socket_connected);
+                    card.classList.toggle('selected', selectedBots.has(agent.name));
+                }
+                onMsgInputChange(agent.name);
+            }
         }
-        groupAll.addEventListener('change', renderGroupRecipients);
-        groupMessage.addEventListener('input', updateGroupSend);
-        socket.on('connect', updateGroupSend);
-        socket.on('disconnect', updateGroupSend);
-        groupSend.addEventListener('click', () => {
-            const targets = groupAll.checked ? '@all' : [...groupRecipients.querySelectorAll('input:checked')].map(input => input.value);
-            const message = groupMessage.value;
-            socket.emit('send-message', targets, { from: 'ADMIN', message }, result => {
-                document.getElementById('groupResult').textContent = result.success ? `Sent to: ${result.recipients.join(', ')}` : result.error;
-                if (result.success && groupMessage.value === message) groupMessage.value = '';
-                updateGroupSend();
-            });
+        selectionModeBtn.addEventListener('click', () => {
+            selectionMode = !selectionMode;
+            if (!selectionMode) selectedBots.clear();
+            updateSelectionUI();
         });
-        groupMessage.addEventListener('keydown', event => {
-            if (event.key === 'Enter' && !groupSend.disabled) groupSend.click();
+        document.addEventListener('keydown', event => {
+            if (event.key !== 'Control' || event.repeat || selectionMode || event.target.closest('input, textarea, select, [contenteditable]')) return;
+            selectionMode = true;
+            updateSelectionUI();
         });
+        selectAllBotsBtn.addEventListener('click', () => {
+            if (!selectionMode) return;
+            currentAgents.filter(agent => agent.in_game && agent.socket_connected).forEach(agent => selectedBots.add(agent.name));
+            updateSelectionUI();
+        });
+        agentsDiv.addEventListener('click', event => {
+            if (!selectionMode || event.target.closest('button, input, textarea, select, a, label, iframe')) return;
+            const card = event.target.closest('.agent');
+            const name = card?.dataset.agentName;
+            if (!currentAgents.some(agent => agent.name === name && agent.in_game && agent.socket_connected)) return;
+            if (selectedBots.has(name)) selectedBots.delete(name);
+            else selectedBots.add(name);
+            updateSelectionUI();
+        });
+        socket.on('connect', updateSelectionUI);
+        socket.on('disconnect', updateSelectionUI);
         function onMsgInputChange(name) {
             const input = document.getElementById(`messageInput-${name}`);
             const btn = document.getElementById(`sendBtn-${name}`);
             if (btn && input) {
-                btn.disabled = !(input.value && input.value.trim().length > 0);
+                const agent = currentAgents.find(agent => agent.name === name);
+                const canSend = !selectionMode || selectedBots.has(name) || input.value.trimStart().startsWith('@');
+                btn.disabled = !socket.connected || !agent?.in_game || !agent.socket_connected || !canSend || !input.value.trim();
+                btn.textContent = selectionMode && selectedBots.has(name) ? `Send to ${selectedBots.size} bots` : 'Send';
             }
         }
 
