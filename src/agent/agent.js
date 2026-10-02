@@ -873,6 +873,7 @@ export class Agent {
         if (this._shutdownStarted) return;
         // newlines are interpreted as separate chats, which triggers spam filters. replace them with spaces
         message = message.replaceAll('\n', ' ');
+        sendOutputToServer(this.name, message);
 
         if (settings.only_chat_with.length > 0) {
             for (let username of settings.only_chat_with) {
@@ -884,7 +885,6 @@ export class Agent {
                 speak(to_translate, this.prompter.profile.speak_model);
             }
             if (settings.chat_ingame) {this.bot.chat(message);}
-            sendOutputToServer(this.name, message);
         }
     }
 
