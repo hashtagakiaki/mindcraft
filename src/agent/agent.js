@@ -1,3 +1,4 @@
+import { parseAddressedMessage, recipientContext } from '../utils/message_targets.js';
 import { History } from './history.js';
 import { Coder } from './coder.js';
 import { VisionInterpreter } from './vision/vision_interpreter.js';
@@ -399,7 +400,7 @@ export class Agent {
             "Gamerule "
         ];
         
-        const respondFunc = async (username, message) => {
+        const respondFunc = async (username, message, recipients = null) => {
             if (this._shutdownStarted) return;
             if (message === "") return;
             if (username === this.name) return;
@@ -419,12 +420,12 @@ export class Agent {
                 }
                 else {
                     if (preserveStopCommand) {
-                        await this.handleMessage(username, message);
+                        await this.handleMessage(username, message, null, { recipients });
                         return;
                     }
                     let translation = await handleEnglishTranslation(message);
                     if (this._shutdownStarted || managementPausedAtReceipt || managementGeneration !== (this._managementGeneration || 0)) return;
-                    await this.handleMessage(username, translation);
+                    await this.handleMessage(username, translation, null, { recipients });
                 }
             } catch (error) {
                 console.error('Error handling message:', error);
@@ -436,6 +437,16 @@ export class Agent {
         this.bot.on('whisper', respondFunc);
         
         this.bot.on('chat', (username, message) => {
+            try {
+                const addressed = parseAddressedMessage(message, serverProxy.getAgents());
+                if (addressed) {
+                    if (addressed.recipients.includes(this.name)) respondFunc(username, addressed.message, addressed.recipients);
+                    return;
+                }
+            } catch (error) {
+                console.warn('Cannot route addressed chat:', error.message);
+                return;
+            }
             if (serverProxy.getNumOtherAgents() > 0) return;
             // only respond to open chat messages when there are no other agents
             respondFunc(username, message);
@@ -690,6 +701,11 @@ export class Agent {
         if (isUserStop) {
             this._activeRecoveryId = null;
             this._recoveryReportId = null;
+        }
+
+        if (isHumanMessage && Array.isArray(internalOptions.recipients) && internalOptions.recipients.includes(this.name)) {
+            await this.history.add('system', recipientContext(source, internalOptions.recipients));
+            if (!isCurrent()) return false;
         }
 
         if (!self_prompt && !from_other_bot) { // from user, check for forced commands

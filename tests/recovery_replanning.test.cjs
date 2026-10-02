@@ -241,6 +241,7 @@ async function makeAgentFixture() {
   }
   await put('package.json', '{"type":"module"}')
   await put('src/agent/agent.js', await readFile(path.join(__dirname, '../src/agent/agent.js')))
+  await put('src/utils/message_targets.js', await readFile(path.join(__dirname, '../src/utils/message_targets.js')))
   await put('src/agent/action_manager.js', await readFile(path.join(__dirname, '../src/agent/action_manager.js')))
   await put('src/agent/self_prompter.js', await readFile(path.join(__dirname, '../src/agent/self_prompter.js')))
   const stubs = {

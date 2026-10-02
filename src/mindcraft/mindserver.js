@@ -1,3 +1,4 @@
+import { resolveMessageTargets, parseAddressedMessage } from '../utils/message_targets.js';
 import { Server } from 'socket.io';
 import express from 'express';
 import http from 'http';
@@ -245,17 +246,24 @@ export function createMindServer(host_public = false, port = 8080) {
             
         });
 
-		socket.on('send-message', (agentName, data) => {
-			if (!agent_connections[agentName]) {
-				console.warn(`Agent ${agentName} not in game, cannot send message via MindServer.`);
-				return
-			}
-			try {
-				agent_connections[agentName].socket.emit('send-message', data)
-			} catch (error) {
-				console.error('Error: ', error);
-			}
-		});
+        socket.on('send-message', (targets, data, callback) => {
+            try {
+                if (!data || typeof data.from !== 'string' || !data.from.trim() || typeof data.message !== 'string' || !data.message.trim()) {
+                    throw new Error('Sender and message are required.');
+                }
+                const agents = Object.entries(agent_connections).map(([name, conn]) => ({
+                    name, in_game: conn.in_game, socket_connected: !!conn.socket?.connected
+                }));
+                const addressed = parseAddressedMessage(data.message, agents);
+                const recipients = addressed?.recipients || resolveMessageTargets(targets, agents);
+                const payload = { from: data.from, message: addressed?.message || data.message, recipients };
+                for (const name of recipients) agent_connections[name].socket.emit('send-message', payload);
+                if (typeof callback === 'function') callback({ success: true, recipients });
+            } catch (error) {
+                if (typeof callback === 'function') callback({ success: false, error: error.message });
+                else console.warn('Cannot send message:', error.message);
+            }
+        });
 
         socket.on('bot-output', (agentName, message) => {
             io.emit('bot-output', agentName, message);

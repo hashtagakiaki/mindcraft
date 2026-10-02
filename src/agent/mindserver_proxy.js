@@ -85,7 +85,7 @@ export class MindServerProxy {
         });
         this.socket.on('send-message', (data) => {
             if (!this.managementReady) return;
-            try { this.agent.respondFunc(data.from, data.message); }
+            try { this.agent.respondFunc(data.from, data.message, data.recipients); }
             catch (error) { console.error('Error: ', JSON.stringify(error, Object.getOwnPropertyNames(error))); }
         });
         this.socket.on('get-full-state', (callback) => {

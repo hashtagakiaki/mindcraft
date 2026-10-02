@@ -239,6 +239,7 @@ async function makeAgentSourceFixture(root) {
   }
   await fs.writeFile(path.join(root, 'agent-source.package.json'), '{"type":"module"}')
   await put('src/agent/agent.js', await fs.readFile(path.resolve(__dirname, '../src/agent/agent.js')))
+  await put('src/utils/message_targets.js', await fs.readFile(path.resolve(__dirname, '../src/utils/message_targets.js')))
   await put('src/agent/action_manager.js', await fs.readFile(path.resolve(__dirname, '../src/agent/action_manager.js')))
   await put('src/agent/commands/actions.js', await fs.readFile(path.resolve(__dirname, '../src/agent/commands/actions.js')))
   const stubs = {

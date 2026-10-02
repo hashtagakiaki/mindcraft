@@ -40,6 +40,14 @@ Mining sync corrects affected block-instance material data per bot so Mineflayer
 
 To publish a source update, make the source change on `autonomy`, run the offline test command, and push the reviewed commit to this fork. Then update the eval manifest to that exact full SHA and run the eval tests and isolated live smoke against the pin. Review and commit/push the eval change after those checks, then prepare a new play bundle. Keep the eval dependency tree read-only; do not reinstall packages as part of a source-only update. Activate a bundle only through the explicitly authorized bot-only cutover, which leaves the Minecraft server, world, and Ollama process running.
 
+### Group operator instructions
+
+In Minecraft public chat, use `@all gather wood` to instruct every connected, in-game bot, or `@Bot2,@Bot3 gather wood` to instruct a group. `@Bot2 @Bot3 ...` and `@Bot2,Bot3 ...` also work; names are case-insensitive and duplicates are removed. Addressing must be at the start, followed by whitespace and the instruction. Unknown names, an explicitly named disconnected bot, or mixing `@all` with names rejects the message. Ordinary individual whispers and the existing single-bot public-chat behavior remain supported. The `only_chat_with` allowlist still applies.
+
+The UI's **Send to multiple bots** panel offers individual checkboxes and **All connected bots (@all)**. An explicit address prefix in its message overrides the selection; the single-bot input supports the same prefixes. Successful UI sends display the resolved recipient names; errors retain the input. `@all` resolves the connected bots at send time. Explicit selections are validated together before dispatch, so an invalid selection is not partly sent. This is simultaneous dispatch, not synchronized action starts or guaranteed delivery through a later disconnect; management recovery does not replay instructions.
+
+Every recipient receives the same instruction plus the full recipient list, recorded as operator context in its history before handling the instruction. This lets bots know who else was instructed and coordinate when useful; it does not itself allocate roles or prove that others completed the work. Literal commands such as `@all !stop` retain their normal command semantics. Existing bot-conversation routing is separate from operator addressing.
+
 <h1 align="center">
   <a href="https://trendshift.io/repositories/9163" target="_blank"><img src="https://trendshift.io/api/badge/repositories/9163" alt="kolbytn%2Fmindcraft | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 </h1>

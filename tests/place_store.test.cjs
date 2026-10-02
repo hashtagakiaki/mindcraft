@@ -263,6 +263,8 @@ async function runHubShutdownFixture(root) {
   let mindserverSource = await readFile(path.join(sourceRoot, 'mindcraft/mindserver.js'), 'utf8')
   mindserverSource = mindserverSource.replace('placeStoreLifecycle = attachPlaceStoreLifecycle({\n', 'placeStoreLifecycle = attachPlaceStoreLifecycle({\n        processObject: globalThis.__fixtureProcess,\n')
   await writeFile(path.join(mindcraftDir, 'mindserver.js'), mindserverSource)
+  await mkdir(path.join(fixtureRoot, 'src/utils'), { recursive: true })
+  await writeFile(path.join(fixtureRoot, 'src/utils/message_targets.js'), await readFile(path.join(sourceRoot, 'utils/message_targets.js')))
   await writeFile(path.join(processDir, 'fixture_agent_process.js'), `
     import { AgentProcess } from './agent_process.js'
     export class FixtureAgentProcess extends AgentProcess {

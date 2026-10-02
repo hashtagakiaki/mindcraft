@@ -110,6 +110,7 @@ async function main() {
     }
     await writeFile(path.join(agentSourceRoot, 'package.json'), '{"type":"module"}')
     await putAgentFixture('src/agent/agent.js', await readFile(path.join(__dirname, '../src/agent/agent.js')))
+    await putAgentFixture('src/utils/message_targets.js', await readFile(path.join(__dirname, '../src/utils/message_targets.js')))
     await putAgentFixture('src/agent/action_manager.js', await readFile(path.join(__dirname, '../src/agent/action_manager.js')))
     await putAgentFixture('src/agent/self_prompter.js', await readFile(path.join(__dirname, '../src/agent/self_prompter.js')))
     const agentStubs = {
