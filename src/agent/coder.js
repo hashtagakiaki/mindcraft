@@ -24,6 +24,30 @@ export class Coder {
         mkdirSync('.' + this.fp, { recursive: true });
     }
 
+    // Execute already selected code; the caller owns reasoning and ActionManager.
+    async executeCode(code) {
+        const context = this.agent.actions.getCancellationContext();
+        const check = () => {
+            if (context?.signal.aborted || this.agent.bot.interrupt_code) throw new Error('Action cancelled');
+        };
+        this.agent.bot.modes.pause('unstuck');
+        try {
+            lockdown();
+            check();
+            this.agent.actions.setPhase('staging', context?.actionId);
+            const staged = await this._stageCode(code, check);
+            check();
+            this.agent.actions.setPhase('linting', context?.actionId);
+            if (!staged) throw new Error('Could not stage code');
+            const error = await this._lintCode(staged.src_lint_copy);
+            check();
+            if (error) throw new Error(error);
+            this.agent.actions.setPhase('executing', context?.actionId);
+            await staged.func.main(this.agent.bot, guardSdk(this.agent.places?.sdk, check));
+            check();
+        } finally { this.agent.bot.modes.unpause('unstuck'); }
+    }
+
     async generateCode(agent_history) {
         const context = this.agent.actions.getCancellationContext?.() || null;
         const actionId = context?.actionId;
@@ -177,7 +201,7 @@ export class Coder {
     }
     // write custom code to file and import it
     // write custom code to file and prepare for evaluation
-    async _stageCode(code) {
+    async _stageCode(code, check = null) {
         code = this._sanitizeCode(code);
         let src = '';
         code = code.replaceAll('console.log(', 'log(bot,');
@@ -207,15 +231,17 @@ export class Coder {
         // This is where we determine the environment the agent's code should be exposed to.
         // It will only have access to these things, (in addition to basic javascript objects like Array, Object, etc.)
         // Note that the code may be able to modify the exposed objects.
+        // Guard each SDK entry, including inline compound code after an await.
+        const guarded = sdk => guardSdk(sdk, check);
         const compartment = makeCompartment({
-            skills,
+            skills: guarded(skills),
             log: skills.log,
-            world,
-            vision: {
+            world: guarded(world),
+            vision: guarded({
                 lookAtPlayer: (playerName, direction) => this.agent.vision_interpreter.lookAtPlayer(playerName, direction),
                 lookAtPosition: (x, y, z) => this.agent.vision_interpreter.lookAtPosition(x, y, z),
-            },
-            places: this.agent.places?.sdk,
+            }),
+            places: guarded(this.agent.places?.sdk),
             Vec3,
         });
         const mainFn = compartment.evaluate(src);
@@ -251,4 +277,9 @@ export class Coder {
             });
         });
     }
+}
+
+function guardSdk(sdk, check) {
+    return !check || !sdk ? sdk : Object.fromEntries(Object.entries(sdk).map(([name, value]) =>
+        [name, typeof value !== 'function' ? value : (...args) => { check(); return value(...args); }]));
 }

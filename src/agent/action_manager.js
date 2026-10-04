@@ -114,7 +114,7 @@ export class ActionManager {
         return this._executeResume(actionLabel, actionFn, timeout);
     }
 
-    async runAction(actionLabel, actionFn, { timeout, resume = false } = {}) {
+    async runAction(actionLabel, actionFn, { timeout, resume = false, stallTimeoutMs = 0, outputLimit = MAX_OUTPUT_LENGTH } = {}) {
         if (this.shuttingDown) return this._rejectedResult('shutdown');
         if (this.managementPaused) return this._rejectedResult('management-paused');
         if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
@@ -126,7 +126,7 @@ export class ActionManager {
         if (resume) return this._executeResume(actionLabel, actionFn, timeout);
         const epoch = this.intentEpoch;
         if (this.userStopped) return this._rejectedResult('user-stop');
-        return this._executeAction(actionLabel, actionFn, timeout, epoch, recoveryAdmissionId);
+        return this._executeAction(actionLabel, actionFn, timeout, epoch, recoveryAdmissionId, { stallTimeoutMs, outputLimit });
     }
 
     isRecoveryAdmission(actionLabel, recoveryAdmissionId) {
@@ -212,7 +212,7 @@ export class ActionManager {
         return this._rejectedResult('not-idle');
     }
 
-    async _executeAction(actionLabel, actionFn, timeout = 10, intentEpoch = this.intentEpoch, recoveryAdmissionId = null) {
+    async _executeAction(actionLabel, actionFn, timeout = 10, intentEpoch = this.intentEpoch, recoveryAdmissionId = null, options = {}) {
         let releaseTransition;
         const previousTransition = this.transition;
         this.transition = new Promise(resolve => { releaseTransition = resolve; });
@@ -284,13 +284,27 @@ export class ActionManager {
             this.currentActionFn = actionFn;
             if (action.recoveryAdmissionId) this.agent.onRecoveryPlanActionStarted?.({ recoveryId: action.recoveryAdmissionId, actionId: action.id, actionLabel });
             if (timeout > 0) timeoutHandle = this._startTimeout(timeout, action.id);
+            if (options.stallTimeoutMs > 0) {
+                let last = captureObservedProgress(this.agent.bot);
+                let progressedAt = Date.now();
+                action.stallTimer = setInterval(() => {
+                    if (this.currentAction !== action || action.reason) return;
+                    const now = captureObservedProgress(this.agent.bot);
+                    const moved = last.position && now.position && Math.hypot(...now.position.map((v, i) => v - last.position[i])) >= MIN_PROGRESS_DISTANCE;
+                    if (moved || JSON.stringify(last.inventory) !== JSON.stringify(now.inventory)) {
+                        last = now;
+                        progressedAt = Date.now();
+                    }
+                    if (Date.now() - progressedAt >= options.stallTimeoutMs) void this.stop('stall');
+                }, Math.min(1000, options.stallTimeoutMs));
+            }
         } finally {
             releaseTransition();
         }
 
         try {
             await actionFn();
-            const output = this.getBotOutputSummary();
+            const output = this.getBotOutputSummary(options.outputLimit);
             const timedout = this.timedout;
             const interrupted = !!action.reason || this.agent.bot.interrupt_code;
             this.agent.clearBotLogs();
@@ -316,7 +330,7 @@ export class ActionManager {
             return result;
         } catch (error) {
             console.error('Code execution triggered catch:', error);
-            const message = `${this.getBotOutputSummary()}!!Code threw exception!!\nError: ${error?.stack || String(error)}\n`;
+            const message = `${this.getBotOutputSummary(options.outputLimit)}!!Code threw exception!!\nError: ${error?.stack || String(error)}\n`;
             this.cancelResume();
             this.agent.clearBotLogs();
             this._finishAction(action, timeoutHandle);
@@ -360,6 +374,7 @@ export class ActionManager {
 
     _finishAction(action, timeoutHandle) {
         clearTimeout(timeoutHandle);
+        clearInterval(action.stallTimer);
         clearTimeout(this.timeoutEscalations.get(action.id));
         this.timeoutEscalations.delete(action.id);
         if (this.currentAction !== action) return;
@@ -386,7 +401,7 @@ export class ActionManager {
         return { success: false, message: null, interrupted: true, timedout: false, reason, actionId: detail?.actionId ?? null, phase: detail?.phase ?? null };
     }
 
-    getBotOutputSummary() {
+    getBotOutputSummary(limit = MAX_OUTPUT_LENGTH) {
         const { bot } = this.agent;
         let output = bot.output;
         bot.output = '';
@@ -394,8 +409,8 @@ export class ActionManager {
             if (!output) return '';
             output = `Action output before interruption:\n${output}`;
         }
-        if (output.length > MAX_OUTPUT_LENGTH) {
-            output = `Action output is very long (${output.length} chars) and has been shortened.\nFirst outputs:\n${output.substring(0, MAX_OUTPUT_LENGTH / 2)}\n...skipping many lines.\nFinal outputs:\n${output.substring(output.length - MAX_OUTPUT_LENGTH / 2)}`;
+        if (output.length > limit) {
+            output = `Action output is very long (${output.length} chars) and has been shortened.\nFirst outputs:\n${output.substring(0, limit / 2)}\n...skipping many lines.\nFinal outputs:\n${output.substring(output.length - limit / 2)}`;
         } else {
             output = 'Action output:\n' + output.toString();
         }

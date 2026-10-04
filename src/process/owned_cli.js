@@ -19,7 +19,8 @@ let exitCode = null;
 let forceKillDeadline = null;
 
 process.stdin.setEncoding('utf8');
-process.stdin.on('data', chunk => { input += chunk; });
+const bufferInput = chunk => { input += chunk; };
+process.stdin.on('data', bufferInput);
 process.stdin.on('end', () => {
     inputClosed = true;
     if (cli?.stdin.writable) cli.stdin.end();
@@ -58,6 +59,7 @@ process.on('SIGINT', () => {
 if (!process.connected) exitAfterCleanup();
 
 function startCli() {
+    process.stdin.removeListener('data', bufferInput);
     try {
         cli = spawn(command, args, {
             stdio: ['pipe', 'inherit', 'ignore'],
@@ -82,6 +84,7 @@ function startCli() {
     if (inputClosed) cli.stdin.end(input);
     else {
         cli.stdin.write(input);
+        input = '';
         process.stdin.on('data', chunk => {
             if (cli?.stdin.writable) cli.stdin.write(chunk);
         });

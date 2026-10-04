@@ -218,7 +218,7 @@ function runOwnedCodex(args, input, workingDirectory, signal, requestId) {
     });
 }
 
-async function authorizeAndStart(child, requestId, signal) {
+export async function authorizeAndStart(child, requestId, signal) {
     if (typeof process.send === 'function') {
         if (process.connected !== true) throw new Error('Agent parent IPC is disconnected');
         await registerOwnedHelper(child, requestId, signal);
@@ -365,7 +365,7 @@ function abortError(reason) {
     return error;
 }
 
-function getCodexEnvironment() {
+export function getCodexEnvironment() {
     const allowedVariables = [
         'CODEX_HOME', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'SSL_CERT_FILE',
         'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY'

@@ -298,3 +298,16 @@ This work is published in the paper [Collaborating Action by Action: A Multi-age
   url = {https://arxiv.org/abs/2504.17950},
 }
 ```
+
+
+## Opt-in Codex task session
+
+Root `settings.js` の `agent_runtime: "codex-session"` と `allow_insecure_coding: true`、profileの明示的な `codex/<model>` で使用する。既定値は `legacy`。`code_model` による判断・実行の役割分離はこの経路では使わない。Codex app-serverのexperimental dynamic toolsを使用するため、対応するCLIが必要（隔離確認のCLIは0.159.1）。モデルとreasoning effortの一致を確認し、fallbackは拒否する。reasoning effortはprofile model objectの `params.reasoning_effort`、既定は `medium`。
+
+1つのoperator requestを1つのthreadで扱い、`minecraft_execute` で複数skillをまとめたJavaScriptを既存Coder/SES/lintとActionManagerへ渡す。SDK実行開始時にmodel turnだけをinterruptし、実行がsettleした結果を同じthreadの次turnに一度渡す。実行中にLLMをpollしない。thread内では複数回推論する。vision有効時の画像解釈と長期memory要約は既存の補助model経路を使う。
+
+`codex_session` の既定値は、`stall_timeout_ms: 30000`、`action_timeout_ms: 120000`、`output_limit: 16000`、`max_search_radius: 64`。位置の0.5 block以上の変化か在庫の変化で停滞timerを更新し、停滞/時間上限では既存の協調stopを使う。同期のblock検索はこのruntimeに限り指定半径を超えるとerrorを返す。任意の同期codeや協調停止しない操作をtimerで強制停止できる保証はない。既存10秒stop watchdogと親process回収が最終境界となる。
+
+返却結果には位置、在庫、耐久度、health/food、部分output、error、停止理由を含める。4,232文字のoutputは既定で省略しない。16,000文字を超えるoutputは明示して先頭/末尾を残す。実行codeと判断・結果は `bots/<name>/histories/codex-<uuid>.jsonl` に保存する。shared bot rulesは判断再開ごとに読み直す。現在のvision設定を古いmemoryより優先する。Stop、新しい人間の指示、management切断、shutdownは旧threadと操作を取り消し、旧結果による再開を拒否する。native task中は旧recovery actorを並行起動しない。既存literal commandも使用できる。
+
+Offline fixtureは `node tests/codex_session.test.cjs`（上記Node20）で実行し、通常suiteにも含まれる。fake app-serverと所有helperでpause/resume、高速完了、部分失敗、停滞、停止/差替え/管理切断/shutdownの結果破棄、本体message入口を確認する。実ゲーム結果はbenchmark repoの記録を参照。manual playのsource pinや稼働botはこの追加で自動更新されない。

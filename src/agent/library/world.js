@@ -1,3 +1,4 @@
+import settings from '../settings.js';
 import pf from 'mineflayer-pathfinder';
 import * as mc from '../../utils/mcdata.js';
 
@@ -152,6 +153,10 @@ export function getNearestBlocksWhere(bot, predicate, distance=8, count=10000) {
      * @example
      * let waterBlocks = world.getNearestBlocksWhere(bot, block => block.name === 'water', 16, 10);
      **/
+    if (settings.agent_runtime === 'codex-session') {
+        const limit = settings.codex_session?.max_search_radius ?? 64;
+        if (!Number.isFinite(distance) || distance < 0 || distance > limit) throw new Error(`Search radius must be between 0 and ${limit}; move and observe again instead of a large synchronous scan.`);
+    }
     let positions = bot.findBlocks({matching: predicate, maxDistance: distance, count: count});
     let blocks = positions.map(position => bot.blockAt(position));
     return blocks;

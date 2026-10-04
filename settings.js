@@ -44,6 +44,8 @@ const settings = {
     "render_bot_view": false, // show bot's view in browser at port 12000 + bot index
 
     "allow_insecure_coding": false, // allows newAction command and model can write/run code on your computer. enable at own risk
+    "agent_runtime": "legacy", // "codex-session" uses one Codex task thread
+    "codex_session": { "stall_timeout_ms": 30000, "action_timeout_ms": 120000, "output_limit": 16000, "max_search_radius": 64 },
     "allow_vision": false, // allows vision model to interpret screenshots as inputs
     "blocked_actions" : ["!checkBlueprint", "!checkBlueprintLevel", "!getBlueprint", "!getBlueprintLevel"] , // commands to disable and remove from docs. Ex: ["!setMode"]
     "code_timeout_mins": -1, // minutes code is allowed to run. -1 for no timeout

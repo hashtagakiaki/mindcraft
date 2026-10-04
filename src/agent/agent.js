@@ -86,6 +86,7 @@ export class Agent {
             message: typeof options.message === 'string' ? options.message.slice(0, SHUTDOWN_MESSAGE_MAX_CHARS) : null,
         };
         this._shutdownStarted = true;
+        const sessionClosing = this.codexRuntime?.cancel('shutdown');
         this._shutdownIntent = intent;
         this._managementGeneration++;
         this._messageGeneration = (this._messageGeneration || 0) + 1;
@@ -133,6 +134,7 @@ export class Agent {
             } catch (error) {
                 stopResult = { stopped: false, reason: 'shutdown-error', error: String(error?.message || error), actionId: this.actions?.currentAction?.id ?? null, phase: this.actions?.currentAction?.phase || 'unknown' };
             }
+            await sessionClosing;
             const safeOutcome = { reason: intent.reason, restartIntent: intent.restartIntent, code: intent.code, message: intent.message || null, taskResult: this.taskResult || null, stopped: stopResult.stopped, stopResult };
             let saveResult = { saved: false, skipped: 'history unavailable' };
             try { saveResult = await (this.history?.saveShutdownRecord?.(intent.reason, safeOutcome) ?? saveResult); }
@@ -165,6 +167,7 @@ export class Agent {
 
     pauseManagement(reason = 'management') {
         if (this._shutdownStarted) return Promise.resolve({ stopped: false, reason: 'shutdown' });
+        void this.codexRuntime?.cancel(reason);
         this.managementPaused = true;
         this._managementInterruption = true;
         this._managementGeneration++;
@@ -234,6 +237,10 @@ export class Agent {
         this.actions = new ActionManager(this);
         if (this.managementPaused) this.actions.pauseForManagement();
         this.prompter = new Prompter(this, settings.profile);
+        if (settings.agent_runtime === 'codex-session') {
+            const { validateCodexRuntime } = await import('./codex_runtime.js');
+            validateCodexRuntime(this.prompter.profile);
+        }
         this.name = (this.prompter.getName() || '').trim();
         console.log(`Initializing agent ${this.name}...`);
         
@@ -524,6 +531,7 @@ export class Agent {
     }
 
     onRecoveryResult(event) {
+        if (this.codexRuntime?.active) return false;
         if (this._shutdownStarted || this.managementPaused || this.actions.managementIntentRequired) return false;
         const eventId = event.eventId ?? this.actions.nextRecoveryEventId();
         if (this._recoverySeen.has(eventId)) return false;
@@ -660,6 +668,7 @@ export class Agent {
         if (this.managementPaused && !isUserStop && !isUserRestart && !isSafeQuery) return false;
         if (this.actions?.managementIntentRequired && !isHumanIntent && !isUserStop && !isUserRestart && !isSafeQuery) return false;
         let generation = internalOptions.generation ?? this._messageGeneration;
+        if (isHumanIntent || isUserStop || isUserStfu) await this.codexRuntime?.cancel(isHumanIntent ? 'superseded' : 'user');
         if (isHumanIntent) {
             this._userIntentGeneration = (this._userIntentGeneration || 0) + 1;
             generation = ++this._messageGeneration;
@@ -765,6 +774,20 @@ export class Agent {
         await this.history.add(source, message);
         if (!isCurrent()) return false;
         this.history.save();
+
+        if (settings.agent_runtime === 'codex-session') {
+            // Internal messages cannot launch a second actor alongside this task.
+            if (this.codexRuntime?.active) return false;
+            if (this.actions.executing) {
+                const stopped = await this.actions.stop('superseded');
+                if (!isCurrent() || !stopped.stopped) return false;
+            }
+            const { CodexRuntime } = await import('./codex_runtime.js');
+            if (!isCurrent()) return false;
+            const runtime = new CodexRuntime(this);
+            this.codexRuntime = runtime;
+            return runtime.run(source, isCurrent);
+        }
 
         if (!self_prompt && this.self_prompter.isActive()) // message is from user during self-prompting
             max_responses = 1; // force only respond to this message, then let self-prompting take over
@@ -1020,7 +1043,7 @@ export class Agent {
     }
 
     isIdle() {
-        return !this.actions.executing;
+        return !this.actions.executing && !this.codexRuntime?.active;
     }
     
 
