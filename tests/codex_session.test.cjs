@@ -117,6 +117,22 @@ async function main() {
     assert.ok(mainAgent.codexRuntime, 'actual Agent.handleMessage uses the native runtime')
     assert.equal(await mainAgent.handleMessage('operator', '!stop'), true)
     assert.equal(mainAgent.actions.userStopped, true, 'literal Stop remains available')
+    // Rule contents can change between turns; never freeze an old snapshot in baseInstructions.
+    const ruleAgent = makeAgent('Rules')
+    let rule = 'first rule', base, turnCount = 0
+    const inputs = []
+    ruleAgent.prompter.withBotRules = async text => text + '\n' + rule
+    const ruleRuntime = new CodexRuntime(ruleAgent, { makeSession: ({ execute }) => ({
+      open: async instructions => { base = instructions },
+      runTurn: async input => { inputs.push(input); turnCount++; if (turnCount === 1) { rule = 'updated rule'; return { operation: execute('await Promise.resolve();'), messages: [] } } return { operation: null, messages: ['done'] } },
+      close: async () => {}
+    }) })
+    ruleAgent.codexRuntime = ruleRuntime
+    await until(() => ruleAgent.coder.code_template && ruleAgent.coder.code_lint_template)
+    assert.equal(await ruleRuntime.run('operator', () => true), true)
+    assert.ok(!base.includes('first rule'))
+    assert.ok(inputs[0].endsWith('first rule'))
+    assert.ok(inputs[1].endsWith('updated rule'))
     // Stop/new intent/management/shutdown invalidate retained work; stale result cannot resume.
     for (const reason of ['user', 'superseded', 'management', 'shutdown']) {
       const testAgent = makeAgent('Cancel' + reason)
