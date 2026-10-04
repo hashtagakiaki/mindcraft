@@ -489,8 +489,14 @@ async function testFarm(root) {
   assert.ok(docs.some(doc => doc.startsWith('skills.tendNearbyFarm\n') && doc.includes('seedReserve')))
   const library = new SkillLibrary({}, null)
   await library.initSkillLibrary()
-  assert.ok(library.always_show_skills.includes('skills.tendNearbyFarm'))
-  assert.ok(library.always_show_skills_docs['skills.tendNearbyFarm'].includes('Tend the nearest connected farmland plot'))
+  const alwaysDocs = await library.getRelevantSkillDocs('build a wall', 0)
+  assert.ok(!alwaysDocs.includes('skills.tendNearbyFarm'))
+  assert.ok(alwaysDocs.includes('vision.lookAtPlayer'))
+  assert.ok(alwaysDocs.includes('vision.lookAtPosition'))
+  const farmDoc = library.skill_docs.find(doc => doc.startsWith('skills.tendNearbyFarm\n'))
+  library.skill_docs_embeddings = { [farmDoc]: [1] }
+  library.embedding_model = { async embed() { return [1] } }
+  assert.ok((await library.getRelevantSkillDocs('tend the farm', 1)).includes(farmDoc), 'farm docs remain selectable')
   console.log('farm skill tests passed')
 }
 

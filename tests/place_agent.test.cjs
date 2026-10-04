@@ -232,15 +232,30 @@ async function main() {
     await restartedStore.close()
 
     const { Coder } = await import(fixtureUrl('src/agent/coder.js'))
-    agent.prompter = { skill_libary: { async getAllSkillDocs() { return [] } } }
+    agent.prompter = { skill_libary: { async getAllSkillDocs() { return ['vision.lookAtPlayer\n', 'vision.lookAtPosition\n'] } } }
     agent.history = { getHistory() { return [] } }
     const coder = new Coder(agent)
-    await waitFor(() => coder.code_template.includes('async (bot, places)') && coder.code_lint_template.includes('main(bot, places)'), 3000, 'coder templates did not load')
+    await waitFor(() => coder.code_template.includes('async (bot, places)') && coder.code_lint_template.includes('main(bot, places, vision)'), 3000, 'coder templates did not load')
     const generated = await coder._stageCode("const result = await places.find('forest'); log(bot, result);")
     assert.equal(await coder._lintCode(generated.src_lint_copy), null, 'place SDK use passes the actual Coder lint/template path')
     bot.output = ''
     await generated.func.main(bot, agent.places.sdk)
     assert.match(bot.output, /forest 0 \[place-/, 'the actual SES code template receives only the place facade')
+    const visionCalls = []
+    agent.vision_interpreter = {
+      async lookAtPlayer(...args) { visionCalls.push(['player', ...args]); return 'player image analysis' },
+      async lookAtPosition(...args) { visionCalls.push(['position', ...args]); return 'position image analysis' }
+    }
+    const visionCode = await coder._stageCode("log(bot, await vision.lookAtPlayer('Alex', 'with')); log(bot, await vision.lookAtPosition(10, 64, 20)); log(bot, Object.keys(vision).join(','));")
+    assert.equal(await coder._lintCode(visionCode.src_lint_copy), null, 'vision SDK calls pass the actual lint/template path')
+    bot.output = ''
+    await visionCode.func.main(bot, agent.places.sdk)
+    assert.deepEqual(visionCalls, [['player', 'Alex', 'with'], ['position', 10, 64, 20]])
+    assert.match(bot.output, /player image analysis/)
+    assert.match(bot.output, /position image analysis/)
+    assert.match(bot.output, /lookAtPlayer,lookAtPosition/, 'vision exposes only the two observation methods')
+    const invalidVision = await coder._stageCode('await vision.capture();')
+    assert.match(await coder._lintCode(invalidVision.src_lint_copy), /These functions do not exist/)
     console.log('place_agent.test.cjs: parser, session fallback, observation grounding, selected place context, private aliases, and SES SDK path passed')
   } finally {
     process.chdir(previousCwd)

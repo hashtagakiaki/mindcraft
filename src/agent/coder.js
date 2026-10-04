@@ -136,7 +136,7 @@ export class Coder {
     async  _lintCode(code) {
         let result = '#### CODE ERROR INFO ###\n';
         const codeNoComments = code.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
-        const skillRegex = /((?:skills|world|places)\.(.*?))\(/g;
+        const skillRegex = /((?:skills|world|places|vision)\.(.*?))\(/g;
         const skills = [];
         let match;
         while ((match = skillRegex.exec(codeNoComments)) !== null) {
@@ -211,6 +211,10 @@ export class Coder {
             skills,
             log: skills.log,
             world,
+            vision: {
+                lookAtPlayer: (playerName, direction) => this.agent.vision_interpreter.lookAtPlayer(playerName, direction),
+                lookAtPosition: (x, y, z) => this.agent.vision_interpreter.lookAtPosition(x, y, z),
+            },
             places: this.agent.places?.sdk,
             Vec3,
         });

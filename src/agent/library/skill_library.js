@@ -2,16 +2,32 @@ import { cosineSimilarity } from '../../utils/math.js';
 import { getSkillDocs } from './index.js';
 import { wordOverlapScore } from '../../utils/text.js';
 
+const VISION_DOCS = [
+    `vision.lookAtPlayer
+Look at a visible player or in their viewing direction, capture a screenshot, and return its image analysis. Requires allow_vision and a vision-capable model; otherwise returns a disabled message.
+@param {string} player_name, name of the target player.
+@param {string} direction, 'at' to look at the player or 'with' to match their view.
+@returns {Promise<string>} image analysis or a disabled/missing-player message. Log the result to include it in action output.
+@example const view = await vision.lookAtPlayer('Alex', 'with'); log(bot, view);`,
+    `vision.lookAtPosition
+Look toward specified coordinates, capture a screenshot, and return its image analysis. Requires allow_vision and a vision-capable model; otherwise returns a disabled message. The existing camera aims two blocks above the supplied y coordinate.
+@param {number} x, target x coordinate.
+@param {number} y, target base y coordinate.
+@param {number} z, target z coordinate.
+@returns {Promise<string>} image analysis or a disabled message. Log the result to include it in action output.
+@example const view = await vision.lookAtPosition(10, 64, 20); log(bot, view);`,
+];
+
 export class SkillLibrary {
     constructor(agent,embedding_model) {
         this.agent = agent;
         this.embedding_model = embedding_model;
         this.skill_docs_embeddings = {};
         this.skill_docs = null;
-        this.always_show_skills = ['skills.placeBlock', 'skills.wait', 'skills.breakBlockAt', 'skills.collectBlock', 'skills.craftRecipe', 'skills.tendNearbyFarm']
+        this.always_show_skills = ['skills.placeBlock', 'skills.wait', 'skills.breakBlockAt', 'skills.collectBlock', 'skills.craftRecipe', 'vision.lookAtPlayer', 'vision.lookAtPosition']
     }
     async initSkillLibrary() {
-        const skillDocs = getSkillDocs();
+        const skillDocs = [...getSkillDocs(), ...VISION_DOCS];
         this.skill_docs = skillDocs;
         if (this.embedding_model) {
             try {
