@@ -69,7 +69,7 @@ async function setupNavigationFixture(root) {
   await write(root, 'src/agent/library/operation_context.js', await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
   await write(root, 'src/agent/library/operation_context.js', await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
   await write(root, 'src/agent/library/crafting_sync.js', await readFile(path.join(repo, 'src/agent/library/crafting_sync.js')))
-  await write(root, 'src/utils/mcdata.js', 'export function mustCollectManually(name) { return name === "wheat"; } export function getBlockId() { return 1; } export function getItemId(name) { return name === "oak_log" ? 1 : null; }')
+  await write(root, 'src/utils/mcdata.js', 'export function mustCollectManually(name) { return name === "wheat"; } export function getBlockId() { return 1; } export function getItemId(name) { return ({ oak_log: 1, oak_planks: 36, crafting_table: 300, wooden_pickaxe: 820, stone_pickaxe: 825, stick: 848 })[name] ?? null; } export function getItemCraftingRecipes(name) { return name === "oak_planks" || name === "stone_pickaxe" ? [[{}]] : []; } export function ingredientsFromPrismarineRecipe(recipe) { return recipe.requiredItems || {}; } export function calculateLimitingResource() { return { num: 1, limitingResource: "cobblestone" }; }')
   await write(root, 'src/agent/library/world.js', `
 export function getNearestBlock(bot) { return bot.navigation.block || null; }
 export function getNearestBlocksWhere(bot, predicate) { return (bot.navigation.blocks || []).filter(predicate); }
@@ -78,6 +78,8 @@ export function isEntityType(name) { return name === 'cow'; }
 export function shouldPlaceTorch() { return false; }
 export function getNearbyEntities(bot) { return bot.navigation.entities || []; }
 export function getPosition(bot) { return bot.entity.position; }
+export function getInventoryCounts(bot) { return bot.navigation.inventory || {}; }
+export function getNearestFreeSpace(bot) { return bot.navigation.freeSpace || { x: 0, y: 0, z: 0 }; }
 `)
   await write(root, 'node_modules/vec3/package.json', '{"type":"module","exports":"./index.js"}')
   await write(root, 'node_modules/vec3/index.js', 'export default function Vec3(x, y, z) { return { x, y, z, plus(v) { return Vec3(x + v.x, y + v.y, z + v.z); }, offset(dx, dy, dz) { return Vec3(x + dx, y + dy, z + dz); }, distanceTo(v) { return Math.hypot(x - v.x, y - v.y, z - v.z); }, equals(v) { return x === v.x && y === v.y && z === v.z; }, toString() { return `(${x}, ${y}, ${z})`; } }; }')
@@ -510,6 +512,19 @@ async function testFarm(root) {
 }
 
 async function main() {
+  if (process.argv[2] === '--interaction-confirmation-only') {
+    const temp = await mkdtemp(path.join(os.tmpdir(), 'mindcraft-focused-interaction-'))
+    try {
+      const fixture = path.join(temp, 'navigation-fixture')
+      await setupNavigationFixture(fixture)
+      await write(temp, 'node_modules/prismarine-item/package.json', '{"main":"index.js"}')
+      await write(temp, 'node_modules/prismarine-item/index.js', 'module.exports = () => class Item { static toNotch(item) { return item ? { itemId: item.type, itemCount: item.count, addedComponentCount: 0, removedComponentCount: 0, components: [], removeComponents: [] } : { itemCount: 0, components: [], removeComponents: [] } } static fromNotch(item) { if (!item || item.present === false || item.itemCount === 0) return null; const type = item.itemId ?? item.blockId ?? item.type; const count = item.itemCount ?? item.count; return type == null ? null : { type, count, metadata: item.metadata ?? item.itemDamage ?? 0, stackSize: 64 } } };')
+      execFileSync(node, [path.join(__dirname, 'interaction_confirmation.test.cjs'), fixture], { stdio: 'inherit' })
+    } finally {
+      await rm(temp, { recursive: true, force: true })
+    }
+    return
+  }
   execFileSync(node, [path.join(__dirname, 'codex_session.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'message_targets.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'bot_rules.test.cjs')], { stdio: 'inherit' })

@@ -322,7 +322,7 @@ export async function craftRecipe(bot, itemName, num=1) {
      * Attempt to craft the given item name from a recipe. May craft many items.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {string} itemName, the item name to craft.
-     * @returns {Promise<boolean>} true if the recipe was crafted, false otherwise.
+     * @returns {Promise<boolean>} true if the recipe was crafted, false if its ingredients or required crafting grid are unavailable.
      * @example
      * await skills.craftRecipe(bot, "stick");
      **/
@@ -360,6 +360,9 @@ export async function craftRecipe(bot, itemName, num=1) {
                 if (craftingTable) {
                     recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, craftingTable);
                     placedTable = true;
+                } else {
+                    log(bot, `Could not confirm a crafting table after placement; refusing to use the inventory grid for ${itemName}.`);
+                    return false;
                 }
             }
             else {

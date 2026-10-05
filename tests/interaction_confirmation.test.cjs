@@ -97,6 +97,7 @@ async function main() {
   const fixture = path.resolve(process.argv[2])
   const skills = await import(pathToFileURL(path.join(fixture, 'src/agent/library/skills.js')))
   const ownership = await import(pathToFileURL(path.join(fixture, 'src/agent/library/operation_context.js')))
+  const craftingSync = (await import(pathToFileURL(path.join(fixture, 'src/agent/library/crafting_sync.js')))).default
 
   const waterPos = makePosition(1, 0, 0)
   const water = makeBlock('water', waterPos)
@@ -282,6 +283,75 @@ async function main() {
   assert.equal(confirmedWithdrawResult.result, true)
   assert.deepEqual(confirmedWithdrawResult.changes.map(change => change.quantity), [3])
   assert.equal(confirmedWithdraw.window.closed, true)
+
+  const originalCraftRun = craftingSync.run
+  const craftCalls = []
+  craftingSync.run = async (_bot, callback) => callback(async (recipe, count, table) => {
+    craftCalls.push({ recipe, count, table })
+    return 1
+  })
+  const tableRecipe = {
+    result: { id: 825, count: 1 },
+    inShape: [[{ id: 35 }, { id: 35 }, { id: 35 }], [null, { id: 848 }, null], [null, { id: 848 }, null]],
+    delta: [{ id: 35, count: -3 }, { id: 848, count: -2 }, { id: 825, count: 1 }],
+    requiredItems: { cobblestone: 3, stick: 2 },
+    requiresTable: true
+  }
+  const inventoryRecipe = {
+    result: { id: 36, count: 4 },
+    inShape: [[{ id: 1 }]],
+    delta: [{ id: 1, count: -1 }, { id: 36, count: 4 }],
+    requiredItems: { oak_log: 1 }
+  }
+  const craftBot = ({ table = null, includeTableItem = false } = {}) => {
+    const items = [
+      { name: 'cobblestone', type: 35, count: 3 },
+      { name: 'stick', type: 848, count: 2 },
+      { name: 'oak_log', type: 1, count: 1 },
+      ...(includeTableItem ? [{ name: 'crafting_table', type: 300, count: 1 }] : [])
+    ]
+    const inventory = {
+      items: () => items,
+      findInventoryItem: name => items.find(item => item.name === name) || null
+    }
+    const bot = {
+      output: '',
+      navigation: { block: table, inventory: { cobblestone: 3, stick: 2, oak_log: 1, crafting_table: includeTableItem ? 1 : 0 } },
+      inventory,
+      game: { gameMode: 'survival' },
+      entity: { position: makePosition(0, 0, 0) },
+      modes: { isOn: () => false },
+      recipesFor(itemId, _metadata, _count, grid) {
+        if (itemId === 825) return grid ? [tableRecipe] : []
+        if (itemId === 36) return [inventoryRecipe]
+        return []
+      },
+      blockAt(position) { return makeBlock('air', position, { type: 0 }) },
+      async equip() {},
+      async lookAt() {},
+      armorManager: { async equipAll() {} }
+    }
+    bot.entity.position.distanceTo = () => 0
+    return bot
+  }
+  try {
+    const noTableBot = craftBot({ includeTableItem: true })
+    const noTableResult = await skills.craftRecipe(noTableBot, 'stone_pickaxe')
+    assert.equal(noTableResult, false, 'a failed table placement cannot make a table-only recipe succeed')
+    assert.equal(craftCalls.length, 0, 'do not pass a 3x3 recipe to the 2x2 inventory grid')
+    assert.equal(noTableBot.navigation.inventory.cobblestone, 3, 'the rejected setup leaves required material untouched')
+
+    const inventoryResult = await skills.craftRecipe(craftBot(), 'oak_planks')
+    assert.equal(inventoryResult, true, 'an inventory-grid recipe remains available without a table')
+    assert.equal(craftCalls.at(-1).table, null, 'the inventory-grid recipe retains its null-table path')
+
+    const tableBlock = makeBlock('crafting_table', makePosition(1, 0, 0))
+    const tableResult = await skills.craftRecipe(craftBot({ table: tableBlock }), 'stone_pickaxe')
+    assert.equal(tableResult, true, 'a table recipe still reaches crafting with the observed table')
+    assert.equal(craftCalls.at(-1).table, tableBlock, 'the table recipe retains its 3x3-table path')
+  } finally {
+    craftingSync.run = originalCraftRun
+  }
 
   console.log('interaction confirmation tests passed')
 }
