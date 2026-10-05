@@ -83,9 +83,12 @@ export class MindServerProxy {
             if (this.agent?.requestShutdown) this.agent.requestShutdown('explicit-restart', { restartIntent: true, code: 0 });
             else this.agent?.cleanKill?.('Explicit restart requested.', 0);
         });
-        this.socket.on('send-message', (data) => {
+        this.socket.on('send-message', (data, acknowledge) => {
             if (!this.managementReady) return;
-            try { this.agent.respondFunc(data.from, data.message, data.recipients); }
+            try {
+                const onAccepted = result => { if (typeof acknowledge === 'function') acknowledge(result); };
+                this.agent.respondFunc(data.from, data.message, data.recipients, { taskId: data.taskId }, onAccepted);
+            }
             catch (error) { console.error('Error: ', JSON.stringify(error, Object.getOwnPropertyNames(error))); }
         });
         this.socket.on('get-full-state', (callback) => {

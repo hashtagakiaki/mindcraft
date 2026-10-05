@@ -201,7 +201,7 @@ class Session {
       const expectedCursor = notchCursor && [notchCursor.type, notchCursor.count, notchCursor.metadata]
       if (JSON.stringify(actual) !== JSON.stringify(expected) || JSON.stringify(actualCursor) !== JSON.stringify(expectedCursor)) fail('client window does not match fenced server snapshot')
     }
-    return snap
+    return { ...snap, items: packet.items?.map(item => this.Item.fromNotch(item)) ?? null }
   }
 
   click(window, slot, button = 0) {

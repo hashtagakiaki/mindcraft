@@ -216,31 +216,45 @@ async function main() {
   assert.equal(failedNonlethal.attacked, undefined)
 
   const chestBlock = makeBlock('chest', makePosition(1, 0, 0))
-  const makeChestTransfer = ({ direction, available, requested, moved = requested }) => {
+  const makeChestTransfer = ({ direction, available, requested, moved = requested, serverUpdates = true }) => {
     const bot = makeBot({ items: direction === 'deposit' ? [{ name: 'oak_log', type: 1, count: available }] : [] })
     bot.navigation.block = chestBlock
     const slots = new Array(41).fill(null)
-    if (direction === 'deposit') slots[27] = { name: 'oak_log', type: 1, count: available }
-    else slots[0] = { name: 'oak_log', type: 1, count: available }
+    if (direction === 'deposit') slots[27] = { name: 'oak_log', type: 1, count: available, metadata: 0 }
+    else slots[0] = { name: 'oak_log', type: 1, count: available, metadata: 0 }
+    let serverSlots = slots.map(slot => slot && { ...slot })
+    const client = new EventEmitter()
+    bot._client = client
+    bot.registry = {}
+    let stateId = 0
+    client.write = name => {
+      if (name !== 'client_command') return
+      if (serverUpdates) serverSlots = slots.map(slot => slot && { ...slot })
+      client.emit('packet', { windowId: 7, stateId: ++stateId, items: serverSlots.map(slot => slot ? ({ itemId: slot.type, itemCount: slot.count, addedComponentCount: 0, removedComponentCount: 0, components: [], removeComponents: [] }) : ({ itemCount: 0, components: [], removeComponents: [] })), carriedItem: { itemCount: 0, components: [], removeComponents: [] } }, { name: 'window_items' })
+      client.emit('packet', {}, { name: 'statistics' })
+      client.emit('statistics', {})
+    }
     const window = {
-      slots, inventoryStart: 27, inventoryEnd: 41,
+      id: 7, type: 'minecraft:chest', slots, inventoryStart: 27, inventoryEnd: 41, selectedItem: null,
       containerItems() { return slots.slice(0, 27).filter(Boolean) },
       async deposit(type, _metadata, count) {
         const amount = Math.min(moved, count)
         slots[27].count -= amount
-        if (!slots[0]) slots[0] = { name: 'oak_log', type, count: 0 }
+        if (!slots[27].count) slots[27] = null
+        if (!slots[0]) slots[0] = { name: 'oak_log', type, count: 0, metadata: 0 }
         slots[0].count += amount
       },
       async withdraw(type, _metadata, count) {
         const amount = Math.min(moved, count)
         slots[0].count -= amount
-        if (!slots[27]) slots[27] = { name: 'oak_log', type, count: 0 }
+        if (!slots[0].count) slots[0] = null
+        if (!slots[27]) slots[27] = { name: 'oak_log', type, count: 0, metadata: 0 }
         slots[27].count += amount
       },
-      async close() { window.closed = true }
+      async close() { window.closed = true; bot.currentWindow = null }
     }
-    bot.openContainer = async () => window
-    return { bot, window, requested }
+    bot.openContainer = async () => { bot.currentWindow = window; return window }
+    return { bot, window, requested, serverSlots }
   }
   const runChestAction = async (bot, action) => {
     const manager = { intentEpoch: 4 }
@@ -255,6 +269,13 @@ async function main() {
   assert.equal(partialDepositResult.uncertain[0].requestedQuantity, 4)
   assert.equal(partialDeposit.bot.inventoryUnconfirmed, true, 'ambiguous chest remainder preserves the existing action gate')
   assert.equal(partialDeposit.window.closed, true)
+
+  const optimisticOnlyDeposit = makeChestTransfer({ direction: 'deposit', available: 4, requested: 4, moved: 4, serverUpdates: false })
+  const optimisticOnlyResult = await runChestAction(optimisticOnlyDeposit.bot, () => skills.putInChest(optimisticOnlyDeposit.bot, 'oak_log', 4))
+  assert.equal(optimisticOnlyResult.result, false, 'optimistic Mineflayer slots without server state remain unconfirmed')
+  assert.equal(optimisticOnlyResult.changes.length, 0, 'a client mirror is never recorded as server confirmation')
+  assert.equal(optimisticOnlyResult.uncertain[0].confirmedQuantity, null, 'missing server confirmation stays unknown rather than zero')
+  assert.equal(optimisticOnlyDeposit.bot.inventoryUnconfirmed, true)
 
   const confirmedWithdraw = makeChestTransfer({ direction: 'withdraw', available: 5, requested: 3, moved: 3 })
   const confirmedWithdrawResult = await runChestAction(confirmedWithdraw.bot, () => skills.takeFromChest(confirmedWithdraw.bot, 'oak_log', 3))

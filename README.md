@@ -312,4 +312,6 @@ Root `settings.js` の `agent_runtime: "codex-session"` と `allow_insecure_codi
 
 返却結果には位置、在庫、耐久度、health/food、部分output、error、停止理由を含める。executor成功はskillのboolean結果と別fieldで返す。skill call ID/parent ID、task ID、確認できた事実と未確認部分をoperation resultへ載せる。公開SDK呼出しとその未await子処理はsettleまで所有するが、raw bot/plugin操作全体の停止や回収は保証しない。4,232文字のoutputは既定で省略しない。16,000文字を超えるoutputは明示して先頭/末尾を残す。実行codeと判断・結果は `bots/<name>/histories/codex-<uuid>.jsonl` に保存する。task terminalは受理task IDで絞り込み、reported/unknown、終了理由、operation settlement、保存結果を別々に記録する。shared bot rulesは判断再開ごとに読み直す。現在のvision設定を古いmemoryより優先する。Stop、新しい人間の指示、management切断、shutdownは旧threadと操作を取り消し、旧結果による再開を拒否する。native task中は旧recovery actorを並行起動しない。既存literal commandも使用できる。
 
+確認eventはserver由来の観測を根拠にする。chest transferは前後のfull `window_items` snapshotがstatistics fence内で揃い、containerとplayer inventoryの差分が一致した量だけを記録する。Mineflayerのoptimistic slot表示だけ、片側差分、またはsnapshot欠落はunknownとして在庫操作gateを維持する。legacy command/historyには同じsettled operation resultから状態と確認事実を短く投影する。domain `false` や `returned_true` は依頼全体の達成確認を意味しない。
+
 Offline fixtureは `node tests/codex_session.test.cjs`（上記Node20）で実行し、通常suiteにも含まれる。fake app-serverと所有helperでpause/resume、高速完了、部分失敗、停滞、停止/差替え/管理切断/shutdownの結果破棄、本体message入口を確認する。実ゲーム結果はbenchmark repoの記録を参照。manual playのsource pinや稼働botはこの追加で自動更新されない。

@@ -137,6 +137,18 @@ export function operationResult(operation) {
 // settled events into that string without creating a second fact ledger.
 export function operationFactsSummary(result) {
     const lines = [];
+    const outcomes = [];
+    if (result && typeof result === 'object' && ('success' in result || result.executionStatus || result.domainReturn !== undefined)) {
+        outcomes.push(`executor=${result.success === true ? 'success' : result.success === false ? 'failure' : 'unknown'}`);
+        if (result.executionStatus) outcomes.push(`execution=${result.executionStatus}`);
+        if (result.domainReturn !== undefined) outcomes.push(`domain=${result.domainReturn === false ? 'returned false' : result.domainReturn === true ? 'returned true (not goal verification)' : String(result.domainReturn)}`);
+    }
+    for (const call of result?.skillResults ?? []) {
+        if (['returned_false', 'error', 'rejected', 'cancelled'].includes(call.status)) {
+            outcomes.push(`skill ${call.skill ?? 'unknown'}=${call.status}${call.error || call.reason ? ` (${call.error ?? call.reason})` : ''}`);
+        }
+    }
+    if (outcomes.length) lines.push(`operation outcome: ${outcomes.join('; ')}`);
     const targetText = target => {
         if (target == null) return 'target unknown';
         if (typeof target !== 'object') return String(target);

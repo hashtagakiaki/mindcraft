@@ -55,6 +55,12 @@ function countWindowRegion(window, start, end, itemName) {
     return countWindowItems(window.slots, start, end, itemName);
 }
 
+function countFencedWindowRegion(snapshot, start, end, itemName) {
+    const itemType = mc.getItemId(itemName);
+    const slots = snapshot.items.map(item => item && { name: item.type === itemType ? itemName : null, count: item.count });
+    return countWindowItems(slots, start, end, itemName);
+}
+
 function setActionPhase(context, phase) {
     context?.setPhase?.(phase);
 }
@@ -1411,30 +1417,50 @@ export async function putInChest(bot, itemName, num=-1) {
     const context = getActionContext(bot);
     if (isActionCancelled(bot, context)) return false;
     const chestContainer = await bot.openContainer(chest);
-    const containerBefore = countWindowRegion(chestContainer, 0, chestContainer.inventoryStart, itemName);
-    const inventoryBefore = countWindowRegion(chestContainer, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName);
+    let beforeSnapshot = null;
+    let afterSnapshot = null;
     let transferError = null;
+    let snapshotError = null;
     let closeError = null;
     try {
-        if (!isActionCancelled(bot, context)) await chestContainer.deposit(item.type, null, to_put);
-    } catch (error) { transferError = error; }
+        try { beforeSnapshot = await craftingSync.snapshotWindow(bot, chestContainer); }
+        catch (error) { snapshotError = error; }
+        if (beforeSnapshot && !isActionCancelled(bot, context)) {
+            try { await chestContainer.deposit(item.type, null, to_put); }
+            catch (error) { transferError = error; }
+            try { afterSnapshot = await craftingSync.snapshotWindow(bot, chestContainer); }
+            catch (error) { snapshotError = error; }
+        }
+    }
     finally {
         try { await chestContainer.close(); }
         catch (error) { closeError = error; bot.inventoryUnconfirmed = true; }
     }
-    const containerDelta = countWindowRegion(chestContainer, 0, chestContainer.inventoryStart, itemName) - containerBefore;
-    const inventoryDelta = inventoryBefore - countWindowRegion(chestContainer, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName);
-    const confirmed = Math.max(0, Math.min(containerDelta, inventoryDelta));
-    if (confirmed > 0) recordConfirmation({ phase: 'chest-deposit', quantity: confirmed, unit: 'item', target: { itemName, chest: { x: chest.position.x, y: chest.position.y, z: chest.position.z } },
-        evidence: 'matching chest and player-inventory slot deltas after acknowledged container transfer' });
-    if (confirmed < to_put) recordUncertainty({ requestedQuantity: to_put, confirmedQuantity: confirmed || null, unit: 'item', target: itemName,
-        reason: 'container transfer did not confirm the full matching slot delta' });
-    if (containerDelta !== inventoryDelta || confirmed < to_put) bot.inventoryUnconfirmed = true;
+    let confirmed = null;
+    let uncertaintyReason = 'server-fenced container snapshots unavailable';
+    if (beforeSnapshot && afterSnapshot) {
+        const containerDelta = countFencedWindowRegion(afterSnapshot, 0, chestContainer.inventoryStart, itemName) - countFencedWindowRegion(beforeSnapshot, 0, chestContainer.inventoryStart, itemName);
+        const inventoryDelta = countFencedWindowRegion(beforeSnapshot, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName) - countFencedWindowRegion(afterSnapshot, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName);
+        if (containerDelta === inventoryDelta && containerDelta >= 0) {
+            confirmed = containerDelta;
+            if (confirmed > 0) recordConfirmation({ phase: 'chest-deposit', quantity: confirmed, unit: 'item', target: { itemName, chest: { x: chest.position.x, y: chest.position.y, z: chest.position.z } },
+                evidence: 'matching slot deltas between two server window_items snapshots fenced by statistics' });
+        } else {
+            bot.inventoryUnconfirmed = true;
+            uncertaintyReason = 'server-fenced container and player-inventory slot deltas disagree';
+        }
+    }
+    if (confirmed == null || confirmed < to_put) {
+        if (confirmed != null) recordUncertainty({ requestedQuantity: to_put, confirmedQuantity: confirmed, unit: 'item', target: itemName,
+            reason: 'server-fenced container transfer did not confirm the full requested slot delta' });
+        else recordUncertainty({ requestedQuantity: to_put, confirmedQuantity: null, unit: 'item', target: itemName, reason: `${uncertaintyReason}${snapshotError ? `: ${String(snapshotError)}` : ''}` });
+        bot.inventoryUnconfirmed = true;
+    }
     if (transferError) throw transferError;
     if (closeError) throw closeError;
     if (isActionCancelled(bot, context)) return false;
     if (confirmed !== to_put) {
-        log(bot, `Chest transfer was only partially confirmed: ${confirmed}/${to_put} ${itemName}; inventory actions are gated until state is confirmed.`);
+        log(bot, `Chest transfer was only partially confirmed: ${confirmed == null ? 'unknown' : `${confirmed}/${to_put}`} ${itemName}; inventory actions are gated until state is confirmed.`);
         return false;
     }
     log(bot, `Successfully put ${confirmed} ${itemName} in the chest.`);
@@ -1460,6 +1486,15 @@ export async function takeFromChest(bot, itemName, num=-1) {
     const context = getActionContext(bot);
     if (isActionCancelled(bot, context)) return false;
     const chestContainer = await bot.openContainer(chest);
+    let serverSnapshot;
+    try { serverSnapshot = await craftingSync.snapshotWindow(bot, chestContainer); }
+    catch (error) {
+        try { await chestContainer.close(); } catch { bot.inventoryUnconfirmed = true; }
+        bot.inventoryUnconfirmed = true;
+        recordUncertainty({ requestedQuantity: num === -1 ? null : num, confirmedQuantity: null, unit: 'item', target: itemName,
+            reason: `server-fenced chest snapshot unavailable: ${String(error)}` });
+        throw error;
+    }
     
     // Find all matching items in the chest
     let matchingItems = chestContainer.containerItems().filter(item => item.name === itemName);
@@ -1473,6 +1508,7 @@ export async function takeFromChest(bot, itemName, num=-1) {
     let totalAvailable = matchingItems.reduce((sum, item) => sum + item.count, 0);
     let remaining = num === -1 ? totalAvailable : Math.min(num, totalAvailable);
     let totalTaken = 0;
+    let transferError = null;
     
     // Take items from each slot until we've taken enough or run out
     for (const item of matchingItems) {
@@ -1480,36 +1516,48 @@ export async function takeFromChest(bot, itemName, num=-1) {
         if (isActionCancelled(bot, context)) break;
         
         let toTakeFromSlot = Math.min(remaining, item.count);
-        const containerBefore = countWindowRegion(chestContainer, 0, chestContainer.inventoryStart, itemName);
-        const inventoryBefore = countWindowRegion(chestContainer, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName);
+        const beforeSnapshot = serverSnapshot;
+        let afterSnapshot = null;
+        let slotError = null;
         try { await chestContainer.withdraw(item.type, null, toTakeFromSlot); }
-        catch (error) {
-            try { await chestContainer.close(); } catch { bot.inventoryUnconfirmed = true; }
-            const containerDelta = containerBefore - countWindowRegion(chestContainer, 0, chestContainer.inventoryStart, itemName);
-            const inventoryDelta = countWindowRegion(chestContainer, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName) - inventoryBefore;
-            const confirmed = Math.max(0, Math.min(containerDelta, inventoryDelta));
-            if (confirmed > 0) recordConfirmation({ phase: 'chest-withdraw', quantity: confirmed, unit: 'item', target: { itemName, chest: { x: chest.position.x, y: chest.position.y, z: chest.position.z } },
-                evidence: 'matching chest and player-inventory slot deltas observed before transfer error' });
-            recordUncertainty({ requestedQuantity: toTakeFromSlot, confirmedQuantity: confirmed || null, unit: 'item', target: itemName,
-                reason: `container transfer threw: ${String(error)}` });
+        catch (error) { slotError = error; }
+        try { afterSnapshot = await craftingSync.snapshotWindow(bot, chestContainer); }
+        catch (error) { slotError ||= error; }
+        if (!afterSnapshot) {
             bot.inventoryUnconfirmed = true;
-            throw error;
+            recordUncertainty({ requestedQuantity: toTakeFromSlot, confirmedQuantity: null, unit: 'item', target: itemName,
+                reason: `server-fenced chest snapshot unavailable${slotError ? `: ${String(slotError)}` : ''}` });
+            transferError ||= slotError;
+            break;
         }
-        const containerDelta = containerBefore - countWindowRegion(chestContainer, 0, chestContainer.inventoryStart, itemName);
-        const inventoryDelta = countWindowRegion(chestContainer, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName) - inventoryBefore;
-        const confirmed = Math.max(0, Math.min(containerDelta, inventoryDelta));
+        const containerDelta = countFencedWindowRegion(beforeSnapshot, 0, chestContainer.inventoryStart, itemName) - countFencedWindowRegion(afterSnapshot, 0, chestContainer.inventoryStart, itemName);
+        const inventoryDelta = countFencedWindowRegion(afterSnapshot, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName) - countFencedWindowRegion(beforeSnapshot, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName);
+        if (containerDelta !== inventoryDelta || containerDelta < 0) {
+            bot.inventoryUnconfirmed = true;
+            recordUncertainty({ requestedQuantity: toTakeFromSlot, confirmedQuantity: null, unit: 'item', target: itemName,
+                reason: 'server-fenced container and player-inventory slot deltas disagree' });
+            break;
+        }
+        const confirmed = containerDelta;
         if (confirmed > 0) recordConfirmation({ phase: 'chest-withdraw', quantity: confirmed, unit: 'item', target: { itemName, chest: { x: chest.position.x, y: chest.position.y, z: chest.position.z } },
-            evidence: 'matching chest and player-inventory slot deltas after acknowledged container transfer' });
-        if (confirmed < toTakeFromSlot) recordUncertainty({ requestedQuantity: toTakeFromSlot, confirmedQuantity: confirmed || null, unit: 'item', target: itemName,
-            reason: 'container transfer did not confirm the full matching slot delta' });
-        if (containerDelta !== inventoryDelta || confirmed < toTakeFromSlot) bot.inventoryUnconfirmed = true;
+            evidence: 'matching slot deltas between two server window_items snapshots fenced by statistics' });
+        if (confirmed < toTakeFromSlot) {
+            recordUncertainty({ requestedQuantity: toTakeFromSlot, confirmedQuantity: confirmed, unit: 'item', target: itemName,
+                reason: 'server-fenced chest transfer did not confirm the full requested slot delta' });
+            bot.inventoryUnconfirmed = true;
+        }
         totalTaken += confirmed;
         remaining -= confirmed;
-        if (containerDelta !== inventoryDelta || confirmed < toTakeFromSlot) break;
+        serverSnapshot = afterSnapshot;
+        if (slotError || confirmed < toTakeFromSlot) {
+            transferError ||= slotError;
+            break;
+        }
     }
     
     try { await chestContainer.close(); }
     catch (error) { bot.inventoryUnconfirmed = true; throw error; }
+    if (transferError) throw transferError;
     if (isActionCancelled(bot, context)) return totalTaken > 0;
     log(bot, `Successfully took ${totalTaken} ${itemName} from the chest.`);
     return totalTaken > 0;

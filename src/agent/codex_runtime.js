@@ -52,6 +52,8 @@ export class CodexRuntime {
         let budgetReason = null;
         let completion = 'unknown';
         let saveSucceeded = null;
+        let reportedResponse;
+        let reportedAt;
         const current = () => !this.abort.signal.aborted && isCurrent() && !agent.actions.userStopped;
         mkdirSync(`./bots/${agent.name}/histories`, { recursive: true });
         const file = `./bots/${agent.name}/histories/codex-${randomUUID()}.jsonl`;
@@ -131,17 +133,20 @@ export class CodexRuntime {
                 if (!response) throw new Error('Codex ended without an action or response');
                 await agent.history.add(agent.name, response);
                 if (!current()) return false;
-                completion = 'reported';
                 agent.routeResponse(source, response);
+                reportedResponse = response;
+                reportedAt = new Date().toISOString();
+                completion = 'reported';
                 try { await agent.history.save(); saveSucceeded = true; }
                 catch (error) { saveSucceeded = false; throw error; }
-                terminalDetail = { status: 'completed', completion: 'reported', terminationReason: 'reported', saveSucceeded, response };
+                terminalDetail = { status: 'completed', completion: 'reported', terminationReason: 'reported', saveSucceeded, response, reportedAt };
                 return true;
             }
             return false;
         } catch (error) {
             failed = true;
-            terminalDetail = { status: current() ? 'error' : 'cancelled', completion, terminationReason: current() ? 'error' : String(this.abort.signal.reason || 'cancelled'), saveSucceeded, error: String(error) };
+            terminalDetail = { status: current() ? 'error' : 'cancelled', completion, terminationReason: current() ? 'error' : String(this.abort.signal.reason || 'cancelled'), saveSucceeded,
+                ...(reportedResponse === undefined ? {} : { response: reportedResponse, reportedAt }), error: String(error) };
             if (current()) {
                 agent.routeResponse(source, `Codex task failed: ${error.message}`);
                 await agent.history.add('system', `Codex task failed: ${error.message}`);

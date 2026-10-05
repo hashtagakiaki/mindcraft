@@ -69,7 +69,7 @@ async function setupNavigationFixture(root) {
   await write(root, 'src/agent/library/operation_context.js', await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
   await write(root, 'src/agent/library/operation_context.js', await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
   await write(root, 'src/agent/library/crafting_sync.js', await readFile(path.join(repo, 'src/agent/library/crafting_sync.js')))
-  await write(root, 'src/utils/mcdata.js', 'export function mustCollectManually(name) { return name === "wheat"; } export function getBlockId() { return 1; }')
+  await write(root, 'src/utils/mcdata.js', 'export function mustCollectManually(name) { return name === "wheat"; } export function getBlockId() { return 1; } export function getItemId(name) { return name === "oak_log" ? 1 : null; }')
   await write(root, 'src/agent/library/world.js', `
 export function getNearestBlock(bot) { return bot.navigation.block || null; }
 export function getNearestBlocksWhere(bot, predicate) { return (bot.navigation.blocks || []).filter(predicate); }
@@ -535,7 +535,7 @@ async function main() {
     await writeFile(helper, await readFile(path.join(repo, 'src/agent/library/crafting_sync.js')))
     await writeFile(path.join(temp, 'operation_context.js'), await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
     await write(temp, 'node_modules/prismarine-item/package.json', '{"main":"index.js"}')
-    await write(temp, 'node_modules/prismarine-item/index.js', 'module.exports = () => class Item { static toNotch(item) { return item ? { type: item.type, count: item.count, metadata: item.metadata } : null } static fromNotch(item) { return item ? { ...item, stackSize: 64 } : null } };')
+    await write(temp, 'node_modules/prismarine-item/index.js', 'module.exports = () => class Item { static toNotch(item) { return item ? { itemId: item.type, itemCount: item.count, addedComponentCount: 0, removedComponentCount: 0, components: [], removeComponents: [] } : { itemCount: 0, components: [], removeComponents: [] } } static fromNotch(item) { if (!item || item.present === false || item.itemCount === 0) return null; const type = item.itemId ?? item.blockId ?? item.type; const count = item.itemCount ?? item.count; return type == null ? null : { type, count, metadata: item.metadata ?? item.itemDamage ?? 0, stackSize: 64 } } };')
     execFileSync(node, [path.join(__dirname, 'crafting_sync.test.cjs'), helper], { stdio: 'inherit' })
     execFileSync(node, [path.join(__dirname, 'mining_sync.test.cjs'), path.join(repo, 'src/agent/library/mining_sync.js')], { stdio: 'inherit' })
     const farmRoot = path.join(temp, 'farm-fixture')

@@ -27,6 +27,7 @@ async function main() {
     const { default: settings } = await load('src/agent/settings.js')
     Object.assign(settings, { agent_runtime: 'codex-session', allow_insecure_coding: true, codex_session: { stall_timeout_ms: 60, action_timeout_ms: 2000, output_limit: 16000 }, language: 'en' })
     const { CodexRuntime, validateCodexRuntime } = await load('src/agent/codex_runtime.js')
+    const { operationFactsSummary } = await load('src/agent/library/operation_context.js')
     const { ActionManager } = await load('src/agent/action_manager.js')
     const { Coder } = await load('src/agent/coder.js')
     const { CodexSession } = await load('src/process/codex_session.js')
@@ -66,6 +67,11 @@ async function main() {
     assert.equal(domainFalse.success, true, 'executor success remains independent of a false domain return')
     assert.equal(domainFalse.domainReturn, false)
     assert.equal(domainFalse.executionStatus, 'completed')
+    const legacyFalse = operationFactsSummary({ ...domainFalse, skillResults: [{ skill: 'collect', status: 'returned_false' }] })
+    assert.match(legacyFalse, /executor=success; execution=completed; domain=returned false/)
+    assert.match(legacyFalse, /skill collect=returned_false/)
+    const legacyError = operationFactsSummary({ success: false, executionStatus: 'error', skillResults: [{ skill: 'craft', status: 'error', error: 'recipe failed' }] })
+    assert.match(legacyError, /executor=failure; execution=error; skill craft=error \(recipe failed\)/)
     const lateOutput = await agent.actions.runAction('unawaited-sdk-child', () => agent.coder.executeCode(
       'skills.wait(bot, 80).then(() => log(bot, "late child completed")).catch(() => {});\nawait Promise.resolve();'), { timeout: 0 })
     assert.equal(lateOutput.success, true)
@@ -152,6 +158,91 @@ async function main() {
     assert.equal(saveFailureTerminals.length, 1, 'save failure still emits one terminal event')
     assert.equal(saveFailureTerminals[0].completion, 'reported')
     assert.equal(saveFailureTerminals[0].saveSucceeded, false)
+    assert.equal(saveFailureTerminals[0].response, 'I completed the request.')
+    assert.ok(Number.isFinite(Date.parse(saveFailureTerminals[0].reportedAt)), 'response route time is preserved independently of save failure')
+
+    const eventsFor = async name => {
+      const files = await fs.readdir(path.join(root, `bots/${name}/histories`))
+      return (await fs.readFile(path.join(root, `bots/${name}/histories`, files[0]), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    }
+    const taskBudgets = { ...settings.codex_session, task_budget_ms: 30, max_operations: 24, max_turns: 30 }
+    settings.codex_session = taskBudgets
+    // Elapsed limits cancel model waits and produce exactly one terminal.
+    const modelWaitAgent = makeAgent('ModelWaitBudget')
+    await until(() => modelWaitAgent.coder.code_template && modelWaitAgent.coder.code_lint_template)
+    let modelWaitClosed = false
+    const modelWaitRuntime = new CodexRuntime(modelWaitAgent, { makeSession: () => ({
+      open: async (_instructions, signal) => { signal.addEventListener('abort', () => {}, { once: true }) },
+      runTurn: async () => new Promise((resolve, reject) => {
+        const abort = () => reject(new Error('model wait aborted'))
+        modelWaitRuntime.abort.signal.addEventListener('abort', abort, { once: true })
+      }), close: async () => { modelWaitClosed = true }
+    }) })
+    modelWaitAgent.codexRuntime = modelWaitRuntime
+    assert.equal(await modelWaitRuntime.run('operator', () => true, 'model-wait-budget'), false)
+    const modelWaitEvents = await eventsFor('ModelWaitBudget')
+    const modelWaitTerminals = modelWaitEvents.filter(event => event.type === 'finished')
+    assert.equal(modelWaitTerminals.length, 1)
+    assert.equal(modelWaitTerminals[0].terminationReason, 'task-budget:elapsed-time')
+    assert.equal(modelWaitTerminals[0].taskBudget.threadTurns, 1)
+    assert.equal(modelWaitClosed, true)
+
+    // Elapsed stop request does not claim settlement while SDK work is still draining.
+    const operationWaitAgent = makeAgent('OperationWaitBudget')
+    await until(() => operationWaitAgent.coder.code_template && operationWaitAgent.coder.code_lint_template)
+    const operationBody = deferred(), operationStarted = deferred()
+    operationWaitAgent.coder.executeCode = async () => { operationStarted.resolve(); await operationBody.promise; return 'drained' }
+    operationWaitAgent.interrupt = () => {}
+    const operationWaitRuntime = new CodexRuntime(operationWaitAgent, { makeSession: ({ execute }) => ({
+      open: async () => {}, runTurn: async () => ({ operation: execute('await skills.wait(bot, 80);'), messages: [] }), close: async () => {}
+    }) })
+    operationWaitAgent.codexRuntime = operationWaitRuntime
+    let operationRunSettled = false
+    const operationRun = operationWaitRuntime.run('operator', () => true, 'operation-wait-budget').finally(() => { operationRunSettled = true })
+    await operationStarted.promise
+    await delay(60)
+    assert.equal(operationWaitAgent.actions.executing, true)
+    assert.equal(operationRunSettled, false, 'task terminal waits for the actual operation drain after stop is requested')
+    assert.equal((await eventsFor('OperationWaitBudget')).some(event => event.type === 'finished'), false, 'no terminal claims a still-pending operation settled')
+    operationBody.resolve()
+    assert.equal(await operationRun, false)
+    const operationWaitTerminals = (await eventsFor('OperationWaitBudget')).filter(event => event.type === 'finished')
+    assert.equal(operationWaitTerminals.length, 1)
+    assert.equal(operationWaitTerminals[0].operationSettlement, 'settled')
+    assert.equal(operationWaitTerminals[0].terminationReason, 'task-budget:elapsed-time')
+
+    // Accepted operation and thread-turn caps are counted independently.
+    settings.codex_session = { ...taskBudgets, task_budget_ms: 1000, max_operations: 1, max_turns: 30 }
+    const operationCapAgent = makeAgent('OperationCap')
+    await until(() => operationCapAgent.coder.code_template && operationCapAgent.coder.code_lint_template)
+    operationCapAgent.coder.executeCode = async () => true
+    const operationCapRuntime = new CodexRuntime(operationCapAgent, { makeSession: ({ execute }) => {
+      let calls = 0
+      return { open: async () => {}, runTurn: async () => {
+        if (++calls === 1) return { operation: execute('operation-1'), messages: [] }
+        try { await execute('operation-2') } catch {}
+        return { operation: null, messages: [] }
+      }, close: async () => {} }
+    } })
+    operationCapAgent.codexRuntime = operationCapRuntime
+    assert.equal(await operationCapRuntime.run('operator', () => true, 'operation-cap'), false)
+    const operationCapTerminal = (await eventsFor('OperationCap')).find(event => event.type === 'finished')
+    assert.equal(operationCapTerminal.terminationReason, 'task-budget:accepted-operations')
+    assert.equal(operationCapTerminal.taskBudget.acceptedOperations, 1)
+
+    settings.codex_session = { ...taskBudgets, task_budget_ms: 1000, max_operations: 24, max_turns: 1 }
+    const turnCapAgent = makeAgent('TurnCap')
+    await until(() => turnCapAgent.coder.code_template && turnCapAgent.coder.code_lint_template)
+    turnCapAgent.coder.executeCode = async () => true
+    const turnCapRuntime = new CodexRuntime(turnCapAgent, { makeSession: ({ execute }) => ({
+      open: async () => {}, runTurn: async () => ({ operation: execute('one operation'), messages: [] }), close: async () => {}
+    }) })
+    turnCapAgent.codexRuntime = turnCapRuntime
+    assert.equal(await turnCapRuntime.run('operator', () => true, 'turn-cap'), false)
+    const turnCapTerminal = (await eventsFor('TurnCap')).find(event => event.type === 'finished')
+    assert.equal(turnCapTerminal.terminationReason, 'task-budget:thread-turns')
+    assert.equal(turnCapTerminal.taskBudget.threadTurns, 1)
+    settings.codex_session = taskBudgets
     assert.equal(await mainAgent.handleMessage('operator', '!stop'), true)
     assert.equal(mainAgent.actions.userStopped, true, 'literal Stop remains available')
     // Rule contents can change between turns; never freeze an old snapshot in baseInstructions.
@@ -191,6 +282,8 @@ async function main() {
       assert.equal(turns, 1)
       assert.equal(closed, true)
       assert.equal(testAgent.actions.executing, false)
+      const terminals = (await eventsFor('Cancel' + reason)).filter(event => event.type === 'finished')
+      assert.equal(terminals.length, 1, `${reason} cancellation writes one terminal record`)
     }
     console.log('codex session fixtures passed: compound/lint/false domain result/unawaited SDK drain/partial/stall/owned transport/pause/resume/cancellation')
   } finally {
