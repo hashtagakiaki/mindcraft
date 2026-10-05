@@ -6,6 +6,46 @@ The SDK documentation and code linter share one explicit `places`/`vision` metho
 
 `blocked_actions` disables named chat commands and removes those commands from command documentation. It does not prohibit equivalent operations through the SDK, raw bot access, or plugins.
 
+### Placement with a requested orientation
+
+Ask the bot to place a block with a world direction, for example “place a furnace facing north” or “place an upside-down stair facing west.” Generated code uses an options object as the sixth `placeBlock` argument:
+
+```js
+const placed = await skills.placeBlock(bot, 'oak_stairs', x, y, z, {
+    facing: 'west', half: 'top'
+});
+if (!placed) {
+    log(bot, 'Placement failed; inspect the reported state before continuing.');
+    return;
+}
+```
+
+| Option | Meaning |
+|---|---|
+| `facing` | Resulting Minecraft block state: `north` (-Z), `south` (+Z), `east` (+X), `west` (-X). Six-direction blocks also accept `up` / `down`. This specifies the block state; the helper chooses the bot's look direction. |
+| `axis` | Log/wood/stem/hyphae axis: `x` (east-west), `y` (vertical), `z` (north-south). |
+| `half` | Stairs/slabs occupying the `top` or `bottom` half. Slabs map this option to block state `type`. |
+| `attachTo` | Side of the target containing its support: `bottom`, `top`, or a horizontal direction. An explicit support is required and never falls back to another side. |
+
+For example, use `{axis:'x'}` for a horizontal log, or `{attachTo:'north', facing:'south'}` with inventory `torch` for a south-facing `wall_torch`. A wall `facing` can infer its required support. Button/lever `attachTo` selects wall, floor, or ceiling; floor/ceiling default to `bottom` when omitted. Unspecified look/axis/half choices use north, vertical, and bottom respectively, with axis/half adjusted for an explicit support. Only requested or implied state properties are checked; stair corner shape and waterlogging are not requested by this API.
+
+| Block family | Supported orientation |
+|---|---|
+| Furnace, blast furnace, smoker, chest, trapped chest, repeater, comparator | Horizontal facing |
+| Stairs / slabs | Stairs: horizontal facing and half; slabs: half |
+| Logs, wood, stems, hyphae (including stripped variants) | Axis |
+| Torch, soul torch, redstone torch and their wall names; ladder | Wall facing / support; torches also support the floor |
+| Buttons / lever | Wall, floor, ceiling and horizontal facing |
+| Observer, piston, sticky piston, dispenser, dropper | Six-direction facing; observer `facing` names its detecting face, while piston/dispenser/dropper name their output face |
+| Doors / beds | Horizontal facing and confirmation of both halves/parts |
+| Stone, cobblestone, dirt, crafting table, planks | Strict placement without orientation properties |
+
+Literal commands can use `!placeBlockFacing("furnace", x, y, z, "north")`. Axis, half, and combined options use generated code through the existing natural-language action flow. The original `!placeHere(type)` and string `placeOn` calls retain their existing syntax and behavior. The seventh `dontCheat` argument also remains available.
+
+Object placement returns `true` only when the loaded server state matches all required properties, including both door/bed blocks. An already matching target is a successful no-op and consumes no item. Occupied or differently oriented blocks return `false` without being broken or replaced; the output includes the observed state. Unloaded targets, incompatible options, missing support, unreachable placement faces, server refusal, confirmation timeout, and cancellation fail explicitly. The helper uses existing pathfinding without digging or scaffolding, checks transmitted yaw/pitch before placing, and restores its sneak/movement settings. Each call sends at most one normal placement and never automatically breaks or retries a wrong-facing result.
+
+When cheat mode is explicitly enabled, object placement uses registry-validated `/setblock ... keep` commands and the same server-state confirmation. It does not enable cheat mode to work around normal-placement failure. Unsupported families/properties (for example rail shapes, sign rotation, door hinge, chest joining, or stair corner shape) are rejected before placement. A placement confirmation describes the observed moment; another player can later change the block. See [the placement verification record](docs/oriented-placement-20261006.md) for Minecraft 1.21.1 evidence and limits. Source updates require a separately selected play bundle to reach existing bots.
+
 Stage-four navigation evidence is in [the D03 report](docs/navigation-progress-stage4-20261005.md); existing lifecycle admission and priority behavior is summarized in [the D07 report](docs/lifecycle-priority-stage4-20261005.md).
 
 MindServer state polling is single-flight with a per-bot 750ms acknowledgement deadline and explicit fresh/stale/unknown state labels. Late state from a replaced connection or removed listener is discarded. Vision camera capture waits for a ready world view, permits one capture at a time, enforces a 2 MiB JPEG limit, and reports bounded shutdown drain status. See [the D13 lifecycle report](docs/state-polling-camera-lifecycle-stage4-20261005.md); offline fixtures do not measure live rendering performance.

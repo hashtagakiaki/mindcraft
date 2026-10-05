@@ -432,6 +432,21 @@ export const actionsList = [
         })
     },
         {
+        name: '!placeBlockFacing',
+        description: 'Place a block at given coordinates with the requested block facing; confirm the server state. Existing occupied blocks are not replaced. For axes, upper slabs, or combined options use newAction and skills.placeBlock options.',
+        params: {
+            type: { type: 'BlockOrItemName', description: 'The block/item name without state syntax.' },
+            x: { type: 'int', description: 'Target block X coordinate.' },
+            y: { type: 'int', description: 'Target block Y coordinate.' },
+            z: { type: 'int', description: 'Target block Z coordinate.' },
+            facing: { type: 'string', description: 'Resulting block facing: north/south/east/west; six-way blocks also support up/down.' },
+        },
+        perform: runAsAction(async (agent, type, x, y, z, facing) => {
+            const success = await skills.placeBlock(agent.bot, type, x, y, z, { facing });
+            if (!success) skills.log(agent.bot, 'Oriented placement failed; the requested block state was not confirmed.');
+        })
+    },
+    {
         name: '!placeHere',
         description: 'Place a given block in the current location. Do NOT use to build structures, only use for single blocks/torches.',
         params: {'type': { type: 'BlockOrItemName', description: 'The block type to place.' }},

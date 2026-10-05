@@ -5,6 +5,7 @@ import Vec3 from 'vec3';
 import { createRequire } from 'node:module';
 import settings from "../../../settings.js";
 import craftingSync from "./crafting_sync.js";
+import { placeBlockOriented } from './block_placement.js';
 import { trackSkill, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, withSkillPhase, registerOwnedPromise } from './operation_context.js';
 
 const require = createRequire(import.meta.url);
@@ -1151,14 +1152,22 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
      * @param {number} x, the x coordinate of the block to place.
      * @param {number} y, the y coordinate of the block to place.
      * @param {number} z, the z coordinate of the block to place.
-     * @param {string} placeOn, the preferred side of the block to place on. Can be 'top', 'bottom', 'north', 'south', 'east', 'west', or 'side'. Defaults to bottom. Will place on first available side if not possible.
+     * @param {string|object} placeOn, a legacy preferred support side (top/bottom/north/south/east/west/side), or strict placement options {facing, axis, half, attachTo}. facing is the resulting block state, not the bot look direction. north=-Z, south=+Z, east=+X, west=-X; six-way blocks also allow up/down. axis is x/y/z for logs. half is top/bottom for stairs/slabs. attachTo is the side of the target containing its support; when specified it is required. Object placement never replaces occupied blocks and confirms the requested server state. An already matching block returns true without consuming an item. Legacy strings may fall back to another support.
      * @param {boolean} dontCheat, overrides cheat mode to place the block normally. Defaults to false.
      * @returns {Promise<boolean>} true if the block was placed, false otherwise.
      * @example
      * let p = world.getPosition(bot);
      * await skills.placeBlock(bot, "oak_log", p.x + 2, p.y, p.x);
      * await skills.placeBlock(bot, "torch", p.x + 1, p.y, p.x, 'side');
+     * const placed = await skills.placeBlock(bot, 'oak_stairs', p.x + 2, p.y, p.z, {facing:'west', half:'top'});
+     * if (!placed) { log(bot, 'Placement failed; inspect the reported block state before continuing.'); return; }
      **/
+    if (typeof placeOn !== 'string') {
+        return await placeBlockOriented(bot, blockType, { x, y, z }, placeOn, dontCheat, {
+            log: message => log(bot, message),
+            navigate: (goal, movements) => goToGoal(bot, goal, movements),
+        });
+    }
     const target_dest = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
 
     if (blockType === 'air') {
@@ -1737,14 +1746,18 @@ export async function giveToPlayer(bot, itemType, username, num=1) {
     return false;
 }
 
-export async function goToGoal(bot, goal) {
+export async function goToGoal(bot, goal, movementOverride=null) {
     /**
      * Navigate to the given goal. Use doors and attempt minimally destructive movements.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {pf.goals.Goal} goal, the goal to navigate to.
+     * @param {pf.Movements|null} movementOverride, optional movements used without destructive fallback.
      **/
 
-    const nonDestructiveMovements = new pf.Movements(bot);
+    // Older callers passed a boolean in this previously unused position.
+    if (typeof movementOverride !== 'object') movementOverride = null;
+
+    const nonDestructiveMovements = movementOverride || new pf.Movements(bot);
     const dontBreakBlocks = ['glass', 'glass_pane'];
     for (let block of dontBreakBlocks) {
         nonDestructiveMovements.blocksCantBreak.add(mc.getBlockId(block));
@@ -1752,7 +1765,7 @@ export async function goToGoal(bot, goal) {
     nonDestructiveMovements.placeCost = 2;
     nonDestructiveMovements.digCost = 10;
 
-    const destructiveMovements = new pf.Movements(bot);
+    const destructiveMovements = movementOverride || new pf.Movements(bot);
 
     let final_movements = destructiveMovements;
 
@@ -1762,13 +1775,13 @@ export async function goToGoal(bot, goal) {
         log(bot, `Found non-destructive path.`);
     }
     else if (await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout).status === 'success') {
-        log(bot, `Found destructive path.`);
+        log(bot, movementOverride ? 'Found a path with the requested movement restrictions.' : 'Found destructive path.');
     }
     else {
-        log(bot, `Path not found, but attempting to navigate anyway using destructive movements.`);
+        log(bot, movementOverride ? 'Path search is incomplete; attempting navigation with the requested movement restrictions.' : 'Path not found, but attempting to navigate anyway using destructive movements.');
     }
 
-    const doorCheckInterval = startDoorInterval(bot);
+    const doorCheckInterval = movementOverride ? null : startDoorInterval(bot);
 
     bot.pathfinder.setMovements(final_movements);
     const owner = operationContext();

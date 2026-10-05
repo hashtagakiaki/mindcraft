@@ -13,6 +13,7 @@
 |---|---|
 | Offline regression suite (Node 20) | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs` |
 | Interaction/crafting-table guard fixture | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs --interaction-confirmation-only` |
+| Oriented placement API/confirmation/command/SES fixture | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/block_placement.test.cjs` |
 | Place agent command/SES fixture | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/place_agent.test.cjs` |
 | Place store/RPC focused fixtures | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/place_store.test.cjs` and `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/place_rpc.test.cjs` |
 | Codex native session fixture | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/codex_session.test.cjs` |
@@ -40,6 +41,7 @@
 - smokeや通常検証では稼働中play server `40973`、UI `8098`、tmux session、4体のbotを操作しない。ユーザーが明示承認したbot-only切替に限り親Node・4bot・UIの停止/起動を許可する。Minecraft server/worldとOllamaは切替対象外。test目的でplay起動scriptを実行しない。
 - 隔離Minecraft live確認はCaseServerのloopback `25569` / `25570`だけを使う。`25566`は禁止。productionやsystem serviceを変更しない。
 - craft同期helper、`craftRecipe` wrapper、farm skillはこのforkの通常sourceとして管理する。eval/play runtimeはmanifestのfull SHAからexportし、play overlaysは `../mindcraft-tools/` 側で適用する。manifest更新前にforkのcommitをown originへpushし、eval側で検証する。
+- 向き指定は `placeBlock` のoptions objectと `block_placement.js` が所有する。既存文字列 `placeOn` は互換経路。設置規則/private Mineflayer adapterを一か所に保ち、serverで未確認の向きを成功扱いしない。`skills.js` をdisposable fixtureへcopyするときはこのhelperもcopyする。実測範囲はREADMEのplacement verification recordを参照する。
 - `autonomy`でsourceを編集し、上記Node 20 offline suiteを通してからown originへcommit/pushする。eval側はそのfull SHAをmanifestへpinし、read-only dependency treeを使って再検証した後に新bundleを準備する。
 
 ## 完了条件

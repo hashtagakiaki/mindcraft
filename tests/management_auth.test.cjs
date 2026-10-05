@@ -71,6 +71,7 @@ export async function shutdown(request) { return closeHandler?.(request) }
     const source = await readFile(path.join(sourceRoot, 'src/mindcraft/mindserver.js'))
     await write(root, 'src/mindcraft/mindserver.js', source)
     await write(root, 'src/mindcraft/state_poller.js', await readFile(path.join(sourceRoot, 'src/mindcraft/state_poller.js')))
+    await write(root, 'src/mindcraft/bot_output_history.js', await readFile(path.join(sourceRoot, 'src/mindcraft/bot_output_history.js')))
     const fixtureSettings = await import(pathToFileURL(path.join(root, 'settings.js')).href)
     sourceSettings = fixtureSettings.default
     sourceSettings.management_auth_mode = 'protected'
