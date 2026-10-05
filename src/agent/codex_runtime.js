@@ -5,7 +5,7 @@ import settings from './settings.js';
 import { createObservationScope } from './library/observation_scope.js';
 import { operationContext, registerOwnedPromise } from './library/operation_context.js';
 import convoManager from './conversation.js';
-import { serverProxy } from './mindserver_proxy.js';
+import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
 
 const DEFAULTS = { stall_timeout_ms: 30000, action_timeout_ms: 120000, output_limit: 16000, max_search_radius: 64,
     task_budget_ms: 300000, max_operations: 32, max_turns: 40 };
@@ -219,7 +219,8 @@ export class CodexRuntime {
             // Fail closed on unreadable shared rules, before creating a model request.
             await agent.prompter.withBotRules('');
             if (!current()) return false;
-            this.session = this.makeSession({ model, effort, record, execute });
+            this.session = this.makeSession({ model, effort, record, execute,
+                onMessage: message => { if (current()) sendOutputToServer(agent.name, message); } });
             await this.session.open(instructions, this.abort.signal);
             let input = 'Current conversation and older memory (current request is the final conversation entry):\n' + JSON.stringify({ memory: agent.history.memory, turns: agent.history.getHistory(), observed: observedState(agent.bot, agent.getObservationScope?.()) });
             record('task_start', { instructions, input });

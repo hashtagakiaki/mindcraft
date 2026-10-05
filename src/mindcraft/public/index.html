@@ -119,15 +119,18 @@
             border: none;
             display: block;
         }
-        .last-message {
-            font-style: italic;
-            color: #aaa;
-            margin-top: 5px;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            width: 100%;
+        #bot-output-log {
+            margin: 16px 0;
+            padding: 12px 16px;
+            background: #2d2d2d;
+            border-radius: 8px;
+            max-height: 320px;
+            overflow-y: auto;
         }
+        #bot-output-log h2 { margin: 0 0 10px; font-size: 1.1em; }
+        .bot-output-entry { padding: 8px 0; border-top: 1px solid #444; }
+        .bot-output-meta { color: #aaa; font-size: 0.85em; margin-bottom: 4px; }
+        .bot-output-content { white-space: pre-wrap; overflow-wrap: anywhere; }
         .start-btn:disabled {
             opacity: 0.4;
             cursor: not-allowed;
@@ -324,6 +327,11 @@
         <span id="selectionSummary" role="status"></span>
         <span id="groupResult" role="status"></span>
     </div>
+    <section id="bot-output-log" aria-label="Bot output log">
+        <h2>Bot output log</h2>
+        <div class="bot-output-meta">Saved in this browser · newest 200 entries</div>
+        <div id="bot-output-entries" aria-live="polite"><div class="bot-output-meta">No bot output yet.</div></div>
+    </section>
     <div id="agents"></div>
 
     <div class="page-footer">
@@ -392,11 +400,55 @@
         let settingsSpec = {};
         let profileData = null;
         const agentSettings = {};
-        const agentLastMessage = {};
+        const botOutputEntries = document.getElementById('bot-output-entries');
+        const MAX_BOT_OUTPUT_ENTRIES = 200;
+        const BOT_OUTPUT_LOG_STORAGE_KEY = 'mindcraft.botOutputLog.v1';
+        const botOutputLog = [];
         const inventoryOpen = {};
         let currentAgents = [];
 
         const statusEl = document.getElementById('msStatus');
+        function renderBotOutput(record) {
+            const entry = document.createElement('article');
+            entry.className = 'bot-output-entry';
+            const meta = document.createElement('div');
+            meta.className = 'bot-output-meta';
+            meta.textContent = `${new Date(record.at).toLocaleTimeString()} · ${record.agentName}`;
+            const content = document.createElement('div');
+            content.className = 'bot-output-content';
+            content.textContent = record.message;
+            entry.append(meta, content);
+            botOutputEntries.append(entry);
+        }
+        function persistBotOutputLog() {
+            const savedEntries = [...botOutputLog];
+            while (savedEntries.length) {
+                try {
+                    localStorage.setItem(BOT_OUTPUT_LOG_STORAGE_KEY, JSON.stringify(savedEntries));
+                    return;
+                } catch {
+                    savedEntries.shift();
+                }
+            }
+        }
+        function restoreBotOutputLog() {
+            try {
+                const saved = JSON.parse(localStorage.getItem(BOT_OUTPUT_LOG_STORAGE_KEY) || '[]');
+                if (!Array.isArray(saved)) return;
+                const records = saved.slice(-MAX_BOT_OUTPUT_ENTRIES).filter(record =>
+                    typeof record?.at === 'string' && Number.isFinite(Date.parse(record.at))
+                    && typeof record.agentName === 'string' && typeof record.message === 'string');
+                if (records.length) botOutputEntries.replaceChildren();
+                for (const record of records) {
+                    botOutputLog.push(record);
+                    renderBotOutput(record);
+                }
+                if (botOutputLog.length) document.getElementById('bot-output-log').scrollTop = document.getElementById('bot-output-log').scrollHeight;
+            } catch {
+                // Storage may be unavailable or contain invalid data; the live UI remains usable.
+            }
+        }
+        restoreBotOutputLog();
         function updateStatus(connected) {
             if (!statusEl) return;
             if (connected) {
@@ -547,11 +599,16 @@
         document.getElementById('closeCreateAgentBtn').addEventListener('click', hideCreateAgentModal);
 
         socket.on('bot-output', (agentName, message) => {
-            agentLastMessage[agentName] = message;
-            const messageDiv = document.getElementById(`lastMessage-${agentName}`);
-            if (messageDiv) {
-                messageDiv.textContent = message;
+            if (botOutputEntries.firstElementChild?.classList.contains('bot-output-meta')) botOutputEntries.replaceChildren();
+            const record = { at: new Date().toISOString(), agentName: String(agentName), message: String(message) };
+            botOutputLog.push(record);
+            renderBotOutput(record);
+            while (botOutputLog.length > MAX_BOT_OUTPUT_ENTRIES) {
+                botOutputLog.shift();
+                botOutputEntries.firstElementChild?.remove();
             }
+            persistBotOutputLog();
+            document.getElementById('bot-output-log').scrollTop = document.getElementById('bot-output-log').scrollHeight;
         });
 
         // Subscribe to aggregated state updates (re-sent on each connect)
@@ -779,7 +836,6 @@
             const showViewer = agent.in_game && cfg.render_bot_view === true;
             const viewerPort = agent.viewerPort;
             const viewerHTML = showViewer ? `<div class="agent-view-container"><iframe class="agent-viewer" id="viewer-${agent.name}" src="${window.location.protocol}//${window.location.hostname}:${viewerPort}"></iframe></div>` : '';
-            const lastMessage = agentLastMessage[agent.name] || '';
             const invOpen = inventoryOpen[agent.name] === true;
             const invStyle = invOpen ? '' : 'display:none;';
             return `
@@ -806,7 +862,6 @@
                                 <div class="cell" id="armor-${agent.name}" style="margin-bottom: 8px;">armor: -</div>
                                 <div class="inventory-grid" id="inventory-${agent.name}"></div>
                             </div>
-                            <div id="lastMessage-${agent.name}" class="last-message" style="grid-column: 1 / -1;"><strong>Last Message:</strong> ${lastMessage}</div>
                         </div>
                         <div class="controls-row">
                             <button class="start-btn" id="sendBtn-${agent.name}" disabled onclick="sendMessage('${agent.name}', document.getElementById('messageInput-${agent.name}').value, true)">Send</button>

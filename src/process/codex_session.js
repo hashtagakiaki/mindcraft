@@ -12,8 +12,8 @@ const helperPath = fileURLToPath(new URL('./owned_cli.js', import.meta.url));
 
 // JSON-RPC transport only. The existing helper registers and reaps its owned CLI.
 export class CodexSession {
-    constructor({ model, effort = 'medium', record = () => {}, execute }) {
-        Object.assign(this, { model, effort, record, execute });
+    constructor({ model, effort = 'medium', record = () => {}, execute, onMessage = () => {} }) {
+        Object.assign(this, { model, effort, record, execute, onMessage });
         this.pending = new Map();
         this.seq = 0;
         this.closed = false;
@@ -110,6 +110,7 @@ export class CodexSession {
         } else if (message.method === 'item/completed' && message.params.item.type === 'agentMessage') {
             this.messages.push(message.params.item.text);
             this.record('model_message', { text: message.params.item.text });
+            this.onMessage(message.params.item.text);
         } else if (message.method === 'turn/completed') {
             const turn = message.params.turn;
             this.record('turn_completed', { id: turn.id, status: turn.status });
