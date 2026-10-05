@@ -5,11 +5,11 @@ import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import * as mindcraft from './mindcraft.js';
-import { readFileSync } from 'fs';
+import { readFileSync, mkdirSync, writeFileSync, chmodSync, rmSync, linkSync, statSync, realpathSync } from 'fs';
 import settings from '../../settings.js';
 import { attachPlaceStoreLifecycle, PlaceStore } from './place_store.js';
 import { attachPlaceRpc } from './place_rpc.js';
-import { createHash, randomUUID } from 'crypto';
+import { createHash, randomUUID, randomBytes, timingSafeEqual } from 'crypto';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Mindserver is:
@@ -24,6 +24,9 @@ let placeStoreError = null;
 const managementGeneration = randomUUID();
 const agent_connections = {};
 const agent_listeners = [];
+let protectedMode = false;
+const botTokens = new Map();
+let sessionFile = null;
 
 const settings_spec = JSON.parse(readFileSync(path.join(__dirname, 'public/settings_spec.json'), 'utf8'));
 
@@ -56,15 +59,55 @@ export function logoutAgent(agentName) {
 export function unregisterAgent(agentName, expectedConnection = null) {
     if (!agent_connections[agentName] || (expectedConnection && agent_connections[agentName] !== expectedConnection)) return false;
     delete agent_connections[agentName];
+    botTokens.delete(agentName);
     agentsStatusUpdate();
     return true;
 }
 
 // Initialize the server
 export function createMindServer(host_public = false, port = 8080) {
+    if (settings.management_auth_mode !== undefined && !['legacy', 'protected'].includes(settings.management_auth_mode)) {
+        throw new Error('management_auth_mode must be legacy or protected');
+    }
+    protectedMode = settings.management_auth_mode === 'protected';
+    if (protectedMode) {
+        const target = process.env.MINDCRAFT_SESSION_FILE ? path.resolve(process.env.MINDCRAFT_SESSION_FILE) : null;
+        if (!target) {
+            throw new Error('Protected MindServer requires MINDCRAFT_SESSION_FILE outside the static root');
+        }
+        const directory = path.dirname(path.resolve(target));
+        mkdirSync(directory, { recursive: true, mode: 0o700 });
+        const publicRoot = realpathSync(path.join(__dirname, 'public'));
+        const realDirectory = realpathSync(directory);
+        if (realDirectory === publicRoot || realDirectory.startsWith(`${publicRoot}${path.sep}`)) {
+            throw new Error('Protected MindServer session path must be outside the static root');
+        }
+        if ((statSync(directory).mode & 0o777) !== 0o700) throw new Error('MINDCRAFT_SESSION_FILE parent directory must be private (0700)');
+        const credentials = { operator: randomBytes(32).toString('hex'), observer: randomBytes(32).toString('hex') };
+        const temporary = `${target}.${randomUUID()}.tmp`;
+        writeFileSync(temporary, `${JSON.stringify(credentials)}\n`, { mode: 0o600, flag: 'wx' });
+        try {
+            chmodSync(temporary, 0o600);
+            linkSync(temporary, target);
+        } finally { rmSync(temporary, { force: true }); }
+        chmodSync(target, 0o600);
+        sessionFile = path.resolve(target);
+        protectedSessions.operator = credentials.operator;
+        protectedSessions.observer = credentials.observer;
+    }
+
     const app = express();
     server = http.createServer(app);
     io = new Server(server);
+
+    io.use((socket, next) => {
+        if (!protectedMode) { socket.data.identity = { role: 'legacy' }; return next(); }
+        const token = socket.handshake.auth?.token;
+        const identity = typeof token === 'string' ? authenticateToken(token) : null;
+        if (!identity) return next(new Error('MindServer authentication required'));
+        socket.data.identity = identity;
+        next();
+    });
 
     placeStorePromise = null;
     placeStoreError = null;
@@ -83,7 +126,6 @@ export function createMindServer(host_public = false, port = 8080) {
     }
 
     // Serve static files
-    const __dirname = path.dirname(fileURLToPath(import.meta.url));
     app.use(express.static(path.join(__dirname, 'public')));
 
     // Socket.io connection handling
@@ -92,8 +134,19 @@ export function createMindServer(host_public = false, port = 8080) {
         let processAgentName = null;
         console.log('Client connected');
 
+        if (protectedMode && socket.data.identity.role === 'observer') {
+            socket.on('readiness', callback => {
+                if (!allowed(socket, ['observer'])) return deny(callback);
+                callback?.({ ready: true, agents: Object.entries(agent_connections).map(([name, connection]) => ({
+                    name, ready: Boolean(connection.in_game && connection.socket?.connected)
+                })) });
+            });
+            return;
+        }
+
         attachPlaceRpc(socket, {
-            getAgentName: () => processAgentName && agent_connections[processAgentName]?.socket === socket ? processAgentName : null,
+            getAgentName: () => processAgentName && allowedBot(socket, processAgentName)
+                && agent_connections[processAgentName]?.socket === socket ? processAgentName : null,
             getPlaceStore: async () => {
                 if (placeStoreError) throw placeStoreError;
                 return placeStorePromise;
@@ -104,15 +157,16 @@ export function createMindServer(host_public = false, port = 8080) {
         agentsStatusUpdate(socket);
 
         socket.on('create-agent', async (settings, callback) => {
+            if (!allowed(socket, ['operator', 'legacy'])) return deny(callback);
             if (hubClosing) {
-                callback?.({ success: false, error: 'MindServer is shutting down' });
+                callback?.({ success: false, accepted: false, error: 'MindServer is shutting down' });
                 return;
             }
             console.log('API create agent...');
             for (let key in settings_spec) {
                 if (!(key in settings)) {
                     if (settings_spec[key].required) {
-                        callback({ success: false, error: `Setting ${key} is required` });
+                        callback?.({ success: false, accepted: false, error: `Setting ${key} is required` });
                         return;
                     }
                     else {
@@ -127,20 +181,21 @@ export function createMindServer(host_public = false, port = 8080) {
             }
             if (settings.profile?.name) {
                 if (settings.profile.name in agent_connections) {
-                    callback({ success: false, error: 'Agent already exists' });
+                    callback?.({ success: false, accepted: false, error: 'Agent already exists' });
                     return;
                 }
                 let returned = await mindcraft.createAgent(settings);
-                callback({ success: returned.success, error: returned.error });
+                callback?.({ success: returned.success, accepted: returned.success, error: returned.error });
                 agentsStatusUpdate();
             }
             else {
                 console.error('Agent name is required in profile');
-                callback({ success: false, error: 'Agent name is required in profile' });
+                callback?.({ success: false, accepted: false, error: 'Agent name is required in profile' });
             }
         });
 
         socket.on('get-settings', (agentName, callback) => {
+            if (!allowedBotOrOperator(socket, agentName)) return deny(callback);
             if (agent_connections[agentName]) {
                 const agentSettings = settingsForAgent(agent_connections[agentName].settings);
                 callback({
@@ -148,6 +203,7 @@ export function createMindServer(host_public = false, port = 8080) {
                     management: {
                         generation: managementGeneration,
                         agentName,
+                        spawnId: socket.data.identity.role === 'bot' ? socket.data.identity.spawnId : null,
                         placeMemoryEnabled: agentSettings.place_memory_enabled,
                         placeWorldId: agentSettings.place_world_id,
                         settingsFingerprint: settingsFingerprint(agentSettings)
@@ -158,24 +214,27 @@ export function createMindServer(host_public = false, port = 8080) {
             }
         });
 
-        socket.on('connect-agent-process', (agentName) => {
-            if (agent_connections[agentName]) {
+        socket.on('connect-agent-process', (agentName, callback) => {
+            if (allowedBot(socket, agentName) && agent_connections[agentName]) {
                 agent_connections[agentName].socket = socket;
                 processAgentName = agentName;
                 agentsStatusUpdate();
-            }
+                callback?.({ accepted: true, agentName, spawnId: socket.data.identity.role === 'bot' ? socket.data.identity.spawnId : null });
+            } else callback?.({ accepted: false, error: 'MindServer rejected agent registration' });
         });
 
-        socket.on('login-agent', (agentName) => {
-            if (agent_connections[agentName]) {
+        socket.on('login-agent', (agentName, callback) => {
+            if (allowedBot(socket, agentName) && agent_connections[agentName]) {
                 agent_connections[agentName].socket = socket;
                 agent_connections[agentName].in_game = true;
                 curAgentName = agentName;
                 processAgentName = agentName;
                 agentsStatusUpdate();
+                callback?.({ accepted: true, agentName, spawnId: socket.data.identity.role === 'bot' ? socket.data.identity.spawnId : null });
             }
             else {
                 console.warn(`Unregistered agent ${agentName} tried to login`);
+                callback?.({ accepted: false, error: 'MindServer rejected agent login' });
             }
         });
 
@@ -193,76 +252,99 @@ export function createMindServer(host_public = false, port = 8080) {
         });
 
         socket.on('chat-message', (agentName, json) => {
+            if (!allowedBot(socket, socket.data.identity.agentName)) return;
+            if (protectedMode && socket.data.identity.role !== 'bot') return;
             if (!agent_connections[agentName]) {
                 console.warn(`Agent ${agentName} tried to send a message but is not logged in`);
                 return;
             }
-            console.log(`${curAgentName} sending message to ${agentName}: ${json.message}`);
-            agent_connections[agentName].socket.emit('chat-message', curAgentName, json);
+            const sender = socket.data.identity.role === 'bot' ? socket.data.identity.agentName : curAgentName;
+            console.log(`${sender} sending message to ${agentName}`);
+            if (agent_connections[agentName].socket?.connected) agent_connections[agentName].socket.emit('chat-message', sender, json);
         });
 
-        socket.on('set-agent-settings', (agentName, settings) => {
-            if (hubClosing) return;
+        socket.on('set-agent-settings', (agentName, settings, callback) => {
+            if (!allowed(socket, ['operator', 'legacy'])) return deny(callback);
+            if (hubClosing) return deny(callback);
             const agent = agent_connections[agentName];
             if (agent) {
-                agent.setSettings(settingsForAgent(settings));
-                void reportAgentOperation(mindcraft.startAgent(agentName), `Restart agent after settings update (${agentName})`);
-            }
+                try {
+                    validateAgentSettings(settings);
+                    agent.setSettings(settingsForAgent(settings));
+                } catch (error) {
+                    callback?.({ success: false, accepted: false, error: error?.message || 'Invalid agent settings' });
+                    return;
+                }
+                void reportAgentOperation(mindcraft.startAgent(agentName), `Restart agent after settings update (${agentName})`, callback, agentName);
+            } else deny(callback);
         });
 
-        socket.on('restart-agent', (agentName) => {
-            if (hubClosing) return;
+        socket.on('restart-agent', (agentName, callback) => {
+            if (!allowed(socket, ['operator', 'legacy'])) return deny(callback);
+            if (hubClosing) return deny(callback);
             console.log(`Restarting agent: ${agentName}`);
-            void reportAgentOperation(mindcraft.startAgent(agentName), `Restart agent (${agentName})`);
+            void reportAgentOperation(mindcraft.startAgent(agentName), `Restart agent (${agentName})`, callback, agentName);
         });
 
-        socket.on('stop-agent', (agentName) => {
-            void reportAgentOperation(mindcraft.stopAgent(agentName), `Stop agent (${agentName})`);
+        socket.on('stop-agent', (agentName, callback) => {
+            if (!allowed(socket, ['operator', 'legacy'])) return deny(callback);
+            void reportAgentOperation(mindcraft.stopAgent(agentName), `Stop agent (${agentName})`, callback, agentName);
         });
 
-        socket.on('start-agent', (agentName) => {
-            if (hubClosing) return;
-            void reportAgentOperation(mindcraft.startAgent(agentName), `Start agent (${agentName})`);
+        socket.on('start-agent', (agentName, callback) => {
+            if (!allowed(socket, ['operator', 'legacy'])) return deny(callback);
+            if (hubClosing) return deny(callback);
+            void reportAgentOperation(mindcraft.startAgent(agentName), `Start agent (${agentName})`, callback, agentName);
         });
 
-        socket.on('destroy-agent', (agentName) => {
+        socket.on('destroy-agent', (agentName, callback) => {
+            if (!allowed(socket, ['operator', 'legacy'])) return deny(callback);
             if (agent_connections[agentName]) {
-                void reportAgentOperation(mindcraft.destroyAgent(agentName), `Destroy agent (${agentName})`);
+                void reportAgentOperation(mindcraft.destroyAgent(agentName), `Destroy agent (${agentName})`, callback, agentName);
                 delete agent_connections[agentName];
             } else {
-                void reportAgentOperation(mindcraft.destroyAgent(agentName), `Cancel pending agent creation (${agentName})`);
+                void reportAgentOperation(mindcraft.destroyAgent(agentName), `Cancel pending agent creation (${agentName})`, callback, agentName);
             }
             agentsStatusUpdate();
         });
 
-        socket.on('stop-all-agents', () => {
+        socket.on('stop-all-agents', callback => {
+            if (!allowed(socket, ['operator', 'legacy'])) return deny(callback);
             console.log('Killing all agents');
-            void reportAgentOperation(mindcraft.stopAllAgents('ui-stop-all'), 'Stop all agents');
+            void reportAgentOperation(mindcraft.stopAllAgents('ui-stop-all'), 'Stop all agents', callback);
         });
 
-        socket.on('shutdown', () => {
+        socket.on('shutdown', callback => {
+            if (!allowed(socket, ['operator', 'legacy'])) return deny(callback);
             console.log('Shutting down');
-            void mindcraft.shutdown({ reason: 'ui-shutdown' });
+            callback?.({ success: true, accepted: true, settled: false });
+            setImmediate(() => { void mindcraft.shutdown({ reason: 'ui-shutdown' }); });
             
         });
 
         socket.on('send-message', (targets, data, callback) => {
+            if (!allowed(socket, ['operator', 'legacy'])) return deny(callback);
             try {
-                if (!data || typeof data.from !== 'string' || !data.from.trim() || typeof data.message !== 'string' || !data.message.trim()) {
+                if (!data || typeof data.message !== 'string' || !data.message.trim()
+                    || (!protectedMode && (typeof data.from !== 'string' || !data.from.trim()))) {
                     throw new Error('Sender and message are required.');
                 }
+                const identity = socket.data.identity;
+                if (data.taskId != null && (typeof data.taskId !== 'string' || !data.taskId.trim())) throw new Error('Task ID is malformed.');
                 const agents = Object.entries(agent_connections).map(([name, conn]) => ({
                     name, in_game: conn.in_game, socket_connected: !!conn.socket?.connected
                 }));
                 const addressed = parseAddressedMessage(data.message, agents);
                 const recipients = addressed?.recipients || resolveMessageTargets(targets, agents);
-                const payload = { from: data.from, message: addressed?.message || data.message, recipients, taskId: data.taskId ?? null };
+                if (data.taskId && recipients.length !== 1) throw new Error('Task ID dispatch requires exactly one authenticated recipient.');
+                const sender = identity.role === 'bot' ? identity.agentName : identity.role === 'operator' ? 'ADMIN' : data.from;
+                const payload = { from: sender, message: addressed?.message || data.message, recipients, taskId: data.taskId ?? null };
                 if (data.taskId && typeof callback === 'function') {
                     let settled = false;
                     const timer = setTimeout(() => {
                         if (settled) return;
                         settled = true;
-                        callback({ success: false, taskId: data.taskId, error: 'task acceptance acknowledgement timed out' });
+                        callback({ success: false, accepted: false, taskId: data.taskId, error: 'task acceptance acknowledgement timed out' });
                     }, 5000);
                     for (const name of recipients) {
                         agent_connections[name].socket.emit('send-message', payload, acknowledgement => {
@@ -270,13 +352,13 @@ export function createMindServer(host_public = false, port = 8080) {
                             clearTimeout(timer);
                             settled = true;
                             if (acknowledgement?.accepted && acknowledgement.taskId === data.taskId)
-                                callback({ success: true, recipients, taskId: data.taskId });
-                            else callback({ success: false, taskId: data.taskId, error: acknowledgement?.error || 'agent did not accept task' });
+                                callback({ success: true, accepted: true, recipients, taskId: data.taskId });
+                            else callback({ success: false, accepted: false, taskId: data.taskId, error: acknowledgement?.error || 'agent did not accept task' });
                         });
                     }
                 } else {
                     for (const name of recipients) agent_connections[name].socket.emit('send-message', payload);
-                    if (typeof callback === 'function') callback({ success: true, recipients });
+                    if (typeof callback === 'function') callback({ success: true, queued: true, recipients });
                 }
             } catch (error) {
                 if (typeof callback === 'function') callback({ success: false, error: error.message });
@@ -285,10 +367,14 @@ export function createMindServer(host_public = false, port = 8080) {
         });
 
         socket.on('bot-output', (agentName, message) => {
-            io.emit('bot-output', agentName, message);
+            if (allowedBot(socket, agentName)) {
+                if (!protectedMode) io.emit('bot-output', agentName, message);
+                else for (const recipient of io.sockets.sockets.values()) if (recipient.data.identity?.role !== 'observer') recipient.emit('bot-output', agentName, message);
+            }
         });
 
         socket.on('listen-to-agents', () => {
+            if (!allowed(socket, ['operator', 'legacy'])) return;
             addListener(socket);
         });
     });
@@ -308,6 +394,10 @@ export function createMindServer(host_public = false, port = 8080) {
         beforeClose: async reason => {
             hubClosing = true;
             placeRpcClosing = true;
+            botTokens.clear();
+            protectedSessions.operator = null;
+            protectedSessions.observer = null;
+            if (sessionFile) { try { rmSync(sessionFile, { force: true }); } catch {} sessionFile = null; }
             return mindcraft.stopAllAgents(reason || 'parent-shutdown', { closing: true });
         }
     });
@@ -319,15 +409,66 @@ export function createMindServer(host_public = false, port = 8080) {
     return server;
 }
 
-function reportAgentOperation(operation, label) {
-    return Promise.resolve(operation).catch(error => {
+const protectedSessions = { operator: null, observer: null };
+export function issueBotCredential(agentName, spawnId, token) {
+    if (!protectedMode) return;
+    if (!agent_connections[agentName] || typeof spawnId !== 'string' || typeof token !== 'string') throw new Error('Invalid bot credential registration');
+    botTokens.set(agentName, { spawnId, token });
+}
+export function revokeBotCredential(agentName, spawnId) {
+    if (botTokens.get(agentName)?.spawnId !== spawnId) return false;
+    botTokens.delete(agentName);
+    return true;
+}
+
+function authenticateToken(token) {
+    for (const [agentName, registered] of botTokens) {
+        if (safeTokenEqual(token, registered.token)) return { role: 'bot', agentName, spawnId: registered.spawnId };
+    }
+    for (const role of ['operator', 'observer']) {
+        if (protectedSessions[role] && safeTokenEqual(token, protectedSessions[role])) return { role };
+    }
+    return null;
+}
+function safeTokenEqual(left, right) {
+    const a = Buffer.from(left); const b = Buffer.from(right);
+    return a.length === b.length && timingSafeEqual(a, b);
+}
+function allowed(socket, roles) { return isCurrentIdentity(socket) && roles.includes(socket.data.identity?.role); }
+function allowedBot(socket, agentName) {
+    const identity = socket.data.identity;
+    return identity?.role === 'legacy' || (identity?.role === 'bot' && isCurrentIdentity(socket) && identity.agentName === agentName
+        && botTokens.get(agentName)?.spawnId === identity.spawnId);
+}
+function isCurrentIdentity(socket) {
+    const identity = socket.data.identity;
+    if (!protectedMode) return identity?.role === 'legacy';
+    if (identity?.role === 'operator') return protectedSessions.operator !== null;
+    if (identity?.role === 'observer') return protectedSessions.observer !== null;
+    if (identity?.role === 'bot') return botTokens.get(identity.agentName)?.spawnId === identity.spawnId;
+    return false;
+}
+function allowedBotOrOperator(socket, agentName) {
+    return allowed(socket, ['operator', 'legacy']) || allowedBot(socket, agentName);
+}
+function deny(callback) { callback?.({ success: false, error: 'MindServer authorization denied' }); return false; }
+
+function reportAgentOperation(operation, label, callback, agentName = null) {
+    return Promise.resolve(operation).then(outcome => {
+        const success = outcome !== null && outcome !== undefined;
+        callback?.({ success, accepted: success, ...(agentName ? { agentName } : {}), state: outcome?.state ?? null,
+            settled: success && (outcome?.groupsGone === true || outcome?.state === 'running') });
+        return outcome;
+    }).catch(error => {
         console.error(`${label} failed:`, error?.message || error);
+        callback?.({ success: false, accepted: false, ...(agentName ? { agentName } : {}), error: error?.message || String(error) });
         return null;
     });
 }
 
 function settingsForAgent(agentSettings) {
     const result = { ...agentSettings };
+    delete result.management_auth_mode;
     delete result.place_state_dir;
     delete result.place_world_id;
     delete result.place_memory_enabled;
@@ -335,6 +476,28 @@ function settingsForAgent(agentSettings) {
     result.place_world_id = result.place_memory_enabled ? settings.place_world_id : null;
     result.bot_rules_file = settings.bot_rules_file ?? null;
     return result;
+}
+
+function validateAgentSettings(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Agent settings must be an object');
+    for (const key of Object.keys(value)) {
+        if (!Object.hasOwn(settings_spec, key)) throw new Error(`Unknown agent setting: ${key}`);
+    }
+    for (const [key, spec] of Object.entries(settings_spec)) {
+        if (!Object.hasOwn(value, key)) {
+            if (spec.required) throw new Error(`Setting ${key} is required`);
+            continue;
+        }
+        const item = value[key];
+        if (item === null && spec.default === null) continue;
+        const validType = spec.type === 'array' ? Array.isArray(item)
+            : spec.type === 'object' ? item !== null && typeof item === 'object' && !Array.isArray(item)
+                : spec.type === 'number' ? typeof item === 'number' && Number.isFinite(item)
+                    : typeof item === spec.type;
+        if (!validType) throw new Error(`Invalid type for agent setting ${key}`);
+        if (spec.options && !spec.options.includes(item)) throw new Error(`Invalid value for agent setting ${key}`);
+    }
+    if (typeof value.profile?.name !== 'string' || !value.profile.name.trim()) throw new Error('Agent profile name is required');
 }
 
 function settingsFingerprint(value) {
@@ -347,9 +510,6 @@ function settingsFingerprint(value) {
 }
 
 function agentsStatusUpdate(socket) {
-    if (!socket) {
-        socket = io;
-    }
     let agents = [];
     for (let agentName in agent_connections) {
         const conn = agent_connections[agentName];
@@ -360,7 +520,9 @@ function agentsStatusUpdate(socket) {
             socket_connected: !!conn.socket
         });
     };
-    socket.emit('agents-status', agents);
+    if (socket) socket.emit('agents-status', agents);
+    else if (!protectedMode) io.emit('agents-status', agents);
+    else for (const recipient of io.sockets.sockets.values()) if (recipient.data.identity?.role !== 'observer') recipient.emit('agents-status', agents);
 }
 
 

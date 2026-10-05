@@ -104,6 +104,14 @@ If you encounter issues, check the [FAQ](https://github.com/mindcraft-bots/mindc
 
 
 # Configuration
+## MindServer management access
+
+MindServer keeps its historical unauthenticated local control behavior when `management_auth_mode` is `legacy` (the default). Launchers that advertise the `management-auth-bootstrap` source capability can select `protected`. Protected mode requires `MINDCRAFT_SESSION_FILE` to point outside `src/mindcraft/public`, inside a directory accessible only to its owner. MindServer creates that file with mode `0600`, containing separate operator and read-only observer tokens; it refuses to replace an existing file and removes its own file during graceful shutdown.
+
+The operator UI asks for the operator token in memory. Do not paste it into settings, profiles, shell history, logs, or source files. Agent processes receive distinct, spawn-bound bot tokens over their existing private parent-child IPC channel; reconnects within a spawn keep the token, while stopping or replacing a spawn revokes it. Protected Socket.IO clients must authenticate at connection and management handlers derive the sender from the authenticated identity. An observer can call named `readiness` only and receives no agent status or viewer-port broadcasts. A process signal triggers graceful agent and hub cleanup; after a crash, a stale private session file is unusable with a new hub and must not be copied or reused.
+
+The explicit Python API option is `Mindcraft.init(port=8080, session_file="/private/path/session.json")`. Benchmark and play launchers create a fresh private session path per run/bundle and select protected mode only for a verified source capability. A source checkout without that capability remains on the legacy path.
+
 ## Model Customization
 
 You can configure project details in `settings.js`. [See file.](settings.js)

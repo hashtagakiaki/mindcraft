@@ -28,6 +28,7 @@ async function main() {
   const source = await fs.readFile(path.join(repo, 'src/mindcraft/mindserver.js'), 'utf8')
   const handler = source.slice(source.indexOf("        socket.on('send-message'"), source.indexOf("        socket.on('bot-output'"))
   const socket = new EventEmitter()
+  socket.data = { identity: { role: 'legacy' } }
   const deliveries = []
   const connections = Object.fromEntries(agents.map(agent => [agent.name, {
     in_game: agent.in_game, socket: { connected: true, emit: (event, data, acknowledge) => {
@@ -35,7 +36,8 @@ async function main() {
       if (data.taskId && typeof acknowledge === 'function') acknowledge({ accepted: true, taskId: data.taskId })
     } }
   }]))
-  vm.runInNewContext(handler, { socket, agent_connections: connections, resolveMessageTargets, parseAddressedMessage, console, setTimeout, clearTimeout })
+  vm.runInNewContext(handler, { socket, agent_connections: connections, resolveMessageTargets, parseAddressedMessage,
+    allowed: () => true, protectedMode: false, console, setTimeout, clearTimeout })
   let result
   const send = (targets, message) => socket.emit('send-message', targets, { from: 'ADMIN', message, recipients: ['forged'] }, value => { result = value })
   send('@all', '!stop')

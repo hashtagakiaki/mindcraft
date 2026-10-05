@@ -34,6 +34,7 @@
 
 - `mindcraft-eval/runtime/upstream/codex-oauth.json` を読まない、コピーしない、stage/logに含めない。keys、`.env`、profiles、bot logs、conversations、memory、worlds、server jars、runtime modules、生成resultを追加しない。
 - PlaceStoreはroot `settings.js` の `place_state_dir` と `place_world_id` だけをscope正本として使う。絶対pathとUUIDを両方設定するか、両方nullにする。片方だけの設定は起動後のRPCで明示errorになる。これらはstartup-onlyで、個別agent/UI設定からscopeを指定しない。place stateは `load_memory` と独立し、worldごとに `place_state_dir/worlds/<place_world_id>.json` へ保存する。
+- Protected MindServerではlauncherがfreshな0700 directory配下のsession pathを渡す。session fileはhubが0600で作成し、hub自身だけがgraceful close時に削除する。tokenをsettings/profile/history/log/sourceへ保存・複製せず、既存session fileを再利用しない。crash後のstale fileは認証に使わず、新しいprivate pathで起動する。
 - 同一state rootには一つのMindServerだけが書く。通常のSIGINT/SIGTERMとUI shutdownではhub停止時にlockを解放する。crash後に `.place-store.lock` が残ったら、PIDと実行中MindServerを確認してwriterが存在しない場合に限り手動削除する。writerがいる間にlockを削除しない。
 - ユーザー作成のworld template/saveはread-only。live確認は既存CaseServer copyだけで行い、templateを生成・編集しない。
 - smokeや通常検証では稼働中play server `40973`、UI `8098`、tmux session、4体のbotを操作しない。ユーザーが明示承認したbot-only切替に限り親Node・4bot・UIの停止/起動を許可する。Minecraft server/worldとOllamaは切替対象外。test目的でplay起動scriptを実行しない。

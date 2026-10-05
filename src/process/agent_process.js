@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
 import { promises as fsPromises, readFileSync } from 'fs';
+import { randomBytes, randomUUID } from 'crypto';
 
 const SHUTDOWN_TIMEOUT_MS = 5000;
 const TERMINATE_TIMEOUT_MS = 2000;
@@ -78,6 +79,10 @@ export class AgentProcess {
         this.maxAbnormalRestarts = options.maxAbnormalRestarts ?? MAX_ABNORMAL_RESTARTS;
         this.restartBackoffBase = options.restartBackoffBaseMs ?? RESTART_BACKOFF_BASE_MS;
         this.restartBackoffMax = options.restartBackoffMaxMs ?? RESTART_BACKOFF_MAX_MS;
+        this.managementAuthMode = options.managementAuthMode || 'legacy';
+        this.registerBotCredential = options.registerBotCredential || (() => {});
+        this.revokeBotCredential = options.revokeBotCredential || (() => {});
+        this.authCredentials = new Map();
         this.desiredState = 'stopped';
         this.outcome = null;
         this.ownedGroups = new Map();
@@ -148,6 +153,7 @@ export class AgentProcess {
 
     #spawnGeneration(load_memory, init_message, count_id) {
         const args = [this.entrypoint, this.name, '-n', this.name, '-c', String(count_id)];
+        if (this.managementAuthMode === 'protected') args.push('--management-auth-required');
         if (load_memory) args.push('-l', String(load_memory));
         if (init_message) args.push('-m', init_message);
         args.push('-p', String(this.port));
@@ -177,6 +183,16 @@ export class AgentProcess {
             child.once('close', (code, signal) => resolve({ code, signal }));
         });
         this.registrationTasks.set(generation, new Set());
+        if (this.managementAuthMode === 'protected') {
+            const credential = { spawnId: randomUUID(), token: randomBytes(32).toString('hex') };
+            this.authCredentials.set(generation, credential);
+            this.registerBotCredential(this.name, credential.spawnId, credential.token);
+            child.once('spawn', () => {
+                if (generation !== this.generation || child !== this.process || !child.connected) return;
+                try { child.send({ type: 'mindcraft:management-auth', ...credential }); }
+                catch (error) { console.error('Could not deliver private MindServer credential to agent child'); }
+            });
+        }
         child.on('message', message => {
             const tasks = this.registrationTasks.get(generation);
             const task = this.#handleChildMessage(message, generation);
@@ -310,6 +326,7 @@ export class AgentProcess {
         const generation = this.generation;
         if (!child) return;
         const spawnError = this.spawnError;
+        this.#revokeCredential(generation);
         const cleanupErrors = [];
         this.stoppingGenerations.add(generation);
         if (child.connected) {
@@ -387,6 +404,7 @@ export class AgentProcess {
     async #onExit(child, generation, { code, signal }) {
         if (generation !== this.generation || this.process !== child) return;
         if (this.stoppingGenerations.has(generation)) return;
+        this.#revokeCredential(generation);
         await this.#settleRegistrations(generation);
         const cleanupErrors = [];
         const groupsGone = await this.#groupsGone(generation);
@@ -477,5 +495,12 @@ export class AgentProcess {
         const desiredVersion = this.desiredVersion;
         await delay(backoff);
         if (this.desiredState === 'running' && this.desiredVersion === desiredVersion && !this.process) this.#spawnGeneration(true, 'Agent process restarted.', this.count_id || 0);
+    }
+
+    #revokeCredential(generation) {
+        const credential = this.authCredentials.get(generation);
+        if (!credential) return;
+        this.authCredentials.delete(generation);
+        this.revokeBotCredential(this.name, credential.spawnId);
     }
 }

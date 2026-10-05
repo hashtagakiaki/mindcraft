@@ -556,6 +556,7 @@ async function main() {
   execFileSync(node, [path.join(__dirname, 'furnace_lifecycle.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'recovery_replanning.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'management_reconnect.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'management_auth.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'agent_process.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'agent_shutdown.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'shutdown_experiments.cjs')], { stdio: 'inherit' })

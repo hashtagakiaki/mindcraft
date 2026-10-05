@@ -78,6 +78,17 @@ async function run() {
     const fakeCliGrandchild = path.join(temp, 'fake-cli-grandchild.mjs');
     const integrationMarker = path.join(temp, 'adapter-processes.json');
     const integrationReady = `${integrationMarker}.grandchild-ready`;
+    const authChild = path.join(temp, 'auth-child.mjs');
+    await fs.writeFile(authChild, `
+      import { writeFileSync } from 'node:fs'
+      process.on('message', message => {
+        if (message?.type === 'mindcraft:management-auth') {
+          writeFileSync(process.env.FIXTURE_AUTH_MARKER, JSON.stringify({ spawnId: message.spawnId, token: message.token }))
+        }
+        if (message?.type === 'mindcraft:shutdown') process.exit(0)
+      })
+      setInterval(() => {}, 1000)
+    `)
     const supervisors = [];
     let foreign = null;
     let integrationUnrelated = null;
@@ -480,11 +491,40 @@ async function run() {
         assert.equal(taskCompleteFailureCallbacks[0].childCode, 1);
         process.exitCode = 0;
 
+        const authRegistrations = [];
+        const authRevocations = [];
+        let authMarker = path.join(temp, 'auth-first.json');
+        process.env.FIXTURE_AUTH_MARKER = authMarker;
+        const protectedChild = makeSupervisor('fixture-protected-child', 1, {
+            entrypoint: authChild,
+            managementAuthMode: 'protected',
+            registerBotCredential: (_name, spawnId, token) => authRegistrations.push({ spawnId, token }),
+            revokeBotCredential: (_name, spawnId) => authRevocations.push(spawnId),
+            shutdownTimeout: 500, terminateTimeout: 300, killTimeout: 500,
+        });
+        supervisors.push(protectedChild);
+        await protectedChild.start();
+        assert.equal(await waitFor(() => fs.access(authMarker).then(() => true, () => false)), true,
+            'parent delivers bot credential over the existing child IPC channel');
+        const firstAuth = JSON.parse(await fs.readFile(authMarker, 'utf8'));
+        assert.deepEqual(firstAuth, authRegistrations[0], 'child receives exactly the spawn-bound credential registered with the hub');
+        await protectedChild.stop('auth-fixture-restart');
+        assert.deepEqual(authRevocations, [firstAuth.spawnId], 'stopping a generation revokes its credential');
+        authMarker = path.join(temp, 'auth-second.json');
+        process.env.FIXTURE_AUTH_MARKER = authMarker;
+        await protectedChild.start();
+        assert.equal(await waitFor(() => fs.access(authMarker).then(() => true, () => false)), true);
+        const secondAuth = JSON.parse(await fs.readFile(authMarker, 'utf8'));
+        assert.notEqual(secondAuth.spawnId, firstAuth.spawnId, 'restarted child receives a distinct spawn identity');
+        assert.notEqual(secondAuth.token, firstAuth.token, 'restarted child receives a fresh private token');
+        await protectedChild.stop('auth-fixture-done');
+
         console.log('AgentProcess supervisor fixtures passed');
     } finally {
         delete process.env.FIXTURE_MODE;
         delete process.env.FIXTURE_EXIT_DELAY;
         delete process.env.FOREIGN_PID;
+        delete process.env.FIXTURE_AUTH_MARKER;
         if (previousCodexBinary === undefined) delete process.env.MINDCRAFT_CODEX_BIN;
         else process.env.MINDCRAFT_CODEX_BIN = previousCodexBinary;
         if (previousIntegrationMarker === undefined) delete process.env.MINDCRAFT_INTEGRATION_MARKER;

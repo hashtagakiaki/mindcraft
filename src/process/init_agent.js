@@ -35,11 +35,14 @@ const argv = yargs(args)
         type: 'number',
         description: 'port of mindserver'
     })
+    .option('management-auth-required', { type: 'boolean', default: false })
     .argv;
 
 const agent = new Agent();
 const EXIT_INTENT_FLUSH_MS = 500;
 const EXIT_INTENT_MESSAGE_MAX_CHARS = 1000;
+let resolveAuthBootstrap;
+const authBootstrap = argv.managementAuthRequired ? new Promise(resolve => { resolveAuthBootstrap = resolve; }) : Promise.resolve(true);
 let shutdownRequested = null;
 let shutdownPromise = null;
 
@@ -105,6 +108,17 @@ Object.defineProperty(agent, 'requestShutdown', {
 });
 
 process.on('message', message => {
+    if (message?.type === 'mindcraft:management-auth') {
+        try {
+            serverProxy.setManagementCredential({ spawnId: message.spawnId, token: message.token });
+            resolveAuthBootstrap?.(true);
+            resolveAuthBootstrap = null;
+        } catch {
+            resolveAuthBootstrap?.(false);
+            resolveAuthBootstrap = null;
+        }
+        return;
+    }
     if (message?.type !== 'mindcraft:shutdown') return;
     void requestShutdown(message.reason || 'parent-shutdown', {
         restartIntent: message.restartIntent === true,
@@ -124,6 +138,7 @@ function canStart() {
 async function startAgent() {
     try {
         if (!canStart()) return void requestShutdown('parent-disconnected-before-start');
+        if (await authBootstrap !== true) throw new Error('Private MindServer child credential was not received over IPC');
         console.log('Connecting to MindServer');
         await serverProxy.connect(argv.name, argv.port);
         if (!canStart()) return void requestShutdown('shutdown-during-connect');

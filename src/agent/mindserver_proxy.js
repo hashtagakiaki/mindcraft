@@ -34,13 +34,14 @@ export class MindServerProxy {
         this.loggedIn = false;
         this.managementPause = Promise.resolve();
         this.managementPaused = false;
+        this.managementCredential = null;
         MindServerProxy.instance = this;
     }
 
     async connect(name, port) {
         if (this.socket) return this.readyPromise;
         this.name = name;
-        this.socket = this.ioFactory(`http://localhost:${port}`);
+        this.socket = this.ioFactory(`http://localhost:${port}`, this.managementCredential ? { auth: { token: this.managementCredential.token } } : undefined);
         this._installListeners();
         this.readyPromise = new Promise((resolve, reject) => {
             this.initialResolve = resolve;
@@ -51,6 +52,16 @@ export class MindServerProxy {
             console.error('Connection failed:', err.message);
         });
         return this.readyPromise;
+    }
+
+    setManagementCredential(credential) {
+        if (!credential || typeof credential.token !== 'string' || !credential.token || typeof credential.spawnId !== 'string' || !credential.spawnId) {
+            throw new Error('Invalid private MindServer credential');
+        }
+        if (this.managementCredential && this.managementCredential.spawnId !== credential.spawnId) {
+            throw new Error('MindServer credential belongs to a different child spawn');
+        }
+        this.managementCredential = { spawnId: credential.spawnId, token: credential.token };
     }
 
     _installListeners() {
@@ -122,7 +133,7 @@ export class MindServerProxy {
         try {
             const response = await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => reject(new Error('Settings request timed out after 5 seconds')), PLACE_RPC_TIMEOUT_MS);
-                socket.emit('get-settings', this.name, (value) => {
+            socket.emit('get-settings', this.name, (value) => {
                     clearTimeout(timeout);
                     if (value?.error) reject(new Error(value.error));
                     else if (!value?.settings || !value.management) reject(new Error('MindServer returned incomplete management metadata'));
@@ -143,6 +154,7 @@ export class MindServerProxy {
                 throw new Error('MindServer management generation or settings fingerprint is missing or invalid');
             }
             if (settingsFingerprint(settings) !== fingerprint) throw new Error('MindServer settings fingerprint does not match its settings payload');
+            if (this.managementCredential && management.spawnId !== this.managementCredential.spawnId) throw new Error('MindServer bot spawn identity does not match its private IPC credential');
             if ((scope.placeMemoryEnabled && typeof scope.placeWorldId !== 'string') || (!scope.placeMemoryEnabled && scope.placeWorldId !== null)) {
                 throw new Error('MindServer place namespace is malformed');
             }
@@ -154,10 +166,19 @@ export class MindServerProxy {
                 this.managementScope = scope;
                 setSettings(settings);
             }
-            // Registration and login are repeated on every transport connection. These
-            // events are idempotent on the server and carry no world-changing command.
-            socket.emit('connect-agent-process', this.name);
-            if (this.loggedIn) socket.emit('login-agent', this.name);
+            // The server acknowledges identity-bound registration before management is ready.
+            if (this.managementCredential) {
+                const registration = await new Promise((resolve, reject) => {
+                    const timer = setTimeout(() => reject(new Error('MindServer agent registration was not acknowledged')), PLACE_RPC_TIMEOUT_MS);
+                    socket.emit('connect-agent-process', this.name, value => { clearTimeout(timer); resolve(value); });
+                });
+                if (!registration?.accepted || registration.agentName !== this.name
+                    || registration.spawnId !== this.managementCredential.spawnId) {
+                    throw new Error('MindServer rejected the authenticated child registration');
+                }
+            } else {
+                socket.emit('connect-agent-process', this.name);
+            }
             if (socket !== this.socket || connectionGeneration !== this.connectionGeneration || !socket.connected) return;
             const isCurrentConnection = () => socket === this.socket && connectionGeneration === this.connectionGeneration && socket.connected;
             const restoreResult = await this.agent?.restoreManagement?.({
@@ -173,6 +194,8 @@ export class MindServerProxy {
                 this._pauseManagement(true);
                 return;
             }
+            if (this.loggedIn) await this._loginOnSocket(socket);
+            if (!isCurrentConnection()) return;
             this.serverGeneration = management.generation;
             this.connected = true;
             this.managementReady = true;
@@ -214,7 +237,31 @@ export class MindServerProxy {
 
     login() {
         this.loggedIn = true;
-        if (this.managementReady) this.socket.emit('login-agent', this.agent.name);
+        if (this.managementReady) return this._loginOnSocket(this.socket).catch(error => {
+            this.managementReady = false;
+            this._pauseManagement(true);
+            console.error('MindServer bot login was not accepted');
+            return { accepted: false };
+        });
+        return Promise.resolve({ accepted: false });
+    }
+
+    _loginOnSocket(socket) {
+        if (!this.managementCredential) {
+            socket.emit('login-agent', this.agent?.name || this.name);
+            return Promise.resolve({ accepted: true });
+        }
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error('MindServer bot login was not acknowledged')), PLACE_RPC_TIMEOUT_MS);
+            socket.emit('login-agent', this.name, result => {
+                clearTimeout(timer);
+                if (!result?.accepted || result.agentName !== this.name || result.spawnId !== this.managementCredential.spawnId) {
+                    reject(new Error('MindServer rejected authenticated bot login'));
+                    return;
+                }
+                resolve(result);
+            });
+        });
     }
 
     shutdown() {

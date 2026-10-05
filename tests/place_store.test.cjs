@@ -296,6 +296,7 @@ async function runHubShutdownFixture(root) {
     import { EventEmitter } from 'node:events'
     export class Server extends EventEmitter {
       constructor(server) { super(); this.server = server; globalThis.__fixtureSocketServer = this }
+      use() {}
       close(callback) {
         globalThis.__fixtureOrder.push('transport-close')
         this.server.close(() => callback?.())
@@ -363,6 +364,7 @@ async function runHubShutdownFixture(root) {
     createMindServer(false, 0)
     assert.equal(await waitUntil(() => Boolean(fixtureStore)), true)
     const controlSocket = new EventEmitter()
+    controlSocket.data = { identity: { role: 'legacy' } }
     globalThis.__fixtureSocketServer.emit('connection', controlSocket)
     const settings = name => ({ profile: { name, bot_rules_file: '/ignored/profile.md' }, bot_rules_file: '/ignored/agent.md', host: 'localhost', port: 1, minecraft_version: '1.20' })
 
@@ -461,7 +463,9 @@ async function runHubShutdownFixture(root) {
     controlSocket.emit('restart-agent', 'sibling')
     assert.equal(await waitUntil(() => siblingSupervisor.generation === initialSiblingGeneration + 1), true, 'UI restart must use the parent supervisor when no agent socket is connected')
     const settingsRestartGeneration = siblingSupervisor.generation
-    controlSocket.emit('set-agent-settings', 'sibling', settings('sibling'))
+    controlSocket.emit('set-agent-settings', 'sibling', {
+      profile: { name: 'sibling' }, host: 'localhost', port: 1, minecraft_version: '1.20'
+    })
     assert.equal(await waitUntil(() => siblingSupervisor.generation === settingsRestartGeneration + 1), true, 'settings changes must restart through the parent supervisor')
 
     let queuedGate

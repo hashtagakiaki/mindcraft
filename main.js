@@ -44,6 +44,9 @@ if (process.env.MINECRAFT_PORT) {
 if (process.env.MINDSERVER_PORT) {
     settings.mindserver_port = process.env.MINDSERVER_PORT;
 }
+if (process.env.MINDCRAFT_MANAGEMENT_AUTH_MODE) {
+    settings.management_auth_mode = process.env.MINDCRAFT_MANAGEMENT_AUTH_MODE;
+}
 if (process.env.PROFILES && JSON.parse(process.env.PROFILES).length > 0) {
     settings.profiles = JSON.parse(process.env.PROFILES);
 }
@@ -70,6 +73,17 @@ if (process.env.SETTINGS_JSON) {
     }
 }
 
+let signalShutdown = null;
+for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => {
+        if (signalShutdown) return;
+        signalShutdown = Promise.resolve(Mindcraft.shutdown({ reason: `signal-${signal}` }))
+            .then(() => process.exit(0), error => {
+                console.error(`MindCraft shutdown failed after ${signal}`);
+                process.exit(1);
+            });
+    });
+}
 
 Mindcraft.init(false, settings.mindserver_port, settings.auto_open_ui);
 

@@ -385,7 +385,9 @@
     </div>
 
     <script>
-        const socket = io({ path: window.location.pathname + 'socket.io' })
+        let managementToken = '';
+        const socket = io({ path: window.location.pathname + 'socket.io', autoConnect: false,
+            auth: callback => callback(managementToken ? { token: managementToken } : {}) });
         const agentsDiv = document.getElementById('agents');
         let settingsSpec = {};
         let profileData = null;
@@ -421,9 +423,14 @@
         socket.on('disconnect', () => {
             updateStatus(false);
         });
-        socket.on('connect_error', () => {
+        socket.on('connect_error', (error) => {
             updateStatus(false);
+            if (error?.message?.includes('authentication')) {
+                const token = window.prompt('Enter the operator token from the private MindServer session file');
+                if (token) { managementToken = token.trim(); socket.auth = { token: managementToken }; socket.connect(); }
+            }
         });
+        socket.connect();
 
         fetch('/settings_spec.json')
             .then(r => r.json())
@@ -748,11 +755,12 @@
         applyBtn.addEventListener('click', () => {
             if (!currentAgentName) return;
             const edited = getEditedAgentSettings();
-            socket.emit('set-agent-settings', currentAgentName, edited);
-            // Update local settings immediately
-            agentSettings[currentAgentName] = { ...edited, fetched: true };
-            updateAgentViewer(currentAgentName);
-            closeAgentSettings();
+            socket.emit('set-agent-settings', currentAgentName, edited, result => {
+                if (!result?.success) { window.alert(result?.error || 'Settings change was not accepted'); return; }
+                agentSettings[currentAgentName] = { ...edited, fetched: true };
+                updateAgentViewer(currentAgentName);
+                closeAgentSettings();
+            });
         });
 
         closeAgentSettingsBtn.addEventListener('click', closeAgentSettings);
@@ -914,8 +922,13 @@
             });
         });
 
-        function restartAgent(n) { socket.emit('restart-agent', n); }
-        function disconnectAgent(n) { socket.emit('stop-agent', n); }
+        function managementOperation(event, name) {
+            socket.emit(event, name, result => {
+                if (!result?.success) window.alert(result?.error || `${event} was not accepted`);
+            });
+        }
+        function restartAgent(n) { managementOperation('restart-agent', n); }
+        function disconnectAgent(n) { managementOperation('stop-agent', n); }
         function startAgent(n) { 
             const btn = document.querySelector(`button[onclick="startAgent('${n}')"]`);
             if (btn) {
@@ -932,23 +945,23 @@
                     }
                 }, 10000);
             }
-            socket.emit('start-agent', n);
+            managementOperation('start-agent', n);
         }
-        function stopAgent(n) { socket.emit('stop-agent', n); }
-        function destroyAgent(n) { socket.emit('destroy-agent', n); }
+        function stopAgent(n) { managementOperation('stop-agent', n); }
+        function destroyAgent(n) { managementOperation('destroy-agent', n); }
         function disconnectAllAgents() { 
-            socket.emit('stop-all-agents'); 
+            socket.emit('stop-all-agents', result => { if (!result?.success) window.alert(result?.error || 'Stop request was not accepted'); });
         }
         function confirmShutdown() {
             if (confirm('Are you sure you want to perform a full shutdown?\nThis will stop all agents and close the server.')) {
-                socket.emit('shutdown');
+                socket.emit('shutdown', result => { if (!result?.success) window.alert(result?.error || 'Shutdown request was not accepted'); });
             }
         }
         function sendMessage(n, m, useSelection = false) {
             if (!m || !m.trim() || !socket.connected) return;
             if (useSelection && selectionMode && !selectedBots.has(n) && !m.trimStart().startsWith('@')) return;
             const targets = useSelection && selectionMode ? [...selectedBots] : n;
-            socket.emit('send-message', targets, { from: 'ADMIN', message: m }, result => {
+            socket.emit('send-message', targets, { message: m }, result => {
                 document.getElementById('groupResult').textContent = result.success ? `Sent to: ${result.recipients.join(', ')}` : result.error;
                 if (!result.success) return;
                 const input = document.getElementById(`messageInput-${n}`);

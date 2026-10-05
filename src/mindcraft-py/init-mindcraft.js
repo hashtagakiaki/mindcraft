@@ -18,7 +18,20 @@ function parseArguments() {
 const args = parseArguments();
 
 settings.mindserver_port = args.mindserver_port;
+if (process.env.MINDCRAFT_MANAGEMENT_AUTH_MODE) settings.management_auth_mode = process.env.MINDCRAFT_MANAGEMENT_AUTH_MODE;
+
+let signalShutdown = null;
+for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => {
+        if (signalShutdown) return;
+        signalShutdown = Promise.resolve(Mindcraft.shutdown({ reason: `signal-${signal}` }))
+            .then(() => process.exit(0), error => {
+                console.error(`Mindcraft shutdown failed after ${signal}`);
+                process.exit(1);
+            });
+    });
+}
 
 Mindcraft.init(settings.mindserver_port);
 
-console.log(`Mindcraft initialized with MindServer at localhost:${settings.mindserver_port}`); 
+console.log(`Mindcraft initialized with MindServer at localhost:${settings.mindserver_port}`);

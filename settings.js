@@ -6,6 +6,7 @@ const settings = {
 
     // the mindserver manages all agents and hosts the UI
     "mindserver_port": 8080,
+    "management_auth_mode": "legacy", // protected mode requires an explicit private session file from the launcher
     "auto_open_ui": true, // opens UI in browser on startup
     "place_state_dir": null, // absolute shared state root; set by the operator, not individual agents
     "place_world_id": null, // UUID namespace for the Minecraft save

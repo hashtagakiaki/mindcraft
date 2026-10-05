@@ -1,8 +1,9 @@
-import { createMindServer, registerAgent, unregisterAgent, numStateListeners } from './mindserver.js';
+import { createMindServer, registerAgent, unregisterAgent, numStateListeners, issueBotCredential, revokeBotCredential } from './mindserver.js';
 import { AgentProcess } from '../process/agent_process.js';
 import { getServer } from './mcserver.js';
 import { getBotViewerPort } from '../utils/viewer_ports.js';
 import open from 'open';
+import rootSettings from '../../settings.js';
 
 let mindserver;
 let connected = false;
@@ -84,7 +85,10 @@ async function createReservedAgent(settings, agent_name, creationToken) {
 
         registration = registerAgent(settings, viewer_port);
         agentProcess = new AgentProcess(agent_name, mindserver_port, {
-            onTaskEnding: outcome => taskEndingHandler?.(outcome)
+            onTaskEnding: outcome => taskEndingHandler?.(outcome),
+            managementAuthMode: rootSettings.management_auth_mode || 'legacy',
+            registerBotCredential: issueBotCredential,
+            revokeBotCredential
         });
         agent_processes[settings.profile.name] = agentProcess;
         const started = await agentProcess.start(load_memory, init_message, agentIndex);
