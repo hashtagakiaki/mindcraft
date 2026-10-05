@@ -5,7 +5,7 @@ import Vec3 from 'vec3';
 import { createRequire } from 'node:module';
 import settings from "../../../settings.js";
 import craftingSync from "./crafting_sync.js";
-import { trackSkill, recordConfirmation, recordUncertainty, operationContext, withSkillPhase, registerOwnedPromise } from './operation_context.js';
+import { trackSkill, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, withSkillPhase, registerOwnedPromise } from './operation_context.js';
 
 const require = createRequire(import.meta.url);
 
@@ -539,6 +539,8 @@ export async function smeltItem(bot, itemName, num=1, actionContext=null) {
                 }
                 if (!cancelled && !reason) {
                     setActionPhase(context, 'waiting-for-smelting');
+                    const smeltingWaitStartedAt = new Date().toISOString();
+                    const smeltingWaitStartedMs = Date.now();
                     let quietMs = 0;
                     while (total < num && quietMs < FURNACE_IDLE_TIMEOUT_MS) {
                         if (!await waitForActionOrTimeout(bot, context, FURNACE_POLL_INTERVAL_MS)) {
@@ -563,6 +565,14 @@ export async function smeltItem(bot, itemName, num=1, actionContext=null) {
                             setActionPhase(context, 'waiting-for-smelting');
                         } else quietMs += FURNACE_POLL_INTERVAL_MS;
                     }
+                    recordOwnedWait({
+                        phase: 'waiting-for-smelting', reason: 'furnace-output-or-quiet-timeout',
+                        startedAt: smeltingWaitStartedAt, timeoutMs: FURNACE_IDLE_TIMEOUT_MS,
+                        endedAt: new Date().toISOString(), elapsedMs: Date.now() - smeltingWaitStartedMs,
+                        deadlineKind: 'quiet-period-reset-on-output',
+                        outcome: cancelled ? 'cancelled' : total >= num ? 'requested-output-observed' : 'quiet-timeout',
+                        observedOutput: total,
+                    });
                     if (!cancelled && furnace.inputItem()) {
                         setActionPhase(context, 'collecting-furnace-input');
                         const item = await furnace.takeInput();
@@ -1739,17 +1749,58 @@ export async function goToGoal(bot, goal) {
 
     bot.pathfinder.setMovements(final_movements);
     const owner = operationContext();
+    const cancellation = owner?.cancellation;
+    const previousActionPhase = cancellation?.phase ?? 'running';
     const navigationStallTimeoutMs = Number.isFinite(settings.navigation_stall_timeout_ms) && settings.navigation_stall_timeout_ms > 0
         ? settings.navigation_stall_timeout_ms : DEFAULT_NAVIGATION_STALL_TIMEOUT_MS;
     const navigationCheckIntervalMs = Number.isFinite(settings.navigation_check_interval_ms) && settings.navigation_check_interval_ms > 0
         ? settings.navigation_check_interval_ms : DEFAULT_NAVIGATION_CHECK_INTERVAL_MS;
+    const navigationWait = beginOwnedWait({
+        phase: 'navigation', reason: 'goal-or-new-route-segment',
+        startedAt: new Date().toISOString(), timeoutMs: navigationStallTimeoutMs,
+        progressCount: 0,
+    });
     let timeoutHandle;
     let bestGoalDistance;
     let lastProgressAt;
     let stallError = null;
+    let navigationError = false;
+    const seenRouteSegments = new Set();
+    let activeRouteNodes = [];
+    const positionKey = point => `${point.x},${point.y},${point.z}`;
+    const onPathUpdate = result => {
+        activeRouteNodes = Array.isArray(result?.path)
+            ? result.path.filter(node => [node?.x, node?.y, node?.z].every(Number.isFinite))
+                .map(node => ({ x: node.x, y: node.y, z: node.z }))
+            : [];
+        const position = bot.entity.position;
+        for (const node of activeRouteNodes) {
+            if (Math.abs(position.x - node.x) <= 0.5 && Math.abs(position.z - node.z) <= 0.5 && Math.abs(position.y - node.y) < 1) {
+                seenRouteSegments.add(positionKey(node));
+            }
+        }
+    };
+    const onPathReset = () => { activeRouteNodes = []; };
+    const routeSegmentAdvanced = () => {
+        const position = bot.entity.position;
+        for (const node of activeRouteNodes) {
+            if (Math.abs(position.x - node.x) > 0.5 || Math.abs(position.z - node.z) > 0.5 || Math.abs(position.y - node.y) >= 1) continue;
+            const key = positionKey(node);
+            if (seenRouteSegments.has(key)) continue;
+            seenRouteSegments.add(key);
+            markOwnedWaitProgress(navigationWait);
+            return true;
+        }
+        return false;
+    };
+    const navigationWaitStartedAt = new Date().toISOString();
     try {
         bestGoalDistance = goal.heuristic(bot.entity.position.floored());
+        seenRouteSegments.add(positionKey(bot.entity.position.floored()));
         lastProgressAt = Date.now();
+        bot.on?.('path_update', onPathUpdate);
+        bot.on?.('path_reset', onPathReset);
+        setActionPhase(cancellation, 'navigation');
         const navigation = bot.pathfinder.goto(goal);
         timeoutHandle = setInterval(() => {
             if (owner?.signal.aborted || owner?.closed) {
@@ -1761,8 +1812,10 @@ export async function goToGoal(bot, goal) {
             if (currentGoalDistance <= bestGoalDistance - 0.5) {
                 bestGoalDistance = currentGoalDistance;
                 lastProgressAt = Date.now();
+            } else if (routeSegmentAdvanced()) {
+                lastProgressAt = Date.now();
             } else if (!stallError && Date.now() - lastProgressAt >= navigationStallTimeoutMs) {
-                stallError = new Error(`Navigation did not get closer to its goal for ${navigationStallTimeoutMs}ms.`);
+                stallError = new Error(`Navigation made no goal or new route-segment progress for ${navigationStallTimeoutMs}ms.`);
                 stallError.name = 'NavigationStallTimeoutError';
                 bot.pathfinder.stop();
             }
@@ -1770,7 +1823,7 @@ export async function goToGoal(bot, goal) {
         try {
             await navigation;
         } catch (err) {
-            if (!stallError) throw err;
+            if (!stallError) { navigationError = true; throw err; }
         }
         if (stallError) throw stallError;
         return true;
@@ -1780,6 +1833,16 @@ export async function goToGoal(bot, goal) {
     } finally {
         clearInterval(doorCheckInterval);
         if (timeoutHandle) clearInterval(timeoutHandle);
+        bot.removeListener?.('path_update', onPathUpdate);
+        bot.removeListener?.('path_reset', onPathReset);
+        setActionPhase(cancellation, previousActionPhase);
+        finishOwnedWait(navigationWait, {
+            phase: 'navigation', reason: 'goal-or-new-route-segment',
+            startedAt: navigationWaitStartedAt, endedAt: new Date().toISOString(),
+            timeoutMs: navigationStallTimeoutMs,
+            outcome: stallError ? 'stalled' : owner?.signal.aborted ? 'cancelled' : navigationError ? 'error' : 'settled',
+            visitedRouteSegments: seenRouteSegments.size,
+        });
     }
 }
 

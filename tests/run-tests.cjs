@@ -105,14 +105,20 @@ async function testNavigation(root) {
   await setupNavigationFixture(root)
   const skills = await import(pathToFileURL(path.join(root, 'src/agent/library/skills.js')))
   const { default: runtimeSettings } = await import(pathToFileURL(path.join(root, 'settings.js')))
+  const { createOperationContext, operationResult, runOwnedOperation } = await import(pathToFileURL(path.join(root, 'src/agent/library/operation_context.js')))
+  const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
   Object.assign(runtimeSettings, { navigation_stall_timeout_ms: 20, navigation_check_interval_ms: 5 })
   const targetBlock = { name: 'chest', position: { x: 4, y: 0, z: 0, toString() { return '4,0,0' }, offset() { return this } } }
   const targetEntity = { name: 'cow', position: { x: 4, y: 0, z: 0, floored() { return { x: Math.floor(this.x), y: Math.floor(this.y), z: Math.floor(this.z) } } } }
   const makeBot = ({ result = true, reject = false, rejectAfter = 0, distance = 0 } = {}) => {
+    const listeners = new Map()
     const bot = {
       output: '', username: 'bot', game: { gameMode: 'survival' }, players: {}, navigation: { block: targetBlock, blocks: [], entities: [targetEntity] },
       entity: { position: { x: 0, y: 0, z: 0, clone() { return this }, floored() { return { x: Math.floor(this.x), y: Math.floor(this.y), z: Math.floor(this.z) } }, offset() { return this }, distanceTo: () => result === false ? 10 : distance }, height: 1 },
       modes: { isOn: () => false, pause() {}, unpause() {} }, inventory: { slots: [], items: () => [], findInventoryItem: () => null },
+      on(event, listener) { const set = listeners.get(event) || new Set(); set.add(listener); listeners.set(event, set); return this },
+      removeListener(event, listener) { listeners.get(event)?.delete(listener); return this },
+      emit(event, ...args) { for (const listener of listeners.get(event) || []) listener(...args); return true },
       pathfinder: { async getPathTo() { return { status: 'noPath' } }, setMovements() {}, async goto() {} },
       findBlocks: () => [{ x: 4, y: 0, z: 0 }], blockAt: () => targetBlock,
       async openContainer() { bot.navigation.opened = true; return { containerItems: () => [], async close() {}, async deposit() {}, async withdraw() {} } },
@@ -183,10 +189,74 @@ async function testNavigation(root) {
   bot = makeBot()
   let stopCalls = 0
   let rejectPending
-  bot.pathfinder.goto = () => new Promise((resolve, reject) => { rejectPending = reject })
+  bot.pathfinder.goto = () => {
+    setImmediate(() => bot.emit('path_update', { status: 'success', path: [{ x: 1, y: 0, z: 0 }, { x: 2, y: 0, z: 0 }] }))
+    return new Promise((resolve, reject) => { rejectPending = reject })
+  }
   bot.pathfinder.stop = () => { stopCalls++; rejectPending(new Error('stopped by progress monitor')) }
-  await assert.rejects(skills.goToGoal(bot, { heuristic: () => 10 }), /did not get closer.*20ms/)
+  const operation = createOperationContext({ id: 'nav-stall', controller: new AbortController() }, { bot }, { intentEpoch: 1 }, 'nav-task')
+  await assert.rejects(runOwnedOperation(operation, () => skills.goToGoal(bot, { heuristic: () => 10 })), /made no goal or new route-segment progress.*20ms/)
   assert.equal(stopCalls, 1, 'navigation progress monitor stops a genuinely stalled path once')
+
+  const stalledCall = operationResult(operation).skillResults[0]
+  assert.equal(stalledCall.waits[0].callId, stalledCall.id, 'wait evidence retains its SDK call ID')
+  assert.equal(stalledCall.waits[0].phase, 'navigation')
+  assert.equal(stalledCall.waits[0].reason, 'goal-or-new-route-segment')
+  assert.equal(stalledCall.waits[0].outcome, 'stalled')
+
+  bot = makeBot()
+  stopCalls = 0
+  let rejectDetour
+  bot.pathfinder.goto = () => {
+    setImmediate(() => bot.emit('path_update', { status: 'success', path: [0, 1, 2, 3].map(x => ({ x, y: 0, z: 0 })) }))
+    return new Promise((resolve, reject) => { rejectDetour = reject })
+  }
+  bot.pathfinder.stop = () => { stopCalls++; rejectDetour(new Error('detour eventually timed out')) }
+  const detour = skills.goToGoal(bot, { heuristic: () => 10 })
+  const detourRejected = assert.rejects(detour, /made no goal or new route-segment progress/)
+  await delay(12)
+  bot.entity.position.x = 1
+  await delay(12)
+  bot.entity.position.x = 2
+  await delay(12)
+  bot.entity.position.x = 3
+  await delay(12)
+  assert.equal(stopCalls, 0, 'reaching new finite route segments keeps a necessary detour alive')
+  await detourRejected
+  assert.equal(stopCalls, 1)
+
+  bot = makeBot()
+  stopCalls = 0
+  let rejectOscillation
+  bot.pathfinder.goto = () => {
+    setImmediate(() => bot.emit('path_update', { status: 'success', path: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }] }))
+    return new Promise((resolve, reject) => { rejectOscillation = reject })
+  }
+  bot.pathfinder.stop = () => { stopCalls++; rejectOscillation(new Error('oscillation timed out')) }
+  const oscillation = skills.goToGoal(bot, { heuristic: () => 10 })
+  const oscillationRejected = assert.rejects(oscillation, /made no goal or new route-segment progress/)
+  await delay(10)
+  bot.entity.position.x = 1
+  await delay(10)
+  for (let index = 0; index < 8 && stopCalls === 0; index++) {
+    bot.entity.position.x = index % 2 === 0 ? 0 : 1
+    bot.emit('path_reset', 'replanned')
+    bot.emit('path_update', { status: 'success', path: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }] })
+    await delay(8)
+  }
+  await oscillationRejected
+  assert.equal(stopCalls, 1, 'returning over the same route segment cannot renew the stall budget')
+
+  bot = makeBot()
+  bot.pathfinder.goto = async () => { bot.emit('path_update', { status: 'success', path: [] }) }
+  const repeatedCalls = createOperationContext({ id: 'nav-waits', controller: new AbortController() }, { bot }, { intentEpoch: 1 }, 'nav-task')
+  await runOwnedOperation(repeatedCalls, async () => {
+    await skills.goToGoal(bot, { heuristic: () => 10 })
+    await skills.goToGoal(bot, { heuristic: () => 10 })
+  })
+  const waitEvents = operationResult(repeatedCalls).skillResults.map(call => call.waits[0])
+  assert.equal(new Set(waitEvents.map(wait => wait.waitId)).size, 2, 'wait IDs are unique across calls in one operation')
+  assert.ok(waitEvents.every(wait => wait.callId && wait.actionId === 'nav-waits'))
   console.log('navigation contract tests passed')
 }
 

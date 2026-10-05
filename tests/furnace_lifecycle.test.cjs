@@ -69,12 +69,13 @@ async function loadRuntime() {
   const skills = await import(pathToFileURL(path.join(dir, 'src/agent/library/skills.js')))
   const { default: craftingSync } = await import(pathToFileURL(path.join(dir, 'src/agent/library/crafting_sync.js')))
   const { ActionManager } = await import(pathToFileURL(path.join(dir, 'src/agent/action_manager.js')))
-  return { dir, skills, craftingSync, ActionManager }
+  const { createOperationContext, operationResult, runOwnedOperation } = await import(pathToFileURL(path.join(dir, 'src/agent/library/operation_context.js')))
+  return { dir, skills, craftingSync, ActionManager, createOperationContext, operationResult, runOwnedOperation }
 }
 
 function notch(item) { return item ? Item.toNotch(new Item(item.id, item.count)) : { present: false } }
 
-function makeBot({ ore = 3, coal = 2, furnaceSeed = {}, autoSmelt = true, fullSnapshots = true, lateClickItem = false, partialSmeltCount = null, throwTransfer = false, closeError = false, suppressFurnaceFenceSnapshot = false } = {}) {
+function makeBot({ ore = 3, coal = 2, furnaceSeed = {}, autoSmelt = true, smeltDelayMs = 0, fullSnapshots = true, lateClickItem = false, partialSmeltCount = null, throwTransfer = false, closeError = false, suppressFurnaceFenceSnapshot = false } = {}) {
   const bot = new EventEmitter()
   fixtureBots.add(bot)
   const client = new EventEmitter()
@@ -186,12 +187,22 @@ function makeBot({ ore = 3, coal = 2, furnaceSeed = {}, autoSmelt = true, fullSn
     const targetSlot = destStart
     setServerSlot(window.id, targetSlot, { id: itemType, count })
     if (autoSmelt && targetSlot === 0) {
-      setServerSlot(window.id, 2, { id: ingotId, count: partialSmeltCount ?? count })
-      setServerSlot(window.id, 0, null)
+      const publishOutput = () => {
+        setServerSlot(window.id, 2, { id: ingotId, count: partialSmeltCount ?? count })
+        setServerSlot(window.id, 0, null)
+        fullSnapshot(window.id)
+      }
+      if (smeltDelayMs > 0) setTimeout(publishOutput, smeltDelayMs)
+      else publishOutput()
     }
     if (autoSmelt && targetSlot === 1 && serverFurnace[0]) {
-      setServerSlot(window.id, 2, { id: ingotId, count: partialSmeltCount ?? serverFurnace[0].count })
-      setServerSlot(window.id, 0, null)
+      const publishOutput = () => {
+        setServerSlot(window.id, 2, { id: ingotId, count: partialSmeltCount ?? serverFurnace[0].count })
+        setServerSlot(window.id, 0, null)
+        fullSnapshot(window.id)
+      }
+      if (smeltDelayMs > 0) setTimeout(publishOutput, smeltDelayMs)
+      else publishOutput()
     }
     fullSnapshot(window.id)
   }
@@ -232,7 +243,7 @@ function cancellationContext() {
 }
 
 async function main() {
-  const { skills, craftingSync, ActionManager } = await loadRuntime()
+  const { skills, craftingSync, ActionManager, createOperationContext, operationResult, runOwnedOperation } = await loadRuntime()
   const cases = {}
   const successful = makeBot()
   assert.equal(await skills.smeltItem(successful, 'raw_iron', 2), true, `successful smelt fixture: ${successful.output}`)
@@ -240,6 +251,28 @@ async function main() {
   assert.equal(successful._fixture.writesBefore('close_window').length, 1)
   assert.equal(await skills.clearNearestFurnace(successful), true, 'clear should preserve its boolean success contract')
   cases.success = { smelt: true, clear: true, closedOwnedWindow: true, inventoryConfirmed: true }
+
+  const delayedOutput = makeBot({ ore: 1, coal: 1, smeltDelayMs: 350 })
+  const waitOperation = createOperationContext({ id: 'delayed-smelt', controller: new AbortController() }, { bot: delayedOutput }, { intentEpoch: 1 }, 'smelt-task')
+  assert.equal(await runOwnedOperation(waitOperation, () => skills.smeltItem(delayedOutput, 'raw_iron', 1)), true,
+    'output arriving after several poll intervals remains a valid bounded wait')
+  const smeltWait = operationResult(waitOperation).skillResults[0].waits[0]
+  assert.equal(smeltWait.callId, operationResult(waitOperation).skillResults[0].id)
+  assert.equal(smeltWait.phase, 'waiting-for-smelting')
+  assert.equal(smeltWait.reason, 'furnace-output-or-quiet-timeout')
+  assert.equal(smeltWait.timeoutMs, 11_000)
+  assert.equal(smeltWait.deadlineKind, 'quiet-period-reset-on-output')
+  assert.equal(smeltWait.outcome, 'requested-output-observed')
+  cases.delayedOutput = { waitPhaseAndCallIdRecorded: true, quietTimeoutMs: 11000, outputAfterPolls: true }
+
+  const silentFurnace = makeBot({ ore: 1, coal: 1, autoSmelt: false })
+  const quietOperation = createOperationContext({ id: 'silent-smelt', controller: new AbortController() }, { bot: silentFurnace }, { intentEpoch: 1 }, 'smelt-task')
+  assert.equal(await runOwnedOperation(quietOperation, () => skills.smeltItem(silentFurnace, 'raw_iron', 1)), false,
+    'silence remains bounded by the existing quiet timeout')
+  const quietWait = operationResult(quietOperation).skillResults[0].waits[0]
+  assert.equal(quietWait.timeoutMs, 11_000)
+  assert.equal(quietWait.outcome, 'quiet-timeout')
+  cases.silentOutput = { success: false, quietTimeoutMs: 11000, noInfiniteWait: true }
 
   const short = makeBot({ ore: 2, coal: 0 })
   const shortContext = cancellationContext()

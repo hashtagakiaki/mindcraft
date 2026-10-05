@@ -12,7 +12,7 @@ export function createOperationContext(action, agent, manager, taskId = null) {
         dimension: agent.bot?.game?.dimension ?? null,
         signal: action.controller.signal, bot: agent.bot,
         cancellation: agent.bot?.getActionCancellationContext?.() ?? null,
-        accepting: true, closed: false, sequence: 0,
+        accepting: true, closed: false, sequence: 0, waitSequence: 0,
         calls: [], facts: [], uncertain: [], diagnostics: [], pending: new Set(),
         root: { id: null, activeChild: null, closed: false, phase: 'main' },
     };
@@ -56,6 +56,53 @@ export function recordUncertainty(detail) {
         phase: store.phase ?? call.phase, observedAt: new Date().toISOString(), dimension: operation.dimension,
         connectionGeneration: operation.connectionGeneration, ...detail };
     (operation.closed || call.closed ? operation.diagnostics : operation.uncertain).push(event);
+}
+
+export function recordOwnedWait(detail) {
+    const store = ownership.getStore();
+    if (!store) return;
+    const { operation, call } = store;
+    if (operation.closed || call.closed) return;
+    if (!call.waits) call.waits = [];
+    call.waits.push({
+        waitId: `${call.id}:wait:${++operation.waitSequence}`,
+        actionId: operation.actionId, taskId: operation.taskId, callId: call.id,
+        parentCallId: call.parentCallId ?? null,
+        phase: detail.phase ?? store.phase ?? call.phase,
+        ...detail,
+    });
+}
+
+export function beginOwnedWait(detail) {
+    const store = ownership.getStore();
+    if (!store) return null;
+    const { operation, call } = store;
+    if (operation.closed || call.closed) return null;
+    if (!call.waits) call.waits = [];
+    const wait = {
+        waitId: `${call.id}:wait:${++operation.waitSequence}`,
+        actionId: operation.actionId, taskId: operation.taskId, callId: call.id,
+        parentCallId: call.parentCallId ?? null,
+        phase: detail.phase ?? store.phase ?? call.phase,
+        progressCount: 0, status: 'waiting', ...detail,
+    };
+    call.waits.push(wait);
+    call.activeWait = wait;
+    return wait;
+}
+
+export function markOwnedWaitProgress(wait) {
+    const store = ownership.getStore();
+    if (!wait || !store || store.operation.closed || store.call.closed || wait.status !== 'waiting') return;
+    wait.progressCount++;
+    wait.lastProgressAt = new Date().toISOString();
+}
+
+export function finishOwnedWait(wait, detail) {
+    const store = ownership.getStore();
+    if (!wait || !store || store.operation.closed || store.call.closed) return;
+    Object.assign(wait, detail, { status: detail.outcome ?? 'settled', endedAt: detail.endedAt ?? new Date().toISOString() });
+    if (store.call.activeWait === wait) store.call.activeWait = null;
 }
 
 export function withSkillPhase(phase, body) {
@@ -125,7 +172,7 @@ export function operationResult(operation) {
     return {
         taskId: operation.taskId,
         operationSettlement: 'settled',
-        skillResults: operation.calls.map(({ promise, activeChild, closed, accepting, ...call }) => ({ ...call })),
+        skillResults: operation.calls.map(({ promise, activeChild, activeWait, closed, accepting, ...call }) => ({ ...call })),
         confirmedChanges: operation.facts.map(event => ({ ...event })),
         unconfirmedChanges: operation.uncertain.map(event => ({ ...event })),
         trackingScope: 'public SDK calls; raw bot/plugin work is not fully tracked',

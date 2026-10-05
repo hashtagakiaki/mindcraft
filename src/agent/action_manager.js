@@ -291,9 +291,34 @@ export class ActionManager {
             if (options.stallTimeoutMs > 0) {
                 let last = captureObservedProgress(this.agent.bot);
                 let progressedAt = Date.now();
+                let navigationPhaseActive = false;
+                let navigationWaitProgress = 0;
                 action.stallTimer = setInterval(() => {
                     if (this.currentAction !== action || action.reason) return;
                     const now = captureObservedProgress(this.agent.bot);
+                    if (action.phase === 'navigation') {
+                        const wait = currentOwnedWait(action.operation);
+                        if (!navigationPhaseActive) {
+                            navigationPhaseActive = true;
+                            navigationWaitProgress = 0;
+                            progressedAt = Date.now();
+                        }
+                        if (wait && wait.progressCount > navigationWaitProgress) {
+                            navigationWaitProgress = wait.progressCount;
+                            progressedAt = Date.now();
+                        }
+                        if (Date.now() - progressedAt >= options.stallTimeoutMs) void this.stop('stall');
+                        last = now;
+                        return;
+                    }
+                    if (navigationPhaseActive) {
+                        // Do not turn navigation distance accumulated under its own detector into progress for the next phase.
+                        navigationPhaseActive = false;
+                        navigationWaitProgress = 0;
+                        last = now;
+                        progressedAt = Date.now();
+                        return;
+                    }
                     const moved = last.position && now.position && Math.hypot(...now.position.map((v, i) => v - last.position[i])) >= MIN_PROGRESS_DISTANCE;
                     if (moved || JSON.stringify(last.inventory) !== JSON.stringify(now.inventory)) {
                         last = now;
@@ -442,6 +467,12 @@ const MAX_FAST_ACTIONS_BEFORE_STOP = 5;
 const MAX_OUTPUT_LENGTH = 500;
 const MAX_RECOVERY_DEDUPE = 64;
 const MIN_PROGRESS_DISTANCE = 0.5;
+
+function currentOwnedWait(operation) {
+    let call = operation?.root;
+    while (call?.activeChild) call = call.activeChild;
+    return call?.activeWait ?? null;
+}
 
 function captureObservedProgress(bot) {
     if (!bot) return { position: null, inventory: null };
