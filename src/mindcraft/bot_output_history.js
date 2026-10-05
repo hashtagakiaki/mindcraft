@@ -16,12 +16,20 @@ function readHistoryRecord(line, agentName, filePath, lineNumber) {
     try { event = JSON.parse(line); }
     catch { return null; }
     if (!event || typeof event.at !== 'string' || !Number.isFinite(Date.parse(event.at))) return null;
+    if (event.type === 'model_message' && typeof event.text === 'string') {
+        return { kind: 'model', at: event.at, agentName, message: event.text,
+            id: event.taskId ? `${agentName}:${event.taskId}:message:${lineNumber}` : `${filePath}:${lineNumber}` };
+    }
     if (event.type === 'response_reported' && typeof event.response === 'string') {
-        return { at: event.at, agentName, message: event.response,
-            id: event.taskId ? `${agentName}:${event.taskId}` : `${filePath}:${lineNumber}` };
+        return { kind: 'reported', at: event.at, agentName, message: event.response,
+            id: event.taskId ? `${agentName}:${event.taskId}:reported` : `${filePath}:${lineNumber}` };
+    }
+    if (event.type === 'finished' && event.status === 'completed' && typeof event.response === 'string') {
+        return { kind: 'completed', at: event.at, agentName, message: event.response,
+            id: event.taskId ? `${agentName}:${event.taskId}:completed` : `${filePath}:${lineNumber}` };
     }
     if (event.type === 'finished' && event.status === 'error' && typeof event.error === 'string') {
-        return { at: event.at, agentName, message: `Codex task failed: ${event.error}`,
+        return { kind: 'error', at: event.at, agentName, message: `Codex task failed: ${event.error}`,
             id: event.taskId ? `${agentName}:${event.taskId}:error` : `${filePath}:${lineNumber}` };
     }
     return null;
@@ -77,12 +85,22 @@ export function readBotOutputHistory(runtimeDirectory, agentNames, limit = MAX_E
         catch { continue; }
         readBytes += file.size;
         let lineNumber = 0;
+        const fileRecords = [];
         for (const line of content.split('\n')) {
             lineNumber++;
             const result = readHistoryRecord(line, file.agentName, file.filePath, lineNumber);
-            if (!result || ids.has(result.id)) continue;
+            if (result) fileRecords.push(result);
+        }
+        const modelMessages = fileRecords.filter(record => record.kind === 'model');
+        const reported = fileRecords.filter(record => record.kind === 'reported');
+        const completed = fileRecords.filter(record => record.kind === 'completed');
+        const errors = fileRecords.filter(record => record.kind === 'error');
+        const chosen = [...(modelMessages.length ? modelMessages : reported.length ? reported : completed), ...errors];
+        for (const result of chosen) {
+            if (ids.has(result.id)) continue;
             ids.add(result.id);
-            results.push(result);
+            const { kind, ...entry } = result;
+            results.push(entry);
         }
     }
     results.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));

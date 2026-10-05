@@ -16,8 +16,9 @@ async function main() {
     await mkdir(oldHistory, { recursive: true })
     await mkdir(activeHistory, { recursive: true })
     await writeFile(path.join(oldHistory, `codex-${'1'.repeat(32)}.jsonl`), [
-      JSON.stringify({ at: '2026-01-01T00:00:00.000Z', taskId: 'old-task', type: 'response_reported', response: 'older answer' }),
-      JSON.stringify({ at: '2026-01-01T00:00:01.000Z', type: 'model_message', text: 'private reasoning' }),
+      JSON.stringify({ at: '2026-01-01T00:00:00.000Z', taskId: 'old-task', type: 'model_message', text: 'older answer' }),
+      JSON.stringify({ at: '2026-01-01T00:00:01.000Z', taskId: 'old-task', type: 'finished', status: 'completed', response: 'older answer' }),
+      JSON.stringify({ at: '2026-01-01T00:00:02.000Z', type: 'tool_call', code: 'secret code' }),
     ].join('\n'))
     await writeFile(path.join(activeHistory, `codex-${'2'.repeat(32)}.jsonl`), [
       JSON.stringify({ at: '2026-01-02T00:00:00.000Z', taskId: 'new-task', type: 'response_reported', response: 'newer answer' }),
