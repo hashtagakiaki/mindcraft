@@ -10,6 +10,7 @@ import { ActionManager } from './action_manager.js';
 import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
 import { createPlacesFacade } from './places.js';
+import { randomUUID } from 'node:crypto';
 import { SelfPrompter } from './self_prompter.js';
 import convoManager from './conversation.js';
 import { handleTranslation, handleEnglishTranslation } from '../utils/translator.js';
@@ -407,7 +408,7 @@ export class Agent {
             "Gamerule "
         ];
         
-        const respondFunc = async (username, message, recipients = null) => {
+        const respondFunc = async (username, message, recipients = null, metadata = {}, onAccepted = null) => {
             if (this._shutdownStarted) return;
             if (message === "") return;
             if (username === this.name) return;
@@ -427,12 +428,12 @@ export class Agent {
                 }
                 else {
                     if (preserveStopCommand) {
-                        await this.handleMessage(username, message, null, { recipients });
+                        await this.handleMessage(username, message, null, { recipients, ...metadata, onAccepted });
                         return;
                     }
                     let translation = await handleEnglishTranslation(message);
                     if (this._shutdownStarted || managementPausedAtReceipt || managementGeneration !== (this._managementGeneration || 0)) return;
-                    await this.handleMessage(username, translation, null, { recipients });
+                    await this.handleMessage(username, translation, null, { recipients, ...metadata, onAccepted });
                 }
             } catch (error) {
                 console.error('Error handling message:', error);
@@ -653,6 +654,12 @@ export class Agent {
 
     async handleMessage(source, message, max_responses=null, internalOptions={}) {
         if (this._shutdownStarted) return false;
+        let acceptedAcknowledged = false;
+        const acknowledgeAccepted = () => {
+            if (acceptedAcknowledged || !isHumanIntent || typeof internalOptions.onAccepted !== 'function') return;
+            acceptedAcknowledged = true;
+            internalOptions.onAccepted({ accepted: true, taskId: this.currentTaskId });
+        };
         const isHumanMessage = !!source && source !== 'system' && source !== this.name && !convoManager.isOtherAgent(source);
         const incomingCommand = isHumanMessage && typeof message === 'string' ? containsCommand(message) : null;
         const isUserStop = isHumanMessage && incomingCommand === '!stop';
@@ -689,6 +696,8 @@ export class Agent {
             return false;
         }
 
+        if (isHumanIntent) this.currentTaskId = internalOptions.taskId || randomUUID();
+
         let used_command = false;
         if (max_responses === null) {
             max_responses = settings.max_commands === -1 ? Infinity : settings.max_commands;
@@ -724,6 +733,7 @@ export class Agent {
                     this.routeResponse(source, `Command '${user_command_name}' does not exist.`);
                     return false;
                 }
+                acknowledgeAccepted();
                 this.routeResponse(source, `*${source} used ${user_command_name.substring(1)}*`);
                 if (user_command_name === '!newAction') {
                     // all user-initiated commands are ignored by the bot except for this one
@@ -786,7 +796,8 @@ export class Agent {
             if (!isCurrent()) return false;
             const runtime = new CodexRuntime(this);
             this.codexRuntime = runtime;
-            return runtime.run(source, isCurrent);
+            acknowledgeAccepted();
+            return runtime.run(source, isCurrent, this.currentTaskId);
         }
 
         if (!self_prompt && this.self_prompter.isActive()) // message is from user during self-prompting

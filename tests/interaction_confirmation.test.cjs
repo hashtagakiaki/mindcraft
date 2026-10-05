@@ -96,6 +96,7 @@ function emitBlock(bot, position, block) {
 async function main() {
   const fixture = path.resolve(process.argv[2])
   const skills = await import(pathToFileURL(path.join(fixture, 'src/agent/library/skills.js')))
+  const ownership = await import(pathToFileURL(path.join(fixture, 'src/agent/library/operation_context.js')))
 
   const waterPos = makePosition(1, 0, 0)
   const water = makeBlock('water', waterPos)
@@ -213,6 +214,53 @@ async function main() {
   const failedNonlethal = makeBot({ navigationDistance: 10 })
   assert.equal(await skills.attackEntity(failedNonlethal, target, false), false, 'nonlethal attack propagates navigation failure')
   assert.equal(failedNonlethal.attacked, undefined)
+
+  const chestBlock = makeBlock('chest', makePosition(1, 0, 0))
+  const makeChestTransfer = ({ direction, available, requested, moved = requested }) => {
+    const bot = makeBot({ items: direction === 'deposit' ? [{ name: 'oak_log', type: 1, count: available }] : [] })
+    bot.navigation.block = chestBlock
+    const slots = new Array(41).fill(null)
+    if (direction === 'deposit') slots[27] = { name: 'oak_log', type: 1, count: available }
+    else slots[0] = { name: 'oak_log', type: 1, count: available }
+    const window = {
+      slots, inventoryStart: 27, inventoryEnd: 41,
+      containerItems() { return slots.slice(0, 27).filter(Boolean) },
+      async deposit(type, _metadata, count) {
+        const amount = Math.min(moved, count)
+        slots[27].count -= amount
+        if (!slots[0]) slots[0] = { name: 'oak_log', type, count: 0 }
+        slots[0].count += amount
+      },
+      async withdraw(type, _metadata, count) {
+        const amount = Math.min(moved, count)
+        slots[0].count -= amount
+        if (!slots[27]) slots[27] = { name: 'oak_log', type, count: 0 }
+        slots[27].count += amount
+      },
+      async close() { window.closed = true }
+    }
+    bot.openContainer = async () => window
+    return { bot, window, requested }
+  }
+  const runChestAction = async (bot, action) => {
+    const manager = { intentEpoch: 4 }
+    const owner = ownership.createOperationContext({ id: 8, controller: { signal: new AbortController().signal } }, { bot }, manager, 'chest-task')
+    const result = await ownership.runOwnedOperation(owner, () => ownership.trackSkill('skills.chest', () => action())())
+    return { result, changes: ownership.operationResult(owner).confirmedChanges, uncertain: ownership.operationResult(owner).unconfirmedChanges }
+  }
+  const partialDeposit = makeChestTransfer({ direction: 'deposit', available: 4, requested: 4, moved: 2 })
+  const partialDepositResult = await runChestAction(partialDeposit.bot, () => skills.putInChest(partialDeposit.bot, 'oak_log', 4))
+  assert.equal(partialDepositResult.result, false, 'partial chest deposit is not full success')
+  assert.deepEqual(partialDepositResult.changes.map(change => [change.quantity, change.unit]), [[2, 'item']])
+  assert.equal(partialDepositResult.uncertain[0].requestedQuantity, 4)
+  assert.equal(partialDeposit.bot.inventoryUnconfirmed, true, 'ambiguous chest remainder preserves the existing action gate')
+  assert.equal(partialDeposit.window.closed, true)
+
+  const confirmedWithdraw = makeChestTransfer({ direction: 'withdraw', available: 5, requested: 3, moved: 3 })
+  const confirmedWithdrawResult = await runChestAction(confirmedWithdraw.bot, () => skills.takeFromChest(confirmedWithdraw.bot, 'oak_log', 3))
+  assert.equal(confirmedWithdrawResult.result, true)
+  assert.deepEqual(confirmedWithdrawResult.changes.map(change => change.quantity), [3])
+  assert.equal(confirmedWithdraw.window.closed, true)
 
   console.log('interaction confirmation tests passed')
 }

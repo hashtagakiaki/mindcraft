@@ -5,7 +5,7 @@
 const assert = require('node:assert/strict')
 const { EventEmitter } = require('node:events')
 const { spawn } = require('node:child_process')
-const { mkdtemp, readFile, rm, symlink, writeFile } = require('node:fs/promises')
+const { mkdtemp, mkdir, readFile, rm, symlink, writeFile } = require('node:fs/promises')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
@@ -158,6 +158,8 @@ async function experimentActionManager() {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'mc-shutdown-action-'))
   tempDirs.add(dir)
   await writeFile(path.join(dir, 'package.json'), '{"type":"module"}')
+  await mkdir(path.join(dir, 'library'), { recursive: true })
+  await writeFile(path.join(dir, 'library/operation_context.js'), await readFile(path.join(root, 'src/agent/library/operation_context.js')))
   await writeFile(path.join(dir, 'action_manager.js'), await readFile(path.join(root, 'src/agent/action_manager.js')))
   const { ActionManager } = await import(pathToFileURL(path.join(dir, 'action_manager.js')))
   const savedLog = console.log
@@ -250,6 +252,7 @@ async function experimentCraftFence() {
   await writeFile(path.join(dir, 'package.json'), '{"type":"module"}')
   const localModule = path.join(dir, 'crafting_sync.js')
   await writeFile(localModule, await readFile(path.join(root, 'src/agent/library/crafting_sync.js')))
+  await writeFile(path.join(dir, 'operation_context.js'), await readFile(path.join(root, 'src/agent/library/operation_context.js')))
   const { default: craftingSync } = await import(pathToFileURL(localModule))
   const { run } = craftingSync
   const makeBot = sendSnapshot => {

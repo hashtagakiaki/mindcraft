@@ -370,6 +370,7 @@ async function runCoderPrompterFixtures(sandbox) {
     const coderStubs = {
       'stubs/lockdown.js': `export function lockdown() {} export function makeCompartment() { return { evaluate() { return async () => { globalThis.fixtureExecCount++; }; } }; }`,
       'stubs/skills.js': 'export function unused() {}',
+      'library/operation_context.js': await readFile(path.resolve(previousCwd, 'src/agent/library/operation_context.js'), 'utf8'),
       'stubs/world.js': 'export function unused() {}',
       'stubs/vec3.js': 'export class Vec3 {}',
       'stubs/eslint.js': 'export class ESLint { async lintText() { return []; } }'

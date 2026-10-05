@@ -49,7 +49,7 @@ async function main() {
       agent.bot = Object.assign(new EventEmitter(), { output: '', interrupt_code: false, entity: { position: { x: 0, y: 64, z: 0 } }, inventory: { items: () => [] }, modes: { pause() {}, unpause() {}, flushBehaviorLog: () => '' } })
       agent.clearBotLogs = () => { agent.bot.output = ''; agent.bot.interrupt_code = false }
       agent.requestInterrupt = () => { agent.bot.interrupt_code = true; agent.interrupt?.() }
-      agent.prompter = { profile: { model: 'codex/gpt-6-luna' }, skill_libary: { getAllSkillDocs: async () => [] }, withBotRules: async text => { rules.push(text); return text + '\nCURRENT RULES' } }
+      agent.prompter = { profile: { model: 'codex/gpt-6-luna' }, skill_libary: { getAllSkillDocs: async () => ['skills.wait\nWait for a bounded number of milliseconds.'] }, withBotRules: async text => { rules.push(text); return text + '\nCURRENT RULES' } }
       agent.history = { memory: 'vision used to be unavailable', getHistory: () => [{ role: 'user', content: 'test' }], add: async (...args) => rows.push(args), save: async () => {} }
       agent.routeResponse = (source, text) => routed.push(text)
       agent.self_prompter = { stopForRecovery() {}, isActive: () => false, shouldInterrupt: () => false }
@@ -62,6 +62,18 @@ async function main() {
     const result = await agent.actions.runAction('compound', () => agent.coder.executeCode('log(bot, "first");\nawait Promise.resolve();\nlog(bot, "second");'), { timeout: 0, outputLimit: 16000 })
     assert.equal(result.success, true)
     assert.match(result.message, /first[\s\S]*second/)
+    const domainFalse = await agent.actions.runAction('domain-false', async () => false, { timeout: 0 })
+    assert.equal(domainFalse.success, true, 'executor success remains independent of a false domain return')
+    assert.equal(domainFalse.domainReturn, false)
+    assert.equal(domainFalse.executionStatus, 'completed')
+    const lateOutput = await agent.actions.runAction('unawaited-sdk-child', () => agent.coder.executeCode(
+      'skills.wait(bot, 80).then(() => log(bot, "late child completed")).catch(() => {});\nawait Promise.resolve();'), { timeout: 0 })
+    assert.equal(lateOutput.success, true)
+    assert.match(lateOutput.message, /late child completed/, 'ActionManager settlement includes the unawaited SDK child output')
+    const settledOutput = agent.bot.output
+    await delay(130)
+    assert.equal(agent.actions.executing, false)
+    assert.equal(agent.bot.output, settledOutput, 'no late output mutates state after action settlement')
     const bad = await agent.actions.runAction('lint', () => agent.coder.executeCode('await skills.nonexistent(bot);'), { timeout: 0 })
     assert.equal(bad.success, false)
     assert.match(bad.message, /functions do not exist/)
@@ -113,8 +125,33 @@ async function main() {
     assert.ok(rules.length >= 3, 'shared rules are reread before resumed model judgment')
     const mainAgent = makeAgent('MainPath')
     await until(() => mainAgent.coder.code_template && mainAgent.coder.code_lint_template)
-    assert.equal(await mainAgent.handleMessage('operator', 'do the fixture task'), true)
+    let acknowledgement
+    assert.equal(await mainAgent.handleMessage('operator', 'do the fixture task', null,
+      { taskId: 'eval-task-1', onAccepted: value => { acknowledgement = value } }), true)
     assert.ok(mainAgent.codexRuntime, 'actual Agent.handleMessage uses the native runtime')
+    assert.deepEqual(acknowledgement, { accepted: true, taskId: 'eval-task-1' })
+    assert.equal(mainAgent.codexRuntime.taskId, 'eval-task-1')
+    const traceFiles = await fs.readdir(path.join(root, 'bots/MainPath/histories'))
+    const taskEvents = (await fs.readFile(path.join(root, 'bots/MainPath/histories', traceFiles[0]), 'utf8'))
+      .trim().split('\n').map(line => JSON.parse(line))
+    assert.equal(taskEvents.filter(event => event.type === 'task_accepted').length, 1)
+    assert.equal(taskEvents.filter(event => event.type === 'finished').length, 1)
+    assert.ok(taskEvents.every(event => event.taskId === 'eval-task-1'), 'accepted task ID reaches every task event')
+    const saveFailureAgent = makeAgent('SaveFailure')
+    await until(() => saveFailureAgent.coder.code_template && saveFailureAgent.coder.code_lint_template)
+    saveFailureAgent.history.save = async () => { throw new Error('fixture save failure') }
+    const saveFailureRuntime = new CodexRuntime(saveFailureAgent, { makeSession: () => ({
+      open: async () => {}, runTurn: async () => ({ operation: null, messages: ['I completed the request.'] }), close: async () => {}
+    }) })
+    saveFailureAgent.codexRuntime = saveFailureRuntime
+    assert.equal(await saveFailureRuntime.run('operator', () => true, 'save-failure-task'), false)
+    const saveFailureFiles = await fs.readdir(path.join(root, 'bots/SaveFailure/histories'))
+    const saveFailureEvents = (await fs.readFile(path.join(root, 'bots/SaveFailure/histories', saveFailureFiles[0]), 'utf8'))
+      .trim().split('\n').map(line => JSON.parse(line))
+    const saveFailureTerminals = saveFailureEvents.filter(event => event.type === 'finished')
+    assert.equal(saveFailureTerminals.length, 1, 'save failure still emits one terminal event')
+    assert.equal(saveFailureTerminals[0].completion, 'reported')
+    assert.equal(saveFailureTerminals[0].saveSucceeded, false)
     assert.equal(await mainAgent.handleMessage('operator', '!stop'), true)
     assert.equal(mainAgent.actions.userStopped, true, 'literal Stop remains available')
     // Rule contents can change between turns; never freeze an old snapshot in baseInstructions.
@@ -155,7 +192,7 @@ async function main() {
       assert.equal(closed, true)
       assert.equal(testAgent.actions.executing, false)
     }
-    console.log('codex session fixtures passed: compound/lint/partial/stall/owned transport/pause/resume/cancellation')
+    console.log('codex session fixtures passed: compound/lint/false domain result/unawaited SDK drain/partial/stall/owned transport/pause/resume/cancellation')
   } finally {
     process.chdir(oldCwd)
     if (oldBin === undefined) delete process.env.MINDCRAFT_CODEX_BIN; else process.env.MINDCRAFT_CODEX_BIN = oldBin

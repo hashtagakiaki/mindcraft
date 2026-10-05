@@ -20,10 +20,12 @@ async function setupFarmFixture(root) {
   await write(root, 'package.json', '{"type":"module"}')
   await write(root, 'settings.js', 'export default { block_place_delay: 0 };')
   await write(root, 'src/agent/library/skills.js', await readFile(path.join(repo, 'src/agent/library/skills.js')))
+  await write(root, 'src/agent/library/operation_context.js', await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
   await write(root, 'src/agent/library/mining_sync.js', await readFile(path.join(repo, 'src/agent/library/mining_sync.js')))
   await write(root, 'src/agent/library/crafting_sync.js', await readFile(path.join(repo, 'src/agent/library/crafting_sync.js')))
   await write(root, 'src/agent/library/index.js', await readFile(path.join(repo, 'src/agent/library/index.js')))
   await write(root, 'src/agent/library/skill_library.js', await readFile(path.join(repo, 'src/agent/library/skill_library.js')))
+  await write(root, 'src/agent/library/sdk_capabilities.js', await readFile(path.join(repo, 'src/agent/library/sdk_capabilities.js')))
   await write(root, 'src/agent/modes.js', await readFile(path.join(repo, 'src/agent/modes.js')))
   await write(root, 'src/agent/settings.js', 'export default {};')
   await write(root, 'src/agent/conversation.js', 'export default {};')
@@ -64,6 +66,8 @@ async function setupNavigationFixture(root) {
   await write(root, 'package.json', '{"type":"module"}')
   await write(root, 'settings.js', 'export default { block_place_delay: 0 };')
   await write(root, 'src/agent/library/skills.js', await readFile(path.join(repo, 'src/agent/library/skills.js')))
+  await write(root, 'src/agent/library/operation_context.js', await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
+  await write(root, 'src/agent/library/operation_context.js', await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
   await write(root, 'src/agent/library/crafting_sync.js', await readFile(path.join(repo, 'src/agent/library/crafting_sync.js')))
   await write(root, 'src/utils/mcdata.js', 'export function mustCollectManually(name) { return name === "wheat"; } export function getBlockId() { return 1; }')
   await write(root, 'src/agent/library/world.js', `
@@ -494,6 +498,11 @@ async function testFarm(root) {
   assert.ok(alwaysDocs.includes('vision.lookAtPlayer'))
   assert.ok(alwaysDocs.includes('vision.lookAtPosition'))
   const farmDoc = library.skill_docs.find(doc => doc.startsWith('skills.tendNearbyFarm\n'))
+  const fallbackAllDocs = await library.getRelevantSkillDocs('tend the farm', -1)
+  assert.ok(fallbackAllDocs.includes(farmDoc), 'null embedding all-doc selection uses the docs themselves')
+  library.skill_docs_embeddings = { [farmDoc]: [1] } // partial embedding map left by a failed embed operation
+  const fallbackFarmDocs = await library.getRelevantSkillDocs('connected farmland harvest mature crops replant empty soil store produce', 1)
+  assert.ok(fallbackFarmDocs.includes(farmDoc), 'null embedding fallback always scores full docs, even with partial vectors')
   library.skill_docs_embeddings = { [farmDoc]: [1] }
   library.embedding_model = { async embed() { return [1] } }
   assert.ok((await library.getRelevantSkillDocs('tend the farm', 1)).includes(farmDoc), 'farm docs remain selectable')
@@ -511,6 +520,7 @@ async function main() {
   execFileSync(node, [path.join(__dirname, 'place_actions.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'place_agent.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'action_manager.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'operation_context.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'idle_scheduling.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'generation_cancellation.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'furnace_lifecycle.test.cjs')], { stdio: 'inherit' })
@@ -523,6 +533,7 @@ async function main() {
   try {
     const helper = path.join(temp, 'crafting_sync.js')
     await writeFile(helper, await readFile(path.join(repo, 'src/agent/library/crafting_sync.js')))
+    await writeFile(path.join(temp, 'operation_context.js'), await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
     await write(temp, 'node_modules/prismarine-item/package.json', '{"main":"index.js"}')
     await write(temp, 'node_modules/prismarine-item/index.js', 'module.exports = () => class Item { static toNotch(item) { return item ? { type: item.type, count: item.count, metadata: item.metadata } : null } static fromNotch(item) { return item ? { ...item, stackSize: 64 } : null } };')
     execFileSync(node, [path.join(__dirname, 'crafting_sync.test.cjs'), helper], { stdio: 'inherit' })

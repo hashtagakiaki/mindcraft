@@ -256,9 +256,28 @@ export function createMindServer(host_public = false, port = 8080) {
                 }));
                 const addressed = parseAddressedMessage(data.message, agents);
                 const recipients = addressed?.recipients || resolveMessageTargets(targets, agents);
-                const payload = { from: data.from, message: addressed?.message || data.message, recipients };
-                for (const name of recipients) agent_connections[name].socket.emit('send-message', payload);
-                if (typeof callback === 'function') callback({ success: true, recipients });
+                const payload = { from: data.from, message: addressed?.message || data.message, recipients, taskId: data.taskId ?? null };
+                if (data.taskId && typeof callback === 'function') {
+                    let settled = false;
+                    const timer = setTimeout(() => {
+                        if (settled) return;
+                        settled = true;
+                        callback({ success: false, taskId: data.taskId, error: 'task acceptance acknowledgement timed out' });
+                    }, 5000);
+                    for (const name of recipients) {
+                        agent_connections[name].socket.emit('send-message', payload, acknowledgement => {
+                            if (settled) return;
+                            clearTimeout(timer);
+                            settled = true;
+                            if (acknowledgement?.accepted && acknowledgement.taskId === data.taskId)
+                                callback({ success: true, recipients, taskId: data.taskId });
+                            else callback({ success: false, taskId: data.taskId, error: acknowledgement?.error || 'agent did not accept task' });
+                        });
+                    }
+                } else {
+                    for (const name of recipients) agent_connections[name].socket.emit('send-message', payload);
+                    if (typeof callback === 'function') callback({ success: true, recipients });
+                }
             } catch (error) {
                 if (typeof callback === 'function') callback({ success: false, error: error.message });
                 else console.warn('Cannot send message:', error.message);

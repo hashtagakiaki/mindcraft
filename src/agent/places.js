@@ -1,6 +1,7 @@
 import { createPlaceActions } from './place_actions.js';
 import settings from './settings.js';
 import { Vec3 } from 'vec3';
+import { trackSkill } from './library/operation_context.js';
 
 const EMPTY_CONTEXT = 'No place has been selected in this session.';
 const MAX_PLACE_SEARCH_RESULTS = 20;
@@ -49,7 +50,7 @@ export function createPlacesFacade(agent, client) {
 		if (!enabled()) throw new Error('Persistent place memory is disabled; use the session bookmark commands instead.');
 	};
 	const actions = createPlaceActions(agent, client);
-	const sdk = Object.freeze({
+	const methods = {
 		find: async (text, options = {}) => {
 			requireEnabled();
 			const bot = agent.bot;
@@ -212,7 +213,8 @@ export function createPlacesFacade(agent, client) {
 			selected = result;
 			return actions.tendFarm(farmId, options);
 		}
-	});
+	};
+	const sdk = Object.freeze(Object.fromEntries(Object.entries(methods).map(([name, method]) => [name, trackSkill(`places.${name}`, method)])));
 	return Object.freeze({
 		sdk,
 		isEnabled: enabled,

@@ -1,4 +1,5 @@
 import * as skills from '../library/skills.js';
+import { operationFactsSummary } from '../library/operation_context.js';
 import settings from '../settings.js';
 import convoManager from '../conversation.js';
 
@@ -17,9 +18,11 @@ function runAsAction (actionFn, resume = false, timeout = -1) {
             await actionFn(agent, ...args);
         };
         const code_return = await agent.actions.runAction(`action:${actionLabel}`, actionFnWithAgent, { timeout, resume });
-        if (code_return.interrupted && !code_return.timedout)
-            return;
-        return code_return.message;
+        if (code_return.interrupted && !code_return.timedout) {
+            const facts = operationFactsSummary(code_return);
+            return facts || undefined;
+        }
+        return `${code_return.message || ''}${operationFactsSummary(code_return)}`;
     }
 
     return wrappedAction;
@@ -46,8 +49,8 @@ export const actionsList = [
                     result = 'Error generating code: ' + e.toString();
                 }
             };
-            await agent.actions.runAction('action:newAction', actionFn, {timeout: settings.code_timeout_mins});
-            return result;
+            const actionResult = await agent.actions.runAction('action:newAction', actionFn, {timeout: settings.code_timeout_mins});
+            return `${result}${operationFactsSummary(actionResult)}`;
         }
     },
     {

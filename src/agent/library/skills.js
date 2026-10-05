@@ -5,6 +5,7 @@ import Vec3 from 'vec3';
 import { createRequire } from 'node:module';
 import settings from "../../../settings.js";
 import craftingSync from "./crafting_sync.js";
+import { trackSkill, recordConfirmation, recordUncertainty, operationContext, withSkillPhase, registerOwnedPromise } from './operation_context.js';
 
 const require = createRequire(import.meta.url);
 
@@ -31,15 +32,27 @@ const CROPS = {
 };
 
 export function log(bot, message) {
+    const owner = operationContext();
+    if (owner?.closed) { owner.diagnostics.push({ kind: 'late_output', message: String(message) }); return; }
     bot.output += message + '\n';
 }
 
 function getActionContext(bot, context) {
-    return context || bot.getActionCancellationContext?.() || null;
+    return context || operationContext()?.cancellation || bot.getActionCancellationContext?.() || null;
 }
 
 function isActionCancelled(bot, context) {
     return !!bot.interrupt_code || !!context?.signal?.aborted;
+}
+
+function countWindowItems(slots, start, end, itemName) {
+    let count = 0;
+    for (let slot = start; slot < end; slot++) if (slots[slot]?.name === itemName) count += slots[slot].count;
+    return count;
+}
+
+function countWindowRegion(window, start, end, itemName) {
+    return countWindowItems(window.slots, start, end, itemName);
 }
 
 function setActionPhase(context, phase) {
@@ -336,7 +349,7 @@ export async function craftRecipe(bot, itemName, num=1) {
             let hasTable = world.getInventoryCounts(bot)['crafting_table'] > 0;
             if (hasTable) {
                 let pos = world.getNearestFreeSpace(bot, 1, 6);
-                await placeBlock(bot, 'crafting_table', pos.x, pos.y, pos.z);
+                await withSkillPhase('preparation', () => placeBlock(bot, 'crafting_table', pos.x, pos.y, pos.z));
                 craftingTable = world.getNearestBlock(bot, 'crafting_table', craftingTableRange);
                 if (craftingTable) {
                     recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, craftingTable);
@@ -355,7 +368,7 @@ export async function craftRecipe(bot, itemName, num=1) {
     if (!recipes || recipes.length === 0) {
         log(bot, `You do not have the resources to craft a ${itemName}. It requires: ${Object.entries(mc.getItemCraftingRecipes(itemName)[0][0]).map(([key, value]) => `${key}: ${value}`).join(', ')}.`);
         if (placedTable) {
-            await collectBlock(bot, 'crafting_table', 1);
+            await withSkillPhase('cleanup', () => collectBlock(bot, 'crafting_table', 1));
         }
         return false;
     }
@@ -375,12 +388,12 @@ export async function craftRecipe(bot, itemName, num=1) {
     if(craftedCount<num) log(bot, `Not enough ${craftLimit.limitingResource} to craft ${num}, crafted ${craftedCount}. You now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
     else log(bot, `Successfully crafted ${itemName}, you now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
     if (placedTable) {
-        await collectBlock(bot, 'crafting_table', 1);
+        await withSkillPhase('cleanup', () => collectBlock(bot, 'crafting_table', 1));
     }
 
     //Equip any armor the bot may have crafted.
     //There is probablly a more efficient method than checking the entire inventory but this is all mineflayer-armor-manager provides. :P
-    bot.armorManager.equipAll(); 
+    await bot.armorManager.equipAll();
 
     return craftedCount > 0;
     });
@@ -995,8 +1008,11 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                 success = await collectionTracker.wait(HARVEST_CONFIRM_TIMEOUT_MS);
                 if (!success) log(bot, `Mined ${block.name}, but its target drop pickup or server block-air update was not confirmed.`);
             }
-            if (success)
+            if (success) {
+                recordConfirmation({ phase: 'collect', quantity: 1, unit: 'block', target: { name: block.name, position: { x: block.position.x, y: block.position.y, z: block.position.z } },
+                    evidence: isLiquid ? 'bucket inventory confirmation' : 'server block-air update and matching playerCollect' });
                 collected++;
+            } else recordUncertainty({ requestedQuantity: 1, confirmedQuantity: null, unit: 'block', target: block.name, reason: 'block/drop collection not confirmed; resulting quantity is unknown' });
             await autoLight(bot);
         }
         catch (err) {
@@ -1392,10 +1408,36 @@ export async function putInChest(bot, itemName, num=-1) {
     }
     let to_put = num === -1 ? item.count : Math.min(num, item.count);
     if (!await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2)) return false;
+    const context = getActionContext(bot);
+    if (isActionCancelled(bot, context)) return false;
     const chestContainer = await bot.openContainer(chest);
-    await chestContainer.deposit(item.type, null, to_put);
-    await chestContainer.close();
-    log(bot, `Successfully put ${to_put} ${itemName} in the chest.`);
+    const containerBefore = countWindowRegion(chestContainer, 0, chestContainer.inventoryStart, itemName);
+    const inventoryBefore = countWindowRegion(chestContainer, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName);
+    let transferError = null;
+    let closeError = null;
+    try {
+        if (!isActionCancelled(bot, context)) await chestContainer.deposit(item.type, null, to_put);
+    } catch (error) { transferError = error; }
+    finally {
+        try { await chestContainer.close(); }
+        catch (error) { closeError = error; bot.inventoryUnconfirmed = true; }
+    }
+    const containerDelta = countWindowRegion(chestContainer, 0, chestContainer.inventoryStart, itemName) - containerBefore;
+    const inventoryDelta = inventoryBefore - countWindowRegion(chestContainer, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName);
+    const confirmed = Math.max(0, Math.min(containerDelta, inventoryDelta));
+    if (confirmed > 0) recordConfirmation({ phase: 'chest-deposit', quantity: confirmed, unit: 'item', target: { itemName, chest: { x: chest.position.x, y: chest.position.y, z: chest.position.z } },
+        evidence: 'matching chest and player-inventory slot deltas after acknowledged container transfer' });
+    if (confirmed < to_put) recordUncertainty({ requestedQuantity: to_put, confirmedQuantity: confirmed || null, unit: 'item', target: itemName,
+        reason: 'container transfer did not confirm the full matching slot delta' });
+    if (containerDelta !== inventoryDelta || confirmed < to_put) bot.inventoryUnconfirmed = true;
+    if (transferError) throw transferError;
+    if (closeError) throw closeError;
+    if (isActionCancelled(bot, context)) return false;
+    if (confirmed !== to_put) {
+        log(bot, `Chest transfer was only partially confirmed: ${confirmed}/${to_put} ${itemName}; inventory actions are gated until state is confirmed.`);
+        return false;
+    }
+    log(bot, `Successfully put ${confirmed} ${itemName} in the chest.`);
     return true;
 }
 
@@ -1415,13 +1457,16 @@ export async function takeFromChest(bot, itemName, num=-1) {
         return false;
     }
     if (!await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2)) return false;
+    const context = getActionContext(bot);
+    if (isActionCancelled(bot, context)) return false;
     const chestContainer = await bot.openContainer(chest);
     
     // Find all matching items in the chest
     let matchingItems = chestContainer.containerItems().filter(item => item.name === itemName);
     if (matchingItems.length === 0) {
         log(bot, `Could not find any ${itemName} in the chest.`);
-        await chestContainer.close();
+        try { await chestContainer.close(); }
+        catch (error) { bot.inventoryUnconfirmed = true; throw error; }
         return false;
     }
     
@@ -1432,15 +1477,40 @@ export async function takeFromChest(bot, itemName, num=-1) {
     // Take items from each slot until we've taken enough or run out
     for (const item of matchingItems) {
         if (remaining <= 0) break;
+        if (isActionCancelled(bot, context)) break;
         
         let toTakeFromSlot = Math.min(remaining, item.count);
-        await chestContainer.withdraw(item.type, null, toTakeFromSlot);
-        
-        totalTaken += toTakeFromSlot;
-        remaining -= toTakeFromSlot;
+        const containerBefore = countWindowRegion(chestContainer, 0, chestContainer.inventoryStart, itemName);
+        const inventoryBefore = countWindowRegion(chestContainer, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName);
+        try { await chestContainer.withdraw(item.type, null, toTakeFromSlot); }
+        catch (error) {
+            try { await chestContainer.close(); } catch { bot.inventoryUnconfirmed = true; }
+            const containerDelta = containerBefore - countWindowRegion(chestContainer, 0, chestContainer.inventoryStart, itemName);
+            const inventoryDelta = countWindowRegion(chestContainer, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName) - inventoryBefore;
+            const confirmed = Math.max(0, Math.min(containerDelta, inventoryDelta));
+            if (confirmed > 0) recordConfirmation({ phase: 'chest-withdraw', quantity: confirmed, unit: 'item', target: { itemName, chest: { x: chest.position.x, y: chest.position.y, z: chest.position.z } },
+                evidence: 'matching chest and player-inventory slot deltas observed before transfer error' });
+            recordUncertainty({ requestedQuantity: toTakeFromSlot, confirmedQuantity: confirmed || null, unit: 'item', target: itemName,
+                reason: `container transfer threw: ${String(error)}` });
+            bot.inventoryUnconfirmed = true;
+            throw error;
+        }
+        const containerDelta = containerBefore - countWindowRegion(chestContainer, 0, chestContainer.inventoryStart, itemName);
+        const inventoryDelta = countWindowRegion(chestContainer, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName) - inventoryBefore;
+        const confirmed = Math.max(0, Math.min(containerDelta, inventoryDelta));
+        if (confirmed > 0) recordConfirmation({ phase: 'chest-withdraw', quantity: confirmed, unit: 'item', target: { itemName, chest: { x: chest.position.x, y: chest.position.y, z: chest.position.z } },
+            evidence: 'matching chest and player-inventory slot deltas after acknowledged container transfer' });
+        if (confirmed < toTakeFromSlot) recordUncertainty({ requestedQuantity: toTakeFromSlot, confirmedQuantity: confirmed || null, unit: 'item', target: itemName,
+            reason: 'container transfer did not confirm the full matching slot delta' });
+        if (containerDelta !== inventoryDelta || confirmed < toTakeFromSlot) bot.inventoryUnconfirmed = true;
+        totalTaken += confirmed;
+        remaining -= confirmed;
+        if (containerDelta !== inventoryDelta || confirmed < toTakeFromSlot) break;
     }
     
-    await chestContainer.close();
+    try { await chestContainer.close(); }
+    catch (error) { bot.inventoryUnconfirmed = true; throw error; }
+    if (isActionCancelled(bot, context)) return totalTaken > 0;
     log(bot, `Successfully took ${totalTaken} ${itemName} from the chest.`);
     return totalTaken > 0;
 }
@@ -1679,7 +1749,7 @@ function startDoorInterval(bot) {
                      block.name.includes('fence_gate') ||
                      block.name.includes('trapdoor'))) 
                 {
-                    bot.activateBlock(block);
+                    registerOwnedPromise(bot.activateBlock(block)).catch(error => log(bot, `Door activation failed: ${error.message}`));
                     break;
                 }
             }
@@ -2897,3 +2967,44 @@ export async function tendNearbyFarm(bot, options = {}) {
     log(bot, `Farm cycle complete: ${JSON.stringify(result)}. Call skills.tendNearbyFarm again to repeat.`);
     return result;
 }
+
+// Replace exported bindings so internal delegation and direct command callers share ownership.
+craftRecipe = trackSkill("skills.craftRecipe", craftRecipe);
+wait = trackSkill("skills.wait", wait);
+smeltItem = trackSkill("skills.smeltItem", smeltItem);
+clearNearestFurnace = trackSkill("skills.clearNearestFurnace", clearNearestFurnace);
+attackNearest = trackSkill("skills.attackNearest", attackNearest);
+attackEntity = trackSkill("skills.attackEntity", attackEntity);
+defendSelf = trackSkill("skills.defendSelf", defendSelf);
+collectBlock = trackSkill("skills.collectBlock", collectBlock);
+pickupNearbyItems = trackSkill("skills.pickupNearbyItems", pickupNearbyItems);
+breakBlockAt = trackSkill("skills.breakBlockAt", breakBlockAt);
+placeBlock = trackSkill("skills.placeBlock", placeBlock);
+equip = trackSkill("skills.equip", equip);
+discard = trackSkill("skills.discard", discard);
+putInChest = trackSkill("skills.putInChest", putInChest);
+takeFromChest = trackSkill("skills.takeFromChest", takeFromChest);
+viewChest = trackSkill("skills.viewChest", viewChest);
+consume = trackSkill("skills.consume", consume);
+giveToPlayer = trackSkill("skills.giveToPlayer", giveToPlayer);
+goToGoal = trackSkill("skills.goToGoal", goToGoal);
+goToPosition = trackSkill("skills.goToPosition", goToPosition);
+goToNearestBlock = trackSkill("skills.goToNearestBlock", goToNearestBlock);
+goToNearestEntity = trackSkill("skills.goToNearestEntity", goToNearestEntity);
+goToPlayer = trackSkill("skills.goToPlayer", goToPlayer);
+followPlayer = trackSkill("skills.followPlayer", followPlayer);
+moveAway = trackSkill("skills.moveAway", moveAway);
+moveAwayFromEntity = trackSkill("skills.moveAwayFromEntity", moveAwayFromEntity);
+avoidEnemies = trackSkill("skills.avoidEnemies", avoidEnemies);
+stay = trackSkill("skills.stay", stay);
+useDoor = trackSkill("skills.useDoor", useDoor);
+goToBed = trackSkill("skills.goToBed", goToBed);
+tillAndSow = trackSkill("skills.tillAndSow", tillAndSow);
+activateNearestBlock = trackSkill("skills.activateNearestBlock", activateNearestBlock);
+showVillagerTrades = trackSkill("skills.showVillagerTrades", showVillagerTrades);
+tradeWithVillager = trackSkill("skills.tradeWithVillager", tradeWithVillager);
+digDown = trackSkill("skills.digDown", digDown);
+goToSurface = trackSkill("skills.goToSurface", goToSurface);
+useToolOn = trackSkill("skills.useToolOn", useToolOn);
+useToolOnBlock = trackSkill("skills.useToolOnBlock", useToolOnBlock);
+tendNearbyFarm = trackSkill("skills.tendNearbyFarm", tendNearbyFarm);

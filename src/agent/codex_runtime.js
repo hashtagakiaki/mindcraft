@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { CodexSession } from '../process/codex_session.js';
 import settings from './settings.js';
 
-const DEFAULTS = { stall_timeout_ms: 30000, action_timeout_ms: 120000, output_limit: 16000, max_search_radius: 64 };
+const DEFAULTS = { stall_timeout_ms: 30000, action_timeout_ms: 120000, output_limit: 16000, max_search_radius: 64,
+    task_budget_ms: 300000, max_operations: 24, max_turns: 30 };
 
 export function validateCodexRuntime(profile) {
     if (settings.agent_runtime !== 'codex-session') return null;
@@ -13,6 +14,7 @@ export function validateCodexRuntime(profile) {
     if (selected.api !== 'codex' || !selected.model) throw new Error('codex-session requires an explicit codex/model profile');
     const config = { ...DEFAULTS, ...settings.codex_session };
     for (const [key, value] of Object.entries(config)) if (!Number.isFinite(value) || value <= 0) throw new Error(`Invalid codex_session.${key}`);
+    for (const key of ['max_operations', 'max_turns']) if (!Number.isInteger(config[key])) throw new Error(`Invalid codex_session.${key}`);
     return { model: selected.model, effort: selected.params?.reasoning_effort ?? 'medium', config };
 }
 
@@ -39,29 +41,57 @@ export class CodexRuntime {
         return this.session?.close() ?? Promise.resolve();
     }
 
-    async run(source, isCurrent) {
+    async run(source, isCurrent, taskId = randomUUID()) {
         const agent = this.agent;
+        this.taskId = taskId;
         const { config, model, effort } = this.selection;
         this.active = true;
+        const acceptedAt = Date.now();
+        let operationCount = 0;
+        let turnCount = 0;
+        let budgetReason = null;
+        let completion = 'unknown';
+        let saveSucceeded = null;
         const current = () => !this.abort.signal.aborted && isCurrent() && !agent.actions.userStopped;
         mkdirSync(`./bots/${agent.name}/histories`, { recursive: true });
         const file = `./bots/${agent.name}/histories/codex-${randomUUID()}.jsonl`;
-        const record = (type, detail = {}) => appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), type, ...detail }) + '\n');
+        let terminalWritten = false;
+        const record = (type, detail = {}) => appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), taskId, type, ...detail }) + '\n');
+        const finish = detail => {
+            if (terminalWritten) return;
+            terminalWritten = true;
+            record('finished', { ...detail, terminationReason: detail.terminationReason || budgetReason || null,
+                taskBudget: { elapsedMs: Date.now() - acceptedAt, acceptedOperations: operationCount, threadTurns: turnCount } });
+        };
+        const reachBudget = reason => {
+            if (budgetReason) return;
+            budgetReason = reason;
+            this.abort.abort(`task-budget:${reason}`);
+            if (agent.actions.currentAction) void agent.actions.stop(`task-budget:${reason}`);
+        };
+        const elapsedBudget = setTimeout(() => reachBudget('elapsed-time'), config.task_budget_ms);
         const execute = async code => {
             if (!current()) throw new Error('Stale task');
+            if (operationCount >= config.max_operations) {
+                reachBudget('accepted-operations');
+                throw new Error('Task operation budget reached');
+            }
+            operationCount++;
             record('operation_start', { code });
             const result = await agent.actions.runAction('action:codex-code', () => {
                 if (!current()) throw new Error('Stale task');
                 this.actionId = agent.actions.currentAction?.id;
                 return agent.coder.executeCode(code);
-            }, { timeout: config.action_timeout_ms / 60000, stallTimeoutMs: config.stall_timeout_ms, outputLimit: config.output_limit });
+            }, { timeout: config.action_timeout_ms / 60000, stallTimeoutMs: config.stall_timeout_ms, outputLimit: config.output_limit, taskId });
             const observed = { ...result, observed: observedState(agent.bot) };
             record('operation_result', { result: observed });
             return observed;
         };
         let failed = false;
+        let terminalDetail = null;
         try {
             const docs = (await agent.prompter.skill_libary.getAllSkillDocs()).join('\n\n');
+            record('task_accepted', { source });
             const instructions = [
                 'You control a Minecraft bot. Complete the entire current operator request. Observe, act, interpret actual results, repair failures and verify the goal before reporting.',
                 'Use only minecraft_execute with JavaScript using bot, skills, world, places, vision, log(bot, message), Vec3. Await asynchronous skills. You may combine multiple skills, loops and conditions in one call.',
@@ -81,9 +111,14 @@ export class CodexRuntime {
             let input = 'Current conversation and older memory (current request is the final conversation entry):\n' + JSON.stringify({ memory: agent.history.memory, turns: agent.history.getHistory(), observed: observedState(agent.bot) });
             record('task_start', { instructions, input });
             while (current()) {
+                if (turnCount >= config.max_turns) {
+                    reachBudget('thread-turns');
+                    break;
+                }
                 input = await agent.prompter.withBotRules(input);
                 if (!current()) return false;
                 record('turn_input', { input });
+                turnCount++;
                 const turn = await this.session.runTurn(input);
                 if (!current()) return false;
                 if (turn.operation) {
@@ -96,15 +131,17 @@ export class CodexRuntime {
                 if (!response) throw new Error('Codex ended without an action or response');
                 await agent.history.add(agent.name, response);
                 if (!current()) return false;
+                completion = 'reported';
                 agent.routeResponse(source, response);
-                await agent.history.save();
-                record('finished', { status: 'completed', response });
+                try { await agent.history.save(); saveSucceeded = true; }
+                catch (error) { saveSucceeded = false; throw error; }
+                terminalDetail = { status: 'completed', completion: 'reported', terminationReason: 'reported', saveSucceeded, response };
                 return true;
             }
             return false;
         } catch (error) {
             failed = true;
-            record('finished', { status: current() ? 'error' : 'cancelled', error: String(error) });
+            terminalDetail = { status: current() ? 'error' : 'cancelled', completion, terminationReason: current() ? 'error' : String(this.abort.signal.reason || 'cancelled'), saveSucceeded, error: String(error) };
             if (current()) {
                 agent.routeResponse(source, `Codex task failed: ${error.message}`);
                 await agent.history.add('system', `Codex task failed: ${error.message}`);
@@ -112,9 +149,17 @@ export class CodexRuntime {
             return false;
         } finally {
             // A transport failure must also stop retained game work.
-            if ((failed || !current()) && agent.actions.currentAction?.id === this.actionId && this.actionId != null) await agent.actions.stop('session-cancelled');
-            await this.session?.close();
+            let cleanupError = null;
+            if ((failed || !current()) && agent.actions.currentAction?.id === this.actionId && this.actionId != null) {
+                try { await agent.actions.stop('session-cancelled'); }
+                catch (error) { cleanupError = String(error); }
+            }
+            try { await this.session?.close(); }
+            catch (error) { cleanupError ||= String(error); }
+            clearTimeout(elapsedBudget);
+            if (!terminalDetail && !terminalWritten) terminalDetail = { status: 'cancelled', completion: 'unknown', terminationReason: String(this.abort.signal.reason || 'early-return'), saveSucceeded: null };
             this.active = false;
+            if (terminalDetail) finish({ ...terminalDetail, operationSettlement: agent.actions.executing ? 'pending' : 'settled', cleanupError });
         }
     }
 }

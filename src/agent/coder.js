@@ -4,6 +4,7 @@ import * as skills from './library/skills.js';
 import * as world from './library/world.js';
 import { Vec3 } from 'vec3';
 import {ESLint} from "eslint";
+import { trackSkill, operationContext } from './library/operation_context.js';
 
 export class Coder {
     constructor(agent) {
@@ -43,7 +44,7 @@ export class Coder {
             check();
             if (error) throw new Error(error);
             this.agent.actions.setPhase('executing', context?.actionId);
-            await staged.func.main(this.agent.bot, guardSdk(this.agent.places?.sdk, check));
+            await trackSkill('generated_code', () => staged.func.main(this.agent.bot, guardSdk(this.agent.places?.sdk, check)))();
             check();
         } finally { this.agent.bot.modes.unpause('unstuck'); }
     }
@@ -127,7 +128,7 @@ export class Coder {
                     setPhase('executing');
                     if (isCancelled()) return null;
                     console.log('Executing code...');
-                    await executionModule.main(this.agent.bot, this.agent.places?.sdk);
+                    await trackSkill('generated_code', () => executionModule.main(this.agent.bot, this.agent.places?.sdk))();
 
                     const code_output = this.agent.actions.getBotOutputSummary();
                     const summary = "Agent wrote this code: \n```" + this._sanitizeCode(code) + "```\nCode Output:\n" + code_output;
@@ -168,8 +169,7 @@ export class Coder {
         }
         const allDocs = await this.agent.prompter.skill_libary.getAllSkillDocs();
         const knownSkills = new Set(allDocs.map(doc => doc.split('\n')[0]));
-        const allowedPlaceMethods = new Set(['places.find', 'places.inspect', 'places.resolveAlias', 'places.goToAlias', 'places.rememberHere', 'places.rememberObservedAt', 'places.rememberReported', 'places.verify', 'places.setOutputStorage', 'places.setAlias', 'places.setHome', 'places.goTo', 'places.tendFarm']);
-        const missingSkills = skills.filter(skill => !knownSkills.has(skill) && !allowedPlaceMethods.has(skill));
+        const missingSkills = skills.filter(skill => !knownSkills.has(skill));
         if (missingSkills.length > 0) {
             result += 'These functions do not exist:\n';
             result += missingSkills.join('\n');
@@ -238,8 +238,8 @@ export class Coder {
             log: skills.log,
             world: guarded(world),
             vision: guarded({
-                lookAtPlayer: (playerName, direction) => this.agent.vision_interpreter.lookAtPlayer(playerName, direction),
-                lookAtPosition: (x, y, z) => this.agent.vision_interpreter.lookAtPosition(x, y, z),
+                lookAtPlayer: trackSkill('vision.lookAtPlayer', (playerName, direction) => this.agent.vision_interpreter.lookAtPlayer(playerName, direction)),
+                lookAtPosition: trackSkill('vision.lookAtPosition', (x, y, z) => this.agent.vision_interpreter.lookAtPosition(x, y, z)),
             }),
             places: guarded(this.agent.places?.sdk),
             Vec3,
@@ -280,6 +280,12 @@ export class Coder {
 }
 
 function guardSdk(sdk, check) {
-    return !check || !sdk ? sdk : Object.fromEntries(Object.entries(sdk).map(([name, value]) =>
-        [name, typeof value !== 'function' ? value : (...args) => { check(); return value(...args); }]));
+    if (!sdk) return sdk;
+    const captured = operationContext();
+    return Object.fromEntries(Object.entries(sdk).map(([name, value]) =>
+        [name, typeof value !== 'function' ? value : (...args) => {
+            if (captured?.closed || captured?.signal.aborted) throw new Error('Action cancelled or settled');
+            check?.();
+            return value(...args);
+        }]));
 }

@@ -39,6 +39,7 @@ async function loadRuntime() {
   await mkdir(path.join(dir, 'src/utils'), { recursive: true })
   const copies = [
     ['src/agent/library/skills.js', 'src/agent/library/skills.js'],
+    ['src/agent/library/operation_context.js', 'src/agent/library/operation_context.js'],
     ['src/agent/library/world.js', 'src/agent/library/world.js'],
     ['src/agent/library/crafting_sync.js', 'src/agent/library/crafting_sync.js'],
     ['src/agent/library/mining_sync.js', 'src/agent/library/mining_sync.js'],

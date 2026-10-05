@@ -24,6 +24,8 @@ async function main() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'action-manager-'))
   try {
     await writeFile(path.join(root, 'package.json'), '{"type":"module"}')
+    await require('node:fs/promises').mkdir(path.join(root, 'library'), { recursive: true })
+    await writeFile(path.join(root, 'library/operation_context.js'), await readFile(path.join(__dirname, '../src/agent/library/operation_context.js')))
     await writeFile(path.join(root, 'action_manager.js'), await readFile(path.join(__dirname, '../src/agent/action_manager.js')))
     const { ActionManager } = await import(pathToFileURL(path.join(root, 'action_manager.js')))
     let active = 0

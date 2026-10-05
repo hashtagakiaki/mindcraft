@@ -1,3 +1,5 @@
+import { createOperationContext, runOwnedOperation, operationResult } from './library/operation_context.js';
+
 export class ActionManager {
     constructor(agent) {
         this.agent = agent;
@@ -114,7 +116,7 @@ export class ActionManager {
         return this._executeResume(actionLabel, actionFn, timeout);
     }
 
-    async runAction(actionLabel, actionFn, { timeout, resume = false, stallTimeoutMs = 0, outputLimit = MAX_OUTPUT_LENGTH } = {}) {
+    async runAction(actionLabel, actionFn, { timeout, resume = false, stallTimeoutMs = 0, outputLimit = MAX_OUTPUT_LENGTH, taskId = null } = {}) {
         if (this.shuttingDown) return this._rejectedResult('shutdown');
         if (this.managementPaused) return this._rejectedResult('management-paused');
         if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
@@ -126,7 +128,7 @@ export class ActionManager {
         if (resume) return this._executeResume(actionLabel, actionFn, timeout);
         const epoch = this.intentEpoch;
         if (this.userStopped) return this._rejectedResult('user-stop');
-        return this._executeAction(actionLabel, actionFn, timeout, epoch, recoveryAdmissionId, { stallTimeoutMs, outputLimit });
+        return this._executeAction(actionLabel, actionFn, timeout, epoch, recoveryAdmissionId, { stallTimeoutMs, outputLimit, taskId });
     }
 
     isRecoveryAdmission(actionLabel, recoveryAdmissionId) {
@@ -282,6 +284,8 @@ export class ActionManager {
             this.executing = true;
             this.currentActionLabel = actionLabel;
             this.currentActionFn = actionFn;
+            action.operation = createOperationContext(action, this.agent, this, options.taskId);
+            action.operation.requestStop = reason => { void this.stop(reason); };
             if (action.recoveryAdmissionId) this.agent.onRecoveryPlanActionStarted?.({ recoveryId: action.recoveryAdmissionId, actionId: action.id, actionLabel });
             if (timeout > 0) timeoutHandle = this._startTimeout(timeout, action.id);
             if (options.stallTimeoutMs > 0) {
@@ -303,7 +307,7 @@ export class ActionManager {
         }
 
         try {
-            await actionFn();
+            const domainReturn = await runOwnedOperation(action.operation, actionFn);
             const output = this.getBotOutputSummary(options.outputLimit);
             const timedout = this.timedout;
             const interrupted = !!action.reason || this.agent.bot.interrupt_code;
@@ -320,6 +324,9 @@ export class ActionManager {
                 actionPhase: action.actionPhase || action.phase,
                 stopRequestedPhase: action.stopRequestedPhase,
                 watchdogAtPhase: action.watchdogAtPhase,
+                executionStatus: interrupted ? 'interrupted' : 'completed',
+                domainReturn: typeof domainReturn === 'boolean' || typeof domainReturn === 'string' || typeof domainReturn === 'number' ? domainReturn : null,
+                ...operationResult(action.operation),
             };
             action.settledState = true;
             const progressObserved = observeActionProgress(this, action, result);
@@ -347,6 +354,9 @@ export class ActionManager {
                 actionPhase: action.actionPhase || action.phase,
                 stopRequestedPhase: action.stopRequestedPhase,
                 watchdogAtPhase: action.watchdogAtPhase,
+                executionStatus: action.reason ? 'interrupted' : 'error',
+                domainReturn: null,
+                ...operationResult(action.operation),
             };
             result.progressObserved = observeActionProgress(this, action, result);
             action.settled.resolve({ phase: action.phaseStatus, actionPhase: result.actionPhase, reason: action.reason, result });
@@ -398,7 +408,8 @@ export class ActionManager {
     }
 
     _rejectedResult(reason, detail = null) {
-        return { success: false, message: null, interrupted: true, timedout: false, reason, actionId: detail?.actionId ?? null, phase: detail?.phase ?? null };
+        return { success: false, message: null, interrupted: true, timedout: false, reason, actionId: detail?.actionId ?? null, phase: detail?.phase ?? null,
+            executionStatus: 'rejected', domainReturn: null, operationSettlement: 'not_started', skillResults: [], confirmedChanges: [], unconfirmedChanges: [] };
     }
 
     getBotOutputSummary(limit = MAX_OUTPUT_LENGTH) {

@@ -50,6 +50,7 @@ async function setupFixture(root) {
   await write(root, 'settings.js', `const settings = { allow_insecure_coding: false, code_timeout_mins: 1 }; export default settings;`)
   await write(root, 'src/agent/settings.js', `const settings = { place_memory_enabled: false, place_world_id: null }; export default settings;`)
   await write(root, 'src/agent/conversation.js', `export default {};`)
+  await copy(root, 'src/agent/library/operation_context.js')
   await write(root, 'src/agent/tasks/construction_tasks.js', `export function checkLevelBlueprint() { return ''; } export function checkBlueprint() { return ''; }`)
   await write(root, 'src/utils/mcdata.js', `export function getBlockId() { return 1; } export function getItemId() { return 1; } export function getDetailedCraftingPlan() { return []; }`)
 
@@ -67,6 +68,8 @@ ${namedExports(actionsSource, 'skills', (name) => `export async function ${name}
   await copy(root, 'src/agent/places.js')
   await copy(root, 'src/agent/coder.js')
   await copy(root, 'src/agent/library/lockdown.js')
+  await copy(root, 'src/agent/library/sdk_capabilities.js')
+  await copy(root, 'src/agent/library/operation_context.js')
   await write(root, 'src/agent/place_actions.js', `export function createPlaceActions(agent, client) { return {
   async goTo(placeId) { return agent.testTravelResult || { ok: false, status: 'unreachable', placeId }; },
   async tendFarm(farmId) { return agent.testFarmResult || { ok: false, status: 'storage_candidates_ambiguous', farmId }; }
@@ -232,7 +235,8 @@ async function main() {
     await restartedStore.close()
 
     const { Coder } = await import(fixtureUrl('src/agent/coder.js'))
-    agent.prompter = { skill_libary: { async getAllSkillDocs() { return ['vision.lookAtPlayer\n', 'vision.lookAtPosition\n'] } } }
+    const { getCapabilityDocs } = await import(fixtureUrl('src/agent/library/sdk_capabilities.js'))
+    agent.prompter = { skill_libary: { async getAllSkillDocs() { return getCapabilityDocs() } } }
     agent.history = { getHistory() { return [] } }
     const coder = new Coder(agent)
     await waitFor(() => coder.code_template.includes('async (bot, places)') && coder.code_lint_template.includes('main(bot, places, vision)'), 3000, 'coder templates did not load')

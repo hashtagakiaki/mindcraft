@@ -30,9 +30,12 @@ async function main() {
   const socket = new EventEmitter()
   const deliveries = []
   const connections = Object.fromEntries(agents.map(agent => [agent.name, {
-    in_game: agent.in_game, socket: { connected: true, emit: (event, data) => deliveries.push({ name: agent.name, event, data }) }
+    in_game: agent.in_game, socket: { connected: true, emit: (event, data, acknowledge) => {
+      deliveries.push({ name: agent.name, event, data })
+      if (data.taskId && typeof acknowledge === 'function') acknowledge({ accepted: true, taskId: data.taskId })
+    } }
   }]))
-  vm.runInNewContext(handler, { socket, agent_connections: connections, resolveMessageTargets, parseAddressedMessage, console })
+  vm.runInNewContext(handler, { socket, agent_connections: connections, resolveMessageTargets, parseAddressedMessage, console, setTimeout, clearTimeout })
   let result
   const send = (targets, message) => socket.emit('send-message', targets, { from: 'ADMIN', message, recipients: ['forged'] }, value => { result = value })
   send('@all', '!stop')
@@ -50,6 +53,10 @@ async function main() {
   assert.equal(deliveries.at(-1).data.message, 'gather wood')
   send('Bot2', 'hello')
   assert.equal(deliveries.at(-1).name, 'Bot2', 'legacy single target still works')
+  socket.emit('send-message', 'Bot2', { from: 'SYSTEM', message: 'benchmark task', taskId: 'dispatch-task' }, value => { result = value })
+  assert.equal(result.success, true)
+  assert.deepEqual(Array.from(result.recipients), ['Bot2'])
+  assert.equal(result.taskId, 'dispatch-task', 'dispatch ACK echoes the accepted task ID')
 
   const agentSource = await fs.readFile(path.join(repo, 'src/agent/agent.js'), 'utf8')
   const setup = agentSource.slice(agentSource.indexOf('        const ignore_messages = ['), agentSource.indexOf('        this.bot.on(\'chat\''))
@@ -59,7 +66,7 @@ async function main() {
   const bot = new EventEmitter()
   const agent = { name: 'Bot2', bot, actions: {}, handleMessage: async (...args) => received.push(args) }
   const scope = { settings: { only_chat_with: ['ADMIN'] }, convoManager: { isOtherAgent: () => false }, handleEnglishTranslation: async text => text,
-    parseAddressedMessage, serverProxy: { getAgents: () => agents, getNumOtherAgents: () => 2 }, console }
+    parseAddressedMessage, serverProxy: { getAgents: () => agents, getNumOtherAgents: () => 2 }, randomUUID: () => 'fixture-task', console }
   const install = vm.runInNewContext(`(function() {${setup}${agentSource.slice(chatStart, chatEnd)}})`, scope)
   install.call(agent)
   bot.emit('chat', 'ADMIN', '@all !stop')
@@ -82,17 +89,19 @@ async function main() {
   const method = agentSource.slice(methodStart, methodEnd)
   const history = []
   const commands = []
+  const accepted = []
   const handle = vm.runInNewContext(`({${method}}).handleMessage`, {
     convoManager: { isOtherAgent: () => false }, containsCommand: message => message.startsWith('!') ? message.split('(')[0] : null,
     commandExists: () => true, isAction: () => true, settings: { max_commands: 1 }, recipientContext,
-    executeCommand: async (_agent, message) => { commands.push(message); return null }, console
+    executeCommand: async (_agent, message) => { commands.push(message); return null }, randomUUID: () => 'fixture-task', console
   })
   const commandAgent = { name: 'Bot2', _messageGeneration: 0, actions: { beginUserIntent() {} }, checkTaskDone: async () => {},
     history: { add: async (...args) => history.push(args) }, routeResponse() {} }
-  await handle.call(commandAgent, 'ADMIN', '!newAction("build")', null, { recipients: ['Bot2', 'Bot3'] })
+  await handle.call(commandAgent, 'ADMIN', '!newAction("build")', null, { recipients: ['Bot2', 'Bot3'], taskId: 'command-task', onAccepted: value => accepted.push(value) })
   assert.match(history[0][1], /ADMIN.*Bot2, Bot3/)
   assert.equal(history[1][1], '!newAction("build")')
   assert.deepEqual(commands, ['!newAction("build")'])
+  assert.deepEqual(accepted.map(value => ({ accepted: value.accepted, taskId: value.taskId })), [{ accepted: true, taskId: 'command-task' }])
 
   const html = await fs.readFile(path.join(repo, 'src/mindcraft/public/index.html'), 'utf8')
   for (const match of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) new vm.Script(match[1])

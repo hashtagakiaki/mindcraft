@@ -120,6 +120,7 @@ async function rejects(promise, pattern) {
 
 async function main() {
   sync = (await import(require('node:url').pathToFileURL(process.argv[2]))).default
+  const { runOwnedOperation, operationResult } = await import(require('node:url').pathToFileURL(require('node:path').join(require('node:path').dirname(process.argv[2]), 'operation_context.js')))
   // The session picks the final complete state before the stats response.
   const bot = botFixture()
   bot._client.setServerFrom(bot.inventory)
@@ -172,6 +173,36 @@ async function main() {
   assert.equal(recoveredCraftCount, 1)
   assert.equal(existingWindowBot.inventory.slots[9].type, 2)
   assert.equal(existingWindowBot.inventory.slots.filter(item => item?.type === 2).reduce((n, item) => n + item.count, 0), 4)
+
+  // A fenced result pickup confirms the item even if ingredient-grid cleanup
+  // then fails. It must not be promoted to a completed recipe without the
+  // exact inventory delta.
+  const cleanupBot = botFixture()
+  cleanupBot.inventory.recipe = { ingredient: 1, result: 2 }
+  cleanupBot.inventory.slots[9] = { type: 1, count: 2, metadata: 0, stackSize: 64 }
+  const originalAcceptClick = cleanupBot.inventory.acceptClick.bind(cleanupBot.inventory)
+  cleanupBot.inventory.acceptClick = click => {
+    if (click.slot === 0 && cleanupBot.inventory.slots[0]) {
+      cleanupBot.inventory.selectedItem = cleanupBot.inventory.slots[0]
+      cleanupBot.inventory.slots[0] = null
+      return [0]
+    }
+    if (click.slot === 1 && cleanupBot.inventory.slots[1]) throw new Error('injected returnGrid failure')
+    return originalAcceptClick(click)
+  }
+  cleanupBot._client.setServerFrom(cleanupBot.inventory)
+  cleanupBot._client.on('packet', (packet, meta) => {
+    if (meta.name === 'window_items' && packet.windowId === 0) applyState(cleanupBot.inventory, packet)
+  })
+  const owned = { actionId: 'craft-cleanup', taskId: 'task-cleanup', intentEpoch: 1,
+    signal: new AbortController().signal, bot: cleanupBot, dimension: 'overworld', connectionGeneration: 1,
+    accepting: true, closed: false, sequence: 0, calls: [], facts: [], uncertain: [], diagnostics: [], pending: new Set(),
+    root: { id: null, activeChild: null, closed: false, phase: 'main' } }
+  await assert.rejects(runOwnedOperation(owned, () => sync.run(cleanupBot, craft => craft(recipe, 1, null))), /injected returnGrid failure/)
+  const cleanupResult = operationResult(owned)
+  assert.deepEqual(cleanupResult.confirmedChanges.map(fact => fact.unit), ['item'])
+  assert.equal(cleanupResult.confirmedChanges[0].quantity, 4)
+  assert.equal(cleanupResult.confirmedChanges.some(fact => fact.unit === 'recipe'), false)
 
   const reports = []
   const oldConsoleError = console.error

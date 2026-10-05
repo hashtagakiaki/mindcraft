@@ -112,6 +112,7 @@ async function main() {
     await putAgentFixture('src/agent/agent.js', await readFile(path.join(__dirname, '../src/agent/agent.js')))
     await putAgentFixture('src/utils/message_targets.js', await readFile(path.join(__dirname, '../src/utils/message_targets.js')))
     await putAgentFixture('src/agent/action_manager.js', await readFile(path.join(__dirname, '../src/agent/action_manager.js')))
+    await putAgentFixture('src/agent/library/operation_context.js', await readFile(path.join(__dirname, '../src/agent/library/operation_context.js')))
     await putAgentFixture('src/agent/self_prompter.js', await readFile(path.join(__dirname, '../src/agent/self_prompter.js')))
     const agentStubs = {
       'src/agent/history.js': 'export class History {}',

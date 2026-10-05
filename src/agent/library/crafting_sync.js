@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { recordConfirmation } from './operation_context.js'
 
 const require = createRequire(import.meta.url)
 
@@ -408,6 +409,12 @@ class Session {
       await this.click(window, 0, 0)
       this.phase = 'taking-server-result'
       await this.storeCursor(window)
+      // The result has left the server-owned result slot and is in a fenced
+      // player inventory slot. Preserve this item-level fact even if later
+      // ingredient cleanup or recipe-delta validation fails. This does not
+      // certify a completed recipe; that requires the exact delta below.
+      recordConfirmation({ phase: 'taking-server-result', quantity: recipe.result.count, unit: 'item', target: { itemId: recipe.result.id },
+        evidence: 'server result slot click and fenced cursor placement in player inventory' })
       this.phase = 'recovering-grid'
       await this.returnGrid(window, gridStart, gridSlots)
       this.phase = 'validating-inventory-delta'
@@ -420,6 +427,8 @@ class Session {
         this.observedDelta.push({ id: delta.id, metadata: delta.metadata, before, after, expected: delta.count, observed })
         if (observed !== delta.count) fail(`inventory delta mismatch for item ${delta.id}: expected ${delta.count}, observed ${observed}`)
       }
+      recordConfirmation({ phase: 'validating-recipe-delta', quantity: 1, unit: 'recipe', target: this.recipe,
+        evidence: 'server result slot and exact fenced recipe inventory delta' })
       return true
     } finally {
       if (opened && sameWindow(bot, window)) await this.closeCraftingWindow(window)
