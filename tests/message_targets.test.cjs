@@ -152,6 +152,7 @@ async function main() {
   assert.equal(elements['sendBtn-Bot2'].disabled, false)
   vm.runInContext("sendMessage('Bot2', document.getElementById('messageInput-Bot2').value, true)", ui)
   assert.deepEqual(uiDelivery.targets, ['Bot2', 'Bot3'])
+  assert.equal(uiDelivery.data.from, 'ADMIN', 'legacy UI messages identify the configured operator')
   assert.equal(input.value, '')
   assert.match(elements.groupResult.textContent, /Bot2, Bot3/)
   elements['messageInput-Bot3'].value = 'from another selected card'

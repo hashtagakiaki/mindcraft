@@ -1013,7 +1013,7 @@
             if (!m || !m.trim() || !socket.connected) return;
             if (useSelection && selectionMode && !selectedBots.has(n) && !m.trimStart().startsWith('@')) return;
             const targets = useSelection && selectionMode ? [...selectedBots] : n;
-            socket.emit('send-message', targets, { message: m }, result => {
+            socket.emit('send-message', targets, { from: 'ADMIN', message: m }, result => {
                 document.getElementById('groupResult').textContent = result.success ? `Sent to: ${result.recipients.join(', ')}` : result.error;
                 if (!result.success) return;
                 const input = document.getElementById(`messageInput-${n}`);
