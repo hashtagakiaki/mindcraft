@@ -4,7 +4,7 @@ import { CodexSession } from '../process/codex_session.js';
 import settings from './settings.js';
 
 const DEFAULTS = { stall_timeout_ms: 30000, action_timeout_ms: 120000, output_limit: 16000, max_search_radius: 64,
-    task_budget_ms: 300000, max_operations: 24, max_turns: 30 };
+    task_budget_ms: 300000, max_operations: 32, max_turns: 40 };
 
 export function validateCodexRuntime(profile) {
     if (settings.agent_runtime !== 'codex-session') return null;
