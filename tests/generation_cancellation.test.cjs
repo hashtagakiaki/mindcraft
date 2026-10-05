@@ -647,14 +647,14 @@ process.stdin.on('end', () => {
     const visionController = new AbortController()
     const visionMarker = path.join(sandbox, 'vision.pids')
     const vision = codex.sendVisionRequest([visionMarker], 'timeout', Buffer.from('fixture-image'), { signal: visionController.signal })
-    const visionRejection = assert.rejects(vision, /timed out/, 'coding cancellation signal must not be wired to vision requests')
-    visionController.abort()
+    const visionRejection = assert.rejects(vision, /cancelled/, 'vision requests share the same owned cancellation contract')
     const visionPids = JSON.parse(await waitForFile(visionMarker))
     activeProcessGroups.set(visionPids.group, [visionPids.parent, visionPids.child])
+    visionController.abort('vision cancellation')
     await visionRejection
     await waitForStopped([visionPids.parent, visionPids.child])
     activeProcessGroups.delete(visionPids.group)
-    observed.visionUnaffectedByCodingSignal = true
+    observed.visionCancellation = { leaderAndGrandchildStopped: true, tempdirRemoved: true }
     assert.deepEqual(await readdir(tmpRoot), [], 'all request tempdirs must be removed')
     observed.supervisedHelper = await runSupervisedFixtures(sandbox, tmpRoot, fakeCli)
     observed.procIdentity = await runProcIdentityFixtures(sandbox)

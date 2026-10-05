@@ -99,11 +99,13 @@ async function runHistoryFixture(root) {
 
     let resolveCheckpointSummary
     let checkpointPromptCount = 0
+    let checkpointSummarySignal
     const checkpointHistory = new History({
       ...agent,
       name: 'fixture-checkpoint',
-      prompter: { promptMemSaving: () => {
+      prompter: { promptMemSaving: (_turns, options) => {
         checkpointPromptCount++
+        checkpointSummarySignal = options.signal
         return new Promise(resolve => { resolveCheckpointSummary = resolve })
       } },
     })
@@ -114,11 +116,13 @@ async function runHistoryFixture(root) {
     assert.equal(checkpointPromptCount, 1, 'threshold starts one background summary')
     await checkpointHistory.checkpointAdd('fixture-checkpoint', 'checkpoint turn 6')
     assert.equal(checkpointPromptCount, 1, 'single-flight summary does not start an unbounded second request')
+    assert.ok(checkpointSummarySignal && !checkpointSummarySignal.aborted, 'summary request receives its owner cancellation signal')
     const checkpointSaved = JSON.parse(await fs.readFile(path.join(dir, 'bots/fixture-checkpoint/memory.json'), 'utf8'))
     assert.deepEqual(checkpointSaved.turns.map(turn => turn.content), [
       'checkpoint turn 1', 'checkpoint turn 2', 'checkpoint turn 3', 'checkpoint turn 4', 'checkpoint turn 5', 'checkpoint turn 6',
     ], 'checkpoint turns remain loadable while the summary is pending')
     checkpointHistory.invalidateSummaries()
+    assert.equal(checkpointSummarySignal.aborted, true, 'epoch invalidation aborts the actual summary request owner signal')
     const pendingSaved = await checkpointHistory.saveShutdownRecord('fixture-stop', { reason: 'test' })
     assert.equal(pendingSaved.saved, true, 'shutdown persists confirmed turns without waiting for summary')
     resolveCheckpointSummary('stale checkpoint summary')

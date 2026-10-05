@@ -65,17 +65,21 @@ export class VisionInterpreter {
     }
 
     async analyzeImage(filename) {
+        const context = this.agent.actions?.getCancellationContext?.() || null;
         try {
             const imageBuffer = fs.readFileSync(`${this.fp}/${filename}.jpg`);
             const messages = this.agent.history.getHistory();
 
             const blockInfo = this.getCenterBlockInfo();
-            const result = await this.agent.prompter.promptVision(messages, imageBuffer);
+            const result = await this.agent.prompter.promptVision(messages, imageBuffer,
+                { context, signal: context?.signal });
+            if (context?.signal?.aborted || result === null) return null;
             return result + `\n${blockInfo}`;
 
         } catch (error) {
+            if (context?.signal?.aborted || error?.name === 'AbortError') throw error;
             console.warn('Error reading image:', error);
             return `Error reading image: ${error.message}`;
         }
     }
-} 
+}

@@ -37,9 +37,9 @@ export class History {
         return JSON.parse(JSON.stringify(this.turns));
     }
 
-    async summarizeMemories(turns, epoch = this.summaryEpoch) {
+    async summarizeMemories(turns, epoch = this.summaryEpoch, signal = null) {
         console.log("Storing memories...");
-        let memory = await this.agent.prompter.promptMemSaving(turns);
+        let memory = await this.agent.prompter.promptMemSaving(turns, { signal });
         if (this.shutdownStarted || epoch !== this.summaryEpoch) return false;
 
         if (memory.length > 500) {
@@ -127,6 +127,7 @@ export class History {
 
     _ensureSummaryDrain() {
         if (this.summaryDrainPromise) return this.summaryDrainPromise;
+        const drainEpoch = this.summaryEpoch;
         const drain = this._drainSummaryQueue();
         this.summaryDrainPromise = drain;
         drain.then(result => {
@@ -139,6 +140,11 @@ export class History {
         }, error => {
             if (this.summaryDrainPromise === drain) this.summaryDrainPromise = null;
             this.summaryDiagnostic = String(error);
+            if (!this.shutdownStarted && drainEpoch !== this.summaryEpoch && this.pendingHistoryChunks.length)
+                void this._ensureSummaryDrain().catch(nextError => {
+                    this.summaryDiagnostic = String(nextError);
+                    console.error(`Memory summary failed for ${this.name}:`, nextError);
+                });
         });
         return drain;
     }
@@ -147,7 +153,11 @@ export class History {
         while (this.pendingHistoryChunks.length && !this.shutdownStarted) {
             const chunk = this.pendingHistoryChunks[0];
             const epoch = this.summaryEpoch;
-            const summarized = await this.summarizeMemories(chunk, epoch);
+            const controller = new AbortController();
+            this.summaryController = controller;
+            let summarized;
+            try { summarized = await this.summarizeMemories(chunk, epoch, controller.signal); }
+            finally { if (this.summaryController === controller) this.summaryController = null; }
             if (!summarized || this.shutdownStarted || epoch !== this.summaryEpoch) return false;
             await this.appendFullHistory(chunk);
             if (this.shutdownStarted || epoch !== this.summaryEpoch) return false;
@@ -164,6 +174,7 @@ export class History {
     invalidateSummaries() {
         if (this.shutdownStarted) return this.summaryEpoch;
         this.summaryEpoch += 1;
+        this.summaryController?.abort('memory summary invalidated');
         if (this.pendingHistoryChunks.length) {
             this.turns = [...this.pendingHistoryChunks.flat(), ...this.turns];
             this.pendingHistoryChunks = [];
@@ -175,6 +186,7 @@ export class History {
         if (this.shutdownStarted) return this.summaryEpoch;
         this.shutdownStarted = true;
         this.summaryEpoch += 1;
+        this.summaryController?.abort('history shutdown');
         this.turns = [...this.pendingHistoryChunks.flat(), ...this.turns];
         this.pendingHistoryChunks = [];
         return this.summaryEpoch;
@@ -244,6 +256,7 @@ export class History {
     }
 
     clear() {
+        this.invalidateSummaries();
         this.turns = [];
         this.memory = '';
     }

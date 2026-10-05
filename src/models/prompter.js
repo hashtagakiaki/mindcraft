@@ -9,6 +9,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { selectAPI, createModel } from './_model_map.js';
+import { randomUUID } from 'node:crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -246,11 +247,18 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
     async promptConvo(messages) {
         this.most_recent_msg_time = Date.now();
         let current_msg_time = this.most_recent_msg_time;
+        this.conversationController?.abort('superseded conversation request');
+        const conversationController = new AbortController();
+        this.conversationController = conversationController;
+        const finishConversation = result => {
+            if (this.conversationController === conversationController) this.conversationController = null;
+            return result;
+        };
 
         for (let i = 0; i < 3; i++) { // try 3 times to avoid hallucinations
-            await this.checkCooldown();
-            if (current_msg_time !== this.most_recent_msg_time) {
-                return '';
+            const cooldown = await this.checkCooldown(conversationController.signal);
+            if (cooldown === REQUEST_CANCELLED || conversationController.signal.aborted || current_msg_time !== this.most_recent_msg_time) {
+                return finishConversation('');
             }
 
             let prompt = this.profile.conversing;
@@ -260,7 +268,8 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
             let generation;
 
             try {
-                generation = await this.chat_model.sendRequest(messages, prompt);
+                generation = await this.chat_model.sendRequest(messages, prompt, '***', this._requestOptions('conversation', null, conversationController.signal));
+                if (conversationController.signal.aborted) return finishConversation('');
                 if (typeof generation !== 'string') {
                     console.error('Error: Generated response is not a string', generation);
                     throw new Error('Generated response is not a string');
@@ -269,6 +278,7 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
                 await this._saveLog(prompt, messages, generation, 'conversation');
 
             } catch (error) {
+                if (conversationController.signal.aborted) return finishConversation('');
                 console.error('Error during message generation or file writing:', error);
                 continue;
             }
@@ -281,7 +291,7 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
 
             if (current_msg_time !== this.most_recent_msg_time) {
                 console.warn(`${this.agent.name} received new message while generating, discarding old response.`);
-                return '';
+                return finishConversation('');
             }
 
             if (generation?.includes('</think>')) {
@@ -289,10 +299,10 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
                 generation = afterThink
             }
 
-            return generation;
+            return finishConversation(generation);
         }
 
-        return '';
+        return finishConversation('');
     }
 
     async promptCoding(messages, cancellationContext=null) {
@@ -322,7 +332,7 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
             if (signal?.aborted) return null;
             if (this.agent.places) prompt += `\n\nPLACE MEMORY CONTEXT\n${this.agent.places.getPromptContext()}`;
 
-            const request = this.code_model.sendRequest(messages, prompt, '***', { signal });
+            const request = this.code_model.sendRequest(messages, prompt, '***', this._requestOptions('coding', context, signal));
             let resp;
             if (signal && this.code_model.constructor.prefix !== 'codex') {
                 resp = await awaitRequestOrCancellation(request, signal);
@@ -342,11 +352,15 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
         }
     }
 
-    async promptMemSaving(to_summarize) {
-        await this.checkCooldown();
+    async promptMemSaving(to_summarize, options={}) {
+        const cooldown = await this.checkCooldown(options.signal);
+        if (cooldown === REQUEST_CANCELLED || options.signal?.aborted) return null;
+        if (options.signal?.aborted) return null;
         let prompt = this.profile.saving_memory;
         prompt = await this.replaceStrings(prompt, null, null, to_summarize);
-        let resp = await this.chat_model.sendRequest([], prompt);
+        if (options.signal?.aborted) return null;
+        let resp = await this.chat_model.sendRequest([], prompt, '***', this._requestOptions('memory-summary', null, options.signal, options.requestId));
+        if (options.signal?.aborted) return null;
         await this._saveLog(prompt, to_summarize, resp, 'memSaving');
         if (resp?.includes('</think>')) {
             const [_, afterThink] = resp.split('</think>')
@@ -366,11 +380,29 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
         return res.trim().toLowerCase() === 'respond';
     }
 
-    async promptVision(messages, imageBuffer) {
-        await this.checkCooldown();
+    async promptVision(messages, imageBuffer, options={}) {
+        const cooldown = await this.checkCooldown(options.signal);
+        if (cooldown === REQUEST_CANCELLED || options.signal?.aborted) return null;
         let prompt = this.profile.image_analysis;
         prompt = await this.replaceStrings(prompt, messages, null, null, null);
-        return await this.vision_model.sendVisionRequest(messages, prompt, imageBuffer);
+        if (options.signal?.aborted) return null;
+        return await this.vision_model.sendVisionRequest(messages, prompt, imageBuffer,
+            this._requestOptions('vision', options.context ?? null, options.signal, options.requestId));
+    }
+
+    _requestOptions(purpose, context=null, signal=null, requestId=null) {
+        const action = context || this.agent.actions?.getCancellationContext?.() || null;
+        const scope = {
+            requestId: requestId || randomUUID(), purpose,
+            taskId: action?.taskId ?? (this.agent.codexRuntime?.active ? this.agent.codexRuntime.taskId : null),
+            actionId: action?.actionId ?? null,
+        };
+        return { ...scope, signal, onUsage: detail => {
+            // Usage metadata is diagnostic only. Keep the request-start scope;
+            // never look up the possibly replaced task after the await.
+            console.info('Model usage', { ...scope, usage: detail.usage, elapsedMs: detail.elapsedMs,
+                provider: detail.provider, attempt: detail.attempt });
+        } };
     }
 
     async promptGoalSetting(messages, last_goals) {

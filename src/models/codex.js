@@ -24,8 +24,8 @@ export class Codex {
         return this.#sendRequest(turns, systemMessage, stop_seq, null, options?.signal);
     }
 
-    async sendVisionRequest(messages, systemMessage, imageBuffer) {
-        return this.#sendRequest(messages, systemMessage, '***', imageBuffer);
+    async sendVisionRequest(messages, systemMessage, imageBuffer, options={}) {
+        return this.#sendRequest(messages, systemMessage, '***', imageBuffer, options?.signal);
     }
 
     async #sendRequest(turns, systemMessage, stop_seq, imageBuffer=null, signal=null) {

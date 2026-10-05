@@ -247,8 +247,12 @@ async function main() {
 
     settings.max_messages = 5
     let resolveSummary
+    let summarySignal
     const summaryPendingAgent = makeAgent('SummaryPending')
-    summaryPendingAgent.prompter.promptMemSaving = () => new Promise(resolve => { resolveSummary = resolve })
+    summaryPendingAgent.prompter.promptMemSaving = (_turns, options) => {
+      summarySignal = options.signal
+      return new Promise(resolve => { resolveSummary = resolve })
+    }
     summaryPendingAgent.history = new History(summaryPendingAgent)
     for (let index = 1; index <= 4; index++) await summaryPendingAgent.history.add('SummaryPending', `older turn ${index}`)
     const summaryPendingRuntime = new CodexRuntime(summaryPendingAgent, { makeSession: () => ({
@@ -260,6 +264,7 @@ async function main() {
     const summaryRun = summaryPendingRuntime.run('operator', () => true, 'summary-pending-task')
     await until(() => typeof finishRoute === 'function')
     assert.equal(typeof resolveSummary, 'function', 'threshold summary remains pending while task ends')
+    assert.ok(summarySignal && !summarySignal.aborted, 'pending summary has a request owner signal')
     const summaryPendingFiles = await fs.readdir(path.join(root, 'bots/SummaryPending/histories'))
     const summaryTracePath = path.join(root, 'bots/SummaryPending/histories', summaryPendingFiles.find(file => file.startsWith('codex-')))
     const beforeRouteEvents = (await fs.readFile(summaryTracePath, 'utf8'))
@@ -277,6 +282,7 @@ async function main() {
     assert.match(summaryPendingMemory.turns.map(turn => turn.content).join('\n'), /The answer is checkpointed and reported\./,
       'response turn is durable before the summary finishes')
     summaryPendingAgent.history.invalidateSummaries()
+    assert.equal(summarySignal.aborted, true, 'new summary epoch cancels the actual provider request')
     resolveSummary('late summary from an invalidated epoch')
     await delay(0)
     assert.equal(summaryPendingAgent.history.memory, '', 'late summary after invalidation cannot overwrite newer state')
