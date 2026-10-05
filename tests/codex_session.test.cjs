@@ -26,7 +26,7 @@ async function main() {
     const load = relative => import(pathToFileURL(path.join(root, relative)))
     const { default: settings } = await load('src/agent/settings.js')
     Object.assign(settings, { agent_runtime: 'codex-session', allow_insecure_coding: true, codex_session: { stall_timeout_ms: 60, action_timeout_ms: 2000, output_limit: 16000 }, language: 'en' })
-    const { CodexRuntime, validateCodexRuntime } = await load('src/agent/codex_runtime.js')
+    const { CodexRuntime, validateCodexRuntime, observedState } = await load('src/agent/codex_runtime.js')
     const { operationFactsSummary, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait } = await load('src/agent/library/operation_context.js')
     const { ActionManager } = await load('src/agent/action_manager.js')
     const { Coder } = await load('src/agent/coder.js')
@@ -47,7 +47,7 @@ async function main() {
       agent._messageGeneration = 0
       agent._managementGeneration = 0
       agent.checkTaskDone = async () => false
-      agent.bot = Object.assign(new EventEmitter(), { output: '', interrupt_code: false, players: {}, entity: { position: { x: 0, y: 64, z: 0 } }, inventory: { items: () => [] }, modes: { isOn: () => false, pause() {}, unpause() {}, flushBehaviorLog: () => '' } })
+      agent.bot = Object.assign(new EventEmitter(), { output: '', interrupt_code: false, players: {}, game: { dimension: 'overworld' }, entity: { position: { x: 0, y: 64, z: 0 } }, inventory: { items: () => [] }, modes: { isOn: () => false, pause() {}, unpause() {}, flushBehaviorLog: () => '' } })
       agent.clearBotLogs = () => { agent.bot.output = ''; agent.bot.interrupt_code = false }
       agent.requestInterrupt = () => { agent.bot.interrupt_code = true; agent.interrupt?.() }
       agent.prompter = { profile: { model: 'codex/gpt-6-luna' }, skill_libary: { getAllSkillDocs: async () => ['skills.wait\nWait for a bounded number of milliseconds.', 'skills.goToPlayer\nNavigate to a named player and return false when it is missing.'] }, withBotRules: async text => { rules.push(text); return text + '\nCURRENT RULES' } }
@@ -59,6 +59,14 @@ async function main() {
       return agent
     }
     const agent = makeAgent('NativeFixture')
+    const nativeObservation = observedState(agent.bot, agent.getObservationScope())
+    assert.equal(nativeObservation.observationScope.dimension, 'overworld')
+    assert.equal(nativeObservation.observationScope.worldConnectionGeneration, null,
+      'native snapshots do not relabel a management socket epoch as a Minecraft connection generation')
+    assert.equal(nativeObservation.observationScope.managementConnectionGeneration, 0)
+    assert.equal(nativeObservation.observationScope.managementConnectionReady, false)
+    assert.equal(nativeObservation.observationScope.managementServerGeneration, null)
+    assert.match(nativeObservation.observationScope.observedAt, /^\d{4}-\d\d-\d\dT/)
     await until(() => agent.coder.code_template && agent.coder.code_lint_template)
     const result = await agent.actions.runAction('compound', () => agent.coder.executeCode('log(bot, "first");\nawait Promise.resolve();\nlog(bot, "second");'), { timeout: 0, outputLimit: 16000 })
     assert.equal(result.success, true)

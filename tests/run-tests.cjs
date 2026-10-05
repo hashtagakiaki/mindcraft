@@ -629,6 +629,7 @@ async function main() {
   execFileSync(node, [path.join(__dirname, 'management_auth.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'agent_process.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'agent_shutdown.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'world_observation.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'shutdown_experiments.cjs')], { stdio: 'inherit' })
   const temp = await mkdtemp(path.join(os.tmpdir(), 'mindcraft-owned-tests-'))
   try {

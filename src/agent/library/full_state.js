@@ -7,10 +7,12 @@ import {
     getBlockAtPosition,
     getFirstBlockAboveHead
 } from "./world.js";
+import { createObservationScope } from './observation_scope.js';
 import convoManager from '../conversation.js';
 
-export function getFullState(agent) {
+export function getFullState(agent, management = {}) {
     const bot = agent.bot;
+    const observationScope = createObservationScope(bot, management);
 
     const pos = getPosition(bot);
     const position = {
@@ -27,9 +29,9 @@ export function getFullState(agent) {
     if (bot.time.timeOfDay < 6000) timeLabel = 'Morning';
     else if (bot.time.timeOfDay < 12000) timeLabel = 'Afternoon';
 
-    const below = getBlockAtPosition(bot, 0, -1, 0).name;
-    const legs = getBlockAtPosition(bot, 0, 0, 0).name;
-    const head = getBlockAtPosition(bot, 0, 1, 0).name;
+    const below = getBlockAtPosition(bot, 0, -1, 0)?.name ?? 'unknown';
+    const legs = getBlockAtPosition(bot, 0, 0, 0)?.name ?? 'unknown';
+    const head = getBlockAtPosition(bot, 0, 1, 0)?.name ?? 'unknown';
 
     let players = getNearbyPlayerNames(bot);
     let bots = convoManager.getInGameAgents().filter(b => b !== agent.name);
@@ -41,6 +43,7 @@ export function getFullState(agent) {
     const boots = bot.inventory.slots[8];
 
     const state = {
+        observationScope,
         name: agent.name,
         gameplay: {
             position,

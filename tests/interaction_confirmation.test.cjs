@@ -68,7 +68,9 @@ function makeBot(options = {}) {
   }
   bot.blockStates = new Map()
   if (options.blockStates) for (const [position, block] of options.blockStates) bot.blockStates.set(key(position), block)
-  bot.blockAt = position => bot.blockStates.get(key(position)) || makeBlock('stone', position)
+  bot.blockAt = position => options.blockAt
+    ? options.blockAt(position, bot)
+    : bot.blockStates.get(key(position)) || makeBlock('stone', position)
   bot.blockAtCursor = () => null
   bot.nearestEntity = () => null
   bot.chat = () => {}
@@ -352,6 +354,29 @@ async function main() {
   } finally {
     craftingSync.run = originalCraftRun
   }
+
+  const unknownBlockMutations = []
+  const unknownBlockBot = makeBot({
+    blockAt: () => null,
+  })
+  unknownBlockBot.game.gameMode = 'creative'
+  unknownBlockBot.creative = { async setInventorySlot() { unknownBlockMutations.push('creative-inventory') } }
+  unknownBlockBot.dig = async () => unknownBlockMutations.push('dig')
+  unknownBlockBot.placeBlock = async () => unknownBlockMutations.push('place')
+  const unknownBlockOperation = ownership.createOperationContext(
+    { id: 'unknown-block-observation', controller: new AbortController() },
+    { bot: unknownBlockBot }, { intentEpoch: 1 }, 'unknown-block-task')
+  await ownership.runOwnedOperation(unknownBlockOperation, async () => {
+    assert.equal(await ownership.trackSkill('breakBlockAt', skills.breakBlockAt)(unknownBlockBot, 2, 64, 2), false,
+      'unloaded break target is unknown, not a block to dig')
+    assert.equal(await ownership.trackSkill('placeBlock', skills.placeBlock)(unknownBlockBot, 'oak_planks', 2, 64, 2), false,
+      'unloaded placement target is unknown, not air')
+    assert.equal(await ownership.trackSkill('digDown', skills.digDown)(unknownBlockBot, 2), false,
+      'unloaded dig target cannot be reported as reaching the world bottom')
+  })
+  assert.deepEqual(unknownBlockMutations, [], 'null observations reject before the block mutation methods')
+  assert.equal(ownership.operationResult(unknownBlockOperation).unconfirmedChanges.length, 3,
+    'each rejected target records unknown evidence on its owning SDK call')
 
   console.log('interaction confirmation tests passed')
 }

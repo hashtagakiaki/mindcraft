@@ -103,7 +103,13 @@ export class MindServerProxy {
             catch (error) { console.error('Error: ', JSON.stringify(error, Object.getOwnPropertyNames(error))); }
         });
         this.socket.on('get-full-state', (callback) => {
-            try { callback(this.managementReady ? getFullState(this.agent) : null); }
+            try {
+                callback(this.managementReady ? getFullState(this.agent, {
+                    connectionGeneration: this.connectionGeneration,
+                    serverGeneration: this.serverGeneration,
+                    ready: this.managementReady,
+                }) : null);
+            }
             catch (error) { console.error('Error getting full state:', error); callback(null); }
         });
     }

@@ -47,15 +47,12 @@ export function getBlockAtPosition(bot, x=0, y=0, z=0) {
      * @param {number} x - The relative x offset to serach, default 0.
      * @param {number} y - The relative y offset to serach, default 0.
      * @param {number} y - The relative z offset to serach, default 0. 
-     * @returns {Block} - The nearest block.
+     * @returns {Block|null} - The loaded block, or null when the position is unknown/unloaded.
      * @example
      * let blockBelow = world.getBlockAtPosition(bot, 0, -1, 0);
      * let blockAbove = world.getBlockAtPosition(bot, 0, 2, 0); since minecraft position is at the feet
      **/
-    let block = bot.blockAt(bot.entity.position.offset(x, y, z));
-    if (!block) block = {name: 'air'};
-       
-    return block;
+    return bot.blockAt(bot.entity.position.offset(x, y, z));
 }
 
 
@@ -68,9 +65,9 @@ export function getSurroundingBlocks(bot) {
      **/
     // Create a list of block position results that can be unpacked.
     let res = [];
-    res.push(`Block Below: ${getBlockAtPosition(bot, 0, -1, 0).name}`);
-    res.push(`Block at Legs: ${getBlockAtPosition(bot, 0, 0, 0).name}`);
-    res.push(`Block at Head: ${getBlockAtPosition(bot, 0, 1, 0).name}`);
+    res.push(`Block Below: ${getBlockAtPosition(bot, 0, -1, 0)?.name ?? 'unknown'}`);
+    res.push(`Block at Legs: ${getBlockAtPosition(bot, 0, 0, 0)?.name ?? 'unknown'}`);
+    res.push(`Block at Head: ${getBlockAtPosition(bot, 0, 1, 0)?.name ?? 'unknown'}`);
 
     return res;
 }
@@ -82,7 +79,7 @@ export function getFirstBlockAboveHead(bot, ignore_types=null, distance=32) {
      * @param {Bot} bot - The bot to get the block for.
      * @param {string[]} ignore_types - The names of the blocks to ignore.
      * @param {number} distance - The maximum distance to search, default 32.
-     * @returns {string} - The fist block above head.
+     * @returns {string} - The first known solid block above head, 'none', or 'unknown' if a block is unloaded.
      * @example
      * let firstBlockAboveHead = world.getFirstBlockAboveHead(bot, null, 32);
      **/
@@ -97,11 +94,11 @@ export function getFirstBlockAboveHead(bot, ignore_types=null, distance=32) {
         }
     }
     // The block above, stops when it finds a solid block .
-    let block_above = {name: 'air'};
+    let block_above = null;
     let height = 0
     for (let i = 0; i < distance; i++) {
         let block = bot.blockAt(bot.entity.position.offset(0, i+2, 0));
-        if (!block) block = {name: 'air'};
+        if (!block) return 'unknown';
         // Ignore and continue
         if (ignore_blocks.includes(block.name)) continue;
         // Defaults to any block
@@ -110,7 +107,7 @@ export function getFirstBlockAboveHead(bot, ignore_types=null, distance=32) {
         break;
     }
 
-    if (ignore_blocks.includes(block_above.name)) return 'none';
+    if (!block_above || ignore_blocks.includes(block_above.name)) return 'none';
     
     return `${block_above.name} (${height} blocks up)`;
 }

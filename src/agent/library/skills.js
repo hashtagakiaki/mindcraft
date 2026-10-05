@@ -1101,6 +1101,12 @@ export async function breakBlockAt(bot, x, y, z) {
      **/
     if (x == null || y == null || z == null) throw new Error('Invalid position to break block at.');
     let block = bot.blockAt(Vec3(x, y, z));
+    if (!block) {
+        recordUncertainty({ unit: 'block', target: { position: { x, y, z } },
+            reason: 'block observation is unknown; Mineflayer returned null', observedAt: new Date().toISOString() });
+        log(bot, `Cannot break block at x:${x}, y:${y}, z:${z}: block observation is unknown.`);
+        return false;
+    }
     if (block.name !== 'air' && block.name !== 'water' && block.name !== 'lava') {
         if (bot.modes.isOn('cheat')) {
             if (useDelay) { await new Promise(resolve => setTimeout(resolve, blockPlaceDelay)); }
@@ -1219,6 +1225,13 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
     else if (item_name === 'lava') {
         item_name = 'lava_bucket';
     }
+    const targetBlock = bot.blockAt(target_dest);
+    if (!targetBlock) {
+        recordUncertainty({ unit: 'block', target: { position: { x: target_dest.x, y: target_dest.y, z: target_dest.z } },
+            reason: 'placement target observation is unknown; Mineflayer returned null', observedAt: new Date().toISOString() });
+        log(bot, `Cannot place ${blockType} at ${target_dest}: target block observation is unknown.`);
+        return false;
+    }
     let block_item = bot.inventory.findInventoryItem(item_name);
     if (!block_item && bot.game.gameMode === 'creative' && !bot.restrict_to_inventory) {
         await bot.creative.setInventorySlot(36, mc.makeItem(item_name, 1)); // 36 is first hotbar slot
@@ -1229,7 +1242,6 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         return false;
     }
 
-    const targetBlock = bot.blockAt(target_dest);
     if (targetBlock.name === blockType || (targetBlock.name === 'grass_block' && blockType === 'dirt')) {
         log(bot, `${blockType} already at ${targetBlock.position}.`);
         return false;
@@ -1247,6 +1259,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
     // get the buildoffblock and facevec based on whichever adjacent block is not empty
     let buildOffBlock = null;
     let faceVec = null;
+    let unknownAdjacentBlock = false;
     const dir_map = {
         'top': Vec3(0, 1, 0),
         'bottom': Vec3(0, -1, 0),
@@ -1270,6 +1283,10 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
 
     for (let d of dirs) {
         const block = bot.blockAt(target_dest.plus(d));
+        if (!block) {
+            unknownAdjacentBlock = true;
+            continue;
+        }
         if (!empty_blocks.includes(block.name)) {
             buildOffBlock = block;
             faceVec = new Vec3(-d.x, -d.y, -d.z); // invert
@@ -1277,6 +1294,12 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         }
     }
     if (!buildOffBlock) {
+        if (unknownAdjacentBlock) {
+            recordUncertainty({ unit: 'block', target: { position: { x: target_dest.x, y: target_dest.y, z: target_dest.z } },
+                reason: 'placement support observation is unknown; Mineflayer returned null', observedAt: new Date().toISOString() });
+            log(bot, `Cannot place ${blockType} at ${target_dest}: support blocks are not fully observed.`);
+            return false;
+        }
         log(bot, `Cannot place ${blockType} at ${targetBlock.position}: nothing to place on.`);
         return false;
     }
@@ -2699,14 +2722,24 @@ export async function digDown(bot, distance = 10) {
      * await skills.digDown(bot, 10);
      **/
 
-    let start_block_pos = bot.blockAt(bot.entity.position).position;
+    let start_block = bot.blockAt(bot.entity.position);
+    if (!start_block) {
+        recordUncertainty({ unit: 'block', target: 'digDown start position',
+            reason: 'block observation is unknown; Mineflayer returned null', observedAt: new Date().toISOString() });
+        log(bot, 'Cannot dig down: current block observation is unknown.');
+        return false;
+    }
+    let start_block_pos = start_block.position;
     for (let i = 1; i <= distance; i++) {
         const targetBlock = bot.blockAt(start_block_pos.offset(0, -i, 0));
         let belowBlock = bot.blockAt(start_block_pos.offset(0, -i-1, 0));
 
         if (!targetBlock || !belowBlock) {
-            log(bot, `Dug down ${i-1} blocks, but reached the end of the world.`);
-            return true;
+            recordUncertainty({ unit: 'block', target: { position: { x: start_block_pos.x, y: start_block_pos.y - i, z: start_block_pos.z } },
+                reason: 'digDown stopped because a target or lower block observation is unknown; Mineflayer returned null',
+                observedAt: new Date().toISOString() });
+            log(bot, `Could not confirm the next block while digging down after ${i-1} blocks; stopping without treating it as completion.`);
+            return false;
         }
 
         // Check for lava, water

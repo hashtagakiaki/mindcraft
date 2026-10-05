@@ -2,6 +2,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { CodexSession } from '../process/codex_session.js';
 import settings from './settings.js';
+import { createObservationScope } from './library/observation_scope.js';
 
 const DEFAULTS = { stall_timeout_ms: 30000, action_timeout_ms: 120000, output_limit: 16000, max_search_radius: 64,
     task_budget_ms: 300000, max_operations: 32, max_turns: 40 };
@@ -18,10 +19,10 @@ export function validateCodexRuntime(profile) {
     return { model: selected.model, effort: selected.params?.reasoning_effort ?? 'medium', config };
 }
 
-export function observedState(bot) {
+export function observedState(bot, observationScope = createObservationScope(bot)) {
     const p = bot.entity?.position;
     const items = bot.inventory?.items?.() ?? [];
-    return { position: p ? { x: p.x, y: p.y, z: p.z } : null, dimension: bot.game?.dimension,
+    return { observationScope, position: p ? { x: p.x, y: p.y, z: p.z } : null, dimension: bot.game?.dimension,
         health: bot.health, food: bot.food, inventoryUnconfirmed: !!bot.inventoryUnconfirmed,
         items: items.map(item => ({ name: item.name, count: item.count, durabilityUsed: item.durabilityUsed, maxDurability: item.maxDurability })) };
 }
@@ -85,7 +86,7 @@ export class CodexRuntime {
                 this.actionId = agent.actions.currentAction?.id;
                 return agent.coder.executeCode(code);
             }, { timeout: config.action_timeout_ms / 60000, stallTimeoutMs: config.stall_timeout_ms, outputLimit: config.output_limit, taskId });
-            const observed = { ...result, observed: observedState(agent.bot) };
+            const observed = { ...result, observed: observedState(agent.bot, agent.getObservationScope?.()) };
             record('operation_result', { result: observed });
             return observed;
         };
@@ -110,7 +111,7 @@ export class CodexRuntime {
             if (!current()) return false;
             this.session = this.makeSession({ model, effort, record, execute });
             await this.session.open(instructions, this.abort.signal);
-            let input = 'Current conversation and older memory (current request is the final conversation entry):\n' + JSON.stringify({ memory: agent.history.memory, turns: agent.history.getHistory(), observed: observedState(agent.bot) });
+            let input = 'Current conversation and older memory (current request is the final conversation entry):\n' + JSON.stringify({ memory: agent.history.memory, turns: agent.history.getHistory(), observed: observedState(agent.bot, agent.getObservationScope?.()) });
             record('task_start', { instructions, input });
             while (current()) {
                 if (turnCount >= config.max_turns) {

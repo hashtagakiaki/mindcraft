@@ -7,6 +7,7 @@ import { initModes } from './modes.js';
 import { initBot } from '../utils/mcdata.js';
 import { containsCommand, commandExists, executeCommand, truncCommandMessage, isAction, blacklistCommands } from './commands/index.js';
 import { ActionManager } from './action_manager.js';
+import { createObservationScope } from './library/observation_scope.js';
 import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
 import { createPlacesFacade } from './places.js';
@@ -77,6 +78,14 @@ export class Agent {
     }
 
     isShutdownStarted() { return this._shutdownStarted; }
+
+    getObservationScope() {
+        return createObservationScope(this.bot, {
+            connectionGeneration: serverProxy.connectionGeneration,
+            serverGeneration: serverProxy.serverGeneration,
+            ready: serverProxy.managementReady,
+        });
+    }
 
     shutdown(reason = 'shutdown', options = {}) {
         if (this._shutdownPromise) return this._shutdownPromise;
