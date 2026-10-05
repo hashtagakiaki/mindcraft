@@ -2,9 +2,10 @@ import { writeFile, readFile, mkdirSync } from 'fs';
 import { makeCompartment, lockdown } from './library/lockdown.js';
 import * as skills from './library/skills.js';
 import * as world from './library/world.js';
+import settings from './settings.js';
 import { Vec3 } from 'vec3';
 import {ESLint} from "eslint";
-import { trackSkill, operationContext } from './library/operation_context.js';
+import { trackSkill, operationContext, registerOwnedPromise } from './library/operation_context.js';
 
 export class Coder {
     constructor(agent) {
@@ -234,7 +235,7 @@ export class Coder {
         // Guard each SDK entry, including inline compound code after an await.
         const guarded = sdk => guardSdk(sdk, check);
         const compartment = makeCompartment({
-            skills: guarded(skills),
+            skills: guarded(configureGeneratedCodeFalseMode(skills, settings.generated_code_fail_on_false)),
             log: skills.log,
             world: guarded(world),
             vision: guarded({
@@ -277,6 +278,28 @@ export class Coder {
             });
         });
     }
+}
+
+function configureGeneratedCodeFalseMode(skillLibrary, configuredNames = []) {
+    if (!Array.isArray(configuredNames) || configuredNames.some(name => typeof name !== 'string')) {
+        throw new Error('generated_code_fail_on_false must be an array of skill names');
+    }
+    const selected = new Set(configuredNames);
+    if (selected.size === 0) return skillLibrary;
+    return Object.fromEntries(Object.entries(skillLibrary).map(([name, skill]) => {
+        if (!selected.has(name) || typeof skill !== 'function') return [name, skill];
+        return [name, new Proxy(skill, { apply(target, thisArg, args) {
+            const checkResult = value => {
+                if (value === false) {
+                    throw new Error(`skills.${name} returned false: action failed. Check the action output and inventory, then gather or craft missing prerequisites before retrying.`);
+                }
+                return value;
+            };
+            const result = Reflect.apply(target, thisArg, args);
+            if (result && typeof result.then === 'function') return registerOwnedPromise(result.then(checkResult));
+            return checkResult(result);
+        } })];
+    }));
 }
 
 function guardSdk(sdk, check) {

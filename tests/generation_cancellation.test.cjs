@@ -370,6 +370,7 @@ async function runCoderPrompterFixtures(sandbox) {
     const coderStubs = {
       'stubs/lockdown.js': `export function lockdown() {} export function makeCompartment() { return { evaluate() { return async () => { globalThis.fixtureExecCount++; }; } }; }`,
       'stubs/skills.js': 'export function unused() {}',
+      'stubs/settings.js': 'export default { generated_code_fail_on_false: [] };',
       'library/operation_context.js': await readFile(path.resolve(previousCwd, 'src/agent/library/operation_context.js'), 'utf8'),
       'stubs/world.js': 'export function unused() {}',
       'stubs/vec3.js': 'export class Vec3 {}',
@@ -380,6 +381,7 @@ async function runCoderPrompterFixtures(sandbox) {
       [
         ["'./library/lockdown.js'", "'./stubs/lockdown.js'"],
         ["'./library/skills.js'", "'./stubs/skills.js'"],
+        ["'./settings.js'", "'./stubs/settings.js'"],
         ["'./library/world.js'", "'./stubs/world.js'"],
         ["'vec3'", "'./stubs/vec3.js'"],
         ['"eslint"', '"./stubs/eslint.js"']
@@ -564,6 +566,11 @@ process.stdin.on('data', chunk => { input += chunk })
 process.stdin.on('end', () => {
   const request = JSON.parse(input)
   const mode = request.systemMessage
+  if (mode === 'success-model') {
+    fs.writeFileSync(request.turns[0], JSON.stringify(process.argv.slice(2)))
+    process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'ok***tail' } }) + '\\n')
+    return
+  }
   if (mode === 'success') {
     process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'ok***tail' } }) + '\\n')
     return
@@ -590,12 +597,18 @@ process.stdin.on('end', () => {
   process.env.MINDCRAFT_CODEX_BIN = fakeCli
   process.env.MINDCRAFT_CODEX_TIMEOUT_MS = '500'
   const { Codex } = await import(pathToFileURL(sourcePath).href + '?fixture=normal')
-  const codex = new Codex()
+  const codex = new Codex('gpt-6-luna')
   const observed = {}
 
   try {
     assert.equal(await codex.sendRequest([], 'success'), 'ok')
     observed.compatibleSuccessAndStopSequence = true
+    const modelArgsFile = path.join(sandbox, 'model-args.json')
+    assert.equal(await codex.sendRequest([modelArgsFile], 'success-model'), 'ok')
+    const modelArgs = JSON.parse(await readFile(modelArgsFile, 'utf8'))
+    const modelIndex = modelArgs.indexOf('--model')
+    assert.ok(modelIndex >= 0 && modelArgs[modelIndex + 1] === 'gpt-6-luna', 'legacy CLI receives the selected profile model')
+    observed.profileModelForwardedToLegacyCli = true
 
     const controller = new AbortController()
     const abortMarker = path.join(sandbox, 'abort.pids')

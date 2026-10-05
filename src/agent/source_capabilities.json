@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "features": {
+    "public-operation-result-facts": 1,
+    "generated-code-false-mode": 1,
+    "navigation-progress-stall": 1,
+    "codex-cli-profile-model": 1
+  }
+}

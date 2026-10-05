@@ -22,6 +22,8 @@ const FARM_CHEST_RADIUS = 32;
 const FARM_SEARCH_LIMIT = 10000;
 const FURNACE_POLL_INTERVAL_MS = 100;
 const FURNACE_IDLE_TIMEOUT_MS = 11000;
+const DEFAULT_NAVIGATION_STALL_TIMEOUT_MS = 90_000;
+const DEFAULT_NAVIGATION_CHECK_INTERVAL_MS = 5_000;
 const furnaceClickGuards = new WeakMap();
 const FARM_NEIGHBORS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 const CROPS = {
@@ -1736,14 +1738,48 @@ export async function goToGoal(bot, goal) {
     const doorCheckInterval = startDoorInterval(bot);
 
     bot.pathfinder.setMovements(final_movements);
+    const owner = operationContext();
+    const navigationStallTimeoutMs = Number.isFinite(settings.navigation_stall_timeout_ms) && settings.navigation_stall_timeout_ms > 0
+        ? settings.navigation_stall_timeout_ms : DEFAULT_NAVIGATION_STALL_TIMEOUT_MS;
+    const navigationCheckIntervalMs = Number.isFinite(settings.navigation_check_interval_ms) && settings.navigation_check_interval_ms > 0
+        ? settings.navigation_check_interval_ms : DEFAULT_NAVIGATION_CHECK_INTERVAL_MS;
+    let timeoutHandle;
+    let bestGoalDistance;
+    let lastProgressAt;
+    let stallError = null;
     try {
-        await bot.pathfinder.goto(goal);
-        clearInterval(doorCheckInterval);
+        bestGoalDistance = goal.heuristic(bot.entity.position.floored());
+        lastProgressAt = Date.now();
+        const navigation = bot.pathfinder.goto(goal);
+        timeoutHandle = setInterval(() => {
+            if (owner?.signal.aborted || owner?.closed) {
+                clearInterval(timeoutHandle);
+                timeoutHandle = null;
+                return;
+            }
+            const currentGoalDistance = goal.heuristic(bot.entity.position.floored());
+            if (currentGoalDistance <= bestGoalDistance - 0.5) {
+                bestGoalDistance = currentGoalDistance;
+                lastProgressAt = Date.now();
+            } else if (!stallError && Date.now() - lastProgressAt >= navigationStallTimeoutMs) {
+                stallError = new Error(`Navigation did not get closer to its goal for ${navigationStallTimeoutMs}ms.`);
+                stallError.name = 'NavigationStallTimeoutError';
+                bot.pathfinder.stop();
+            }
+        }, navigationCheckIntervalMs);
+        try {
+            await navigation;
+        } catch (err) {
+            if (!stallError) throw err;
+        }
+        if (stallError) throw stallError;
         return true;
     } catch (err) {
-        clearInterval(doorCheckInterval);
         // we need to catch so we can clean up the door check interval, then rethrow the error
         throw err;
+    } finally {
+        clearInterval(doorCheckInterval);
+        if (timeoutHandle) clearInterval(timeoutHandle);
     }
 }
 

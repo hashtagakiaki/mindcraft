@@ -47,10 +47,10 @@ async function main() {
       agent._messageGeneration = 0
       agent._managementGeneration = 0
       agent.checkTaskDone = async () => false
-      agent.bot = Object.assign(new EventEmitter(), { output: '', interrupt_code: false, entity: { position: { x: 0, y: 64, z: 0 } }, inventory: { items: () => [] }, modes: { pause() {}, unpause() {}, flushBehaviorLog: () => '' } })
+      agent.bot = Object.assign(new EventEmitter(), { output: '', interrupt_code: false, players: {}, entity: { position: { x: 0, y: 64, z: 0 } }, inventory: { items: () => [] }, modes: { isOn: () => false, pause() {}, unpause() {}, flushBehaviorLog: () => '' } })
       agent.clearBotLogs = () => { agent.bot.output = ''; agent.bot.interrupt_code = false }
       agent.requestInterrupt = () => { agent.bot.interrupt_code = true; agent.interrupt?.() }
-      agent.prompter = { profile: { model: 'codex/gpt-6-luna' }, skill_libary: { getAllSkillDocs: async () => ['skills.wait\nWait for a bounded number of milliseconds.'] }, withBotRules: async text => { rules.push(text); return text + '\nCURRENT RULES' } }
+      agent.prompter = { profile: { model: 'codex/gpt-6-luna' }, skill_libary: { getAllSkillDocs: async () => ['skills.wait\nWait for a bounded number of milliseconds.', 'skills.goToPlayer\nNavigate to a named player and return false when it is missing.'] }, withBotRules: async text => { rules.push(text); return text + '\nCURRENT RULES' } }
       agent.history = { memory: 'vision used to be unavailable', getHistory: () => [{ role: 'user', content: 'test' }], add: async (...args) => rows.push(args), save: async () => {} }
       agent.routeResponse = (source, text) => routed.push(text)
       agent.self_prompter = { stopForRecovery() {}, isActive: () => false, shouldInterrupt: () => false }
@@ -63,6 +63,32 @@ async function main() {
     const result = await agent.actions.runAction('compound', () => agent.coder.executeCode('log(bot, "first");\nawait Promise.resolve();\nlog(bot, "second");'), { timeout: 0, outputLimit: 16000 })
     assert.equal(result.success, true)
     assert.match(result.message, /first[\s\S]*second/)
+    settings.generated_code_fail_on_false = []
+    const falseDefault = await agent.actions.runAction('generated-false-default', () => agent.coder.executeCode('await skills.goToPlayer(bot, "missing");\nlog(bot, "continued after false");'), { timeout: 0 })
+    assert.equal(falseDefault.success, true, 'default SDK mode preserves boolean false')
+    assert.match(falseDefault.message, /continued after false/)
+    settings.generated_code_fail_on_false = ['goToPlayer']
+    const { goToPlayer } = await load('src/agent/library/skills.js')
+    assert.equal(await goToPlayer(agent.bot, 'missing'), false, 'direct SDK/skill callers retain the standard boolean API')
+    const falseConfigured = await agent.actions.runAction('generated-false-configured', () => agent.coder.executeCode('await skills.goToPlayer(bot, "missing");\nlog(bot, "must not run");'), { timeout: 0 })
+    assert.equal(falseConfigured.success, false, 'configured generated SDK false stops the generated action')
+    assert.match(falseConfigured.message, /skills\.goToPlayer returned false/)
+    assert.doesNotMatch(falseConfigured.message, /must not run/)
+    assert.equal(falseConfigured.skillResults.some(call => call.skill === 'skills.goToPlayer' && call.status === 'returned_false'), true)
+    const caughtFalse = await agent.actions.runAction('generated-caught-false', () => agent.coder.executeCode(
+      'try { await skills.goToPlayer(bot, "missing"); } catch (error) { log(bot, error.message); }\nlog(bot, "continued after catch");'), { timeout: 0 })
+    assert.equal(caughtFalse.success, true, 'generated code can explicitly recover from configured false errors')
+    assert.match(caughtFalse.message, /continued after catch/)
+    const unhandledSdkRejections = []
+    const onUnhandledSdkRejection = reason => unhandledSdkRejections.push(reason)
+    process.on('unhandledRejection', onUnhandledSdkRejection)
+    const unawaitedFalse = await agent.actions.runAction('generated-unawaited-false', () => agent.coder.executeCode('skills.goToPlayer(bot, "missing");\nawait Promise.resolve();'), { timeout: 0 })
+    await delay(20)
+    process.removeListener('unhandledRejection', onUnhandledSdkRejection)
+    assert.equal(unawaitedFalse.success, true, 'unawaited domain false remains a completed generated action')
+    assert.equal(unawaitedFalse.skillResults.some(call => call.skill === 'skills.goToPlayer' && call.status === 'returned_false'), true, 'the owned derived promise is drained into the action result')
+    assert.deepEqual(unhandledSdkRejections, [], 'the generated false mode does not leak an unhandled rejection')
+    settings.generated_code_fail_on_false = []
     const domainFalse = await agent.actions.runAction('domain-false', async () => false, { timeout: 0 })
     assert.equal(domainFalse.success, true, 'executor success remains independent of a false domain return')
     assert.equal(domainFalse.domainReturn, false)

@@ -26,8 +26,8 @@ async function setupFarmFixture(root) {
   await write(root, 'src/agent/library/index.js', await readFile(path.join(repo, 'src/agent/library/index.js')))
   await write(root, 'src/agent/library/skill_library.js', await readFile(path.join(repo, 'src/agent/library/skill_library.js')))
   await write(root, 'src/agent/library/sdk_capabilities.js', await readFile(path.join(repo, 'src/agent/library/sdk_capabilities.js')))
-  await write(root, 'src/agent/modes.js', await readFile(path.join(repo, 'src/agent/modes.js')))
   await write(root, 'src/agent/settings.js', 'export default {};')
+  await write(root, 'src/agent/modes.js', await readFile(path.join(repo, 'src/agent/modes.js')))
   await write(root, 'src/agent/conversation.js', 'export default {};')
   await write(root, 'src/utils/mcdata.js', 'export function mustCollectManually(name) { return name === "wheat"; }')
   await write(root, 'src/utils/math.js', 'export function cosineSimilarity() { return 0; }')
@@ -104,6 +104,8 @@ export default { goals: { GoalNear, GoalFollow, GoalInvert }, Movements: class {
 async function testNavigation(root) {
   await setupNavigationFixture(root)
   const skills = await import(pathToFileURL(path.join(root, 'src/agent/library/skills.js')))
+  const { default: runtimeSettings } = await import(pathToFileURL(path.join(root, 'settings.js')))
+  Object.assign(runtimeSettings, { navigation_stall_timeout_ms: 20, navigation_check_interval_ms: 5 })
   const targetBlock = { name: 'chest', position: { x: 4, y: 0, z: 0, toString() { return '4,0,0' }, offset() { return this } } }
   const targetEntity = { name: 'cow', position: { x: 4, y: 0, z: 0, floored() { return { x: Math.floor(this.x), y: Math.floor(this.y), z: Math.floor(this.z) } } } }
   const makeBot = ({ result = true, reject = false, rejectAfter = 0, distance = 0 } = {}) => {
@@ -178,6 +180,13 @@ async function testNavigation(root) {
   bot = makeBot()
   assert.equal(await skills.goToNearestBlock(bot, 'chest'), true)
   assert.equal(await skills.goToNearestEntity(bot, 'cow'), true)
+  bot = makeBot()
+  let stopCalls = 0
+  let rejectPending
+  bot.pathfinder.goto = () => new Promise((resolve, reject) => { rejectPending = reject })
+  bot.pathfinder.stop = () => { stopCalls++; rejectPending(new Error('stopped by progress monitor')) }
+  await assert.rejects(skills.goToGoal(bot, { heuristic: () => 10 }), /did not get closer.*20ms/)
+  assert.equal(stopCalls, 1, 'navigation progress monitor stops a genuinely stalled path once')
   console.log('navigation contract tests passed')
 }
 
@@ -512,6 +521,12 @@ async function testFarm(root) {
 }
 
 async function main() {
+  if (process.argv[2] === '--navigation-only') {
+    const temp = await mkdtemp(path.join(os.tmpdir(), 'mindcraft-focused-navigation-'))
+    try { await testNavigation(path.join(temp, 'navigation-fixture')) }
+    finally { await rm(temp, { recursive: true, force: true }) }
+    return
+  }
   if (process.argv[2] === '--interaction-confirmation-only') {
     const temp = await mkdtemp(path.join(os.tmpdir(), 'mindcraft-focused-interaction-'))
     try {

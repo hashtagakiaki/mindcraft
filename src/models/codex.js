@@ -16,7 +16,9 @@ const ownedCliHelperPath = fileURLToPath(new URL('../process/owned_cli.js', impo
 export class Codex {
     static prefix = 'codex';
 
-    constructor() {}
+    constructor(model_name) {
+        this.model_name = model_name;
+    }
 
     async sendRequest(turns, systemMessage, stop_seq='***', options={}) {
         return this.#sendRequest(turns, systemMessage, stop_seq, null, options?.signal);
@@ -49,6 +51,7 @@ export class Codex {
                 await writeFile(imagePath, imageBuffer);
                 args.push('--image', imagePath);
             }
+            if (this.model_name) args.push('--model', this.model_name);
             args.push(prompt);
             if (signal?.aborted) throw abortError(signal.reason);
 
