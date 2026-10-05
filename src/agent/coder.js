@@ -162,7 +162,7 @@ export class Coder {
     async  _lintCode(code) {
         let result = '#### CODE ERROR INFO ###\n';
         const codeNoComments = code.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
-        const skillRegex = /((?:skills|world|places|vision)\.(.*?))\(/g;
+        const skillRegex = /((?:skills|world|places|vision|communication)\.(.*?))\(/g;
         const skills = [];
         let match;
         while ((match = skillRegex.exec(codeNoComments)) !== null) {
@@ -242,6 +242,12 @@ export class Coder {
                 lookAtPlayer: trackSkill('vision.lookAtPlayer', (playerName, direction) => this.agent.vision_interpreter.lookAtPlayer(playerName, direction)),
                 lookAtPosition: trackSkill('vision.lookAtPosition', (x, y, z) => this.agent.vision_interpreter.lookAtPosition(x, y, z)),
             }),
+            communication: settings.agent_runtime === 'codex-session' ? guarded({
+                sendToBot: trackSkill('communication.sendToBot', (recipient, message) => {
+                    if (!this.agent.codexRuntime) throw new Error('Native communication is unavailable outside an active Codex task');
+                    return this.agent.codexRuntime.sendToBot(recipient, message);
+                }),
+            }) : undefined,
             places: guarded(this.agent.places?.sdk),
             Vec3,
         });

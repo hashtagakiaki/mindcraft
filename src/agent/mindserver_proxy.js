@@ -76,8 +76,19 @@ export class MindServerProxy {
             console.log('Disconnected from MindServer; waiting for management recovery');
             this._pauseManagement(true);
         });
-        this.socket.on('chat-message', (agentName, json) => {
-            if (this.managementReady) convoManager.receiveFromBot(agentName, json);
+        this.socket.on('chat-message', (agentName, json, acknowledge) => {
+            if (!this.managementReady) return;
+            if (json?.nativeMessage) {
+                const connectionGeneration = this.connectionGeneration;
+                void Promise.resolve(convoManager.receiveFromBot(agentName, json, { connectionGeneration }))
+                    .then(result => acknowledge?.(result))
+                    .catch(error => {
+                        console.error('Could not accept native peer message:', error.message);
+                        acknowledge?.({ accepted: false, error: 'receiver rejected the message' });
+                    });
+                return;
+            }
+            convoManager.receiveFromBot(agentName, json);
         });
         this.socket.on('agents-status', (agents) => {
             if (!this.managementReady) {
@@ -176,10 +187,11 @@ export class MindServerProxy {
             if (this.managementCredential) {
                 const registration = await new Promise((resolve, reject) => {
                     const timer = setTimeout(() => reject(new Error('MindServer agent registration was not acknowledged')), PLACE_RPC_TIMEOUT_MS);
-                    socket.emit('connect-agent-process', this.name, value => { clearTimeout(timer); resolve(value); });
+                    socket.emit('connect-agent-process', this.name, { connectionGeneration }, value => { clearTimeout(timer); resolve(value); });
                 });
                 if (!registration?.accepted || registration.agentName !== this.name
-                    || registration.spawnId !== this.managementCredential.spawnId) {
+                    || registration.spawnId !== this.managementCredential.spawnId
+                    || registration.connectionGeneration !== connectionGeneration) {
                     throw new Error('MindServer rejected the authenticated child registration');
                 }
             } else {
@@ -345,6 +357,20 @@ export const serverProxy = new MindServerProxy();
 // for chatting with other bots
 export function sendBotChatToServer(agentName, json) {
     if (serverProxy.managementReady) serverProxy.getSocket().emit('chat-message', agentName, json);
+}
+
+export function sendNativeBotChatToServer(agentName, json, acknowledge) {
+    if (!serverProxy.managementReady || !serverProxy.managementCredential) {
+        acknowledge?.({ accepted: false, error: 'authenticated management connection required' });
+        return false;
+    }
+    const socket = serverProxy.getSocket();
+    const generation = serverProxy.connectionGeneration;
+    socket.emit('chat-message', agentName, json, result => {
+        if (socket !== serverProxy.getSocket() || generation !== serverProxy.connectionGeneration || !serverProxy.managementReady) return;
+        acknowledge?.(result);
+    });
+    return true;
 }
 
 // for sending general output to server for display

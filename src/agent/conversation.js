@@ -1,6 +1,7 @@
 import settings from './settings.js';
 import { containsCommand } from './commands/index.js';
-import { sendBotChatToServer } from './mindserver_proxy.js';
+import { randomUUID } from 'node:crypto';
+import { sendBotChatToServer, sendNativeBotChatToServer } from './mindserver_proxy.js';
 
 let agent;
 let agent_names = [];
@@ -42,6 +43,7 @@ class Conversation {
 }
 
 const WAIT_TIME_START = 30000;
+const MAX_NATIVE_MESSAGE_CHARS = 2000;
 class ConversationManager {
     constructor() {
         this.convos = {};
@@ -165,7 +167,57 @@ class ConversationManager {
         sendBotChatToServer(send_to, json);
     }
 
-    async receiveFromBot(sender, received) {
+    sendNativeToBot(send_to, message, scope) {
+        if (!this.isOtherAgent(send_to)) return Promise.reject(new Error(`Unknown bot recipient: ${send_to}`));
+        if (typeof message !== 'string' || !message.trim() || message.length > MAX_NATIVE_MESSAGE_CHARS) {
+            return Promise.reject(new Error(`Peer message must contain 1-${MAX_NATIVE_MESSAGE_CHARS} characters`));
+        }
+        if (!scope?.taskId || !scope?.actionId || !Number.isInteger(scope.connectionGeneration)
+            || !Number.isInteger(scope.managementGeneration) || !scope.signal) {
+            return Promise.reject(new Error('Native peer message requires an owned task, operation, and authenticated connection scope'));
+        }
+        const messageId = randomUUID();
+        const json = { message, start: false, end: false, nativeMessage: {
+            id: messageId, senderTaskId: scope.taskId, senderActionId: String(scope.actionId),
+            senderConnectionGeneration: scope.connectionGeneration,
+            senderManagementGeneration: scope.managementGeneration,
+        } };
+        return new Promise((resolve, reject) => {
+            let settled = false;
+            const finish = (error, value) => {
+                if (settled) return;
+                settled = true;
+                scope.signal.removeEventListener('abort', onAbort);
+                if (error) reject(error); else resolve(value);
+            };
+            const onAbort = () => finish(new Error('Native peer message cancelled before acknowledgement'));
+            if (scope.signal.aborted) return onAbort();
+            scope.signal.addEventListener('abort', onAbort, { once: true });
+            const sent = sendNativeBotChatToServer(send_to, json, result => {
+                if (scope.signal.aborted) return onAbort();
+                if (!result?.accepted || result.messageId !== messageId || result.taskId !== scope.taskId) {
+                    finish(new Error(result?.error || 'Peer inbox did not accept the message'));
+                    return;
+                }
+                finish(null, { accepted: true, messageId, senderTaskId: scope.taskId,
+                    receiverTaskId: result.receiverTaskId ?? null, acceptance: 'receiver-inbox' });
+            });
+            if (!sent) finish(new Error('Authenticated management connection is unavailable'));
+        });
+    }
+
+    async receiveFromBot(sender, received, scope = {}) {
+        if (received?.nativeMessage) {
+            const native = received.nativeMessage;
+            if (native.senderAgent !== sender || typeof native.senderSpawnId !== 'string'
+                || typeof native.hubGeneration !== 'string' || typeof native.id !== 'string'
+                || typeof native.senderTaskId !== 'string' || typeof native.senderActionId !== 'string'
+                || typeof received.message !== 'string') {
+                return { accepted: false, error: 'native peer envelope is incomplete' };
+            }
+            const accepted = agent.codexRuntime?.acceptPeerMessage?.(sender, received.message, native, scope);
+            return accepted?.accepted ? { ...accepted, taskId: native.senderTaskId } : accepted ?? { accepted: false, error: 'no active native task accepts peer messages' };
+        }
         const convo = this._getConvo(sender);
 
         if (convo.ignore_until_start && !received.start)

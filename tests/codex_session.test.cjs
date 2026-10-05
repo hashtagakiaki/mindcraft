@@ -51,7 +51,7 @@ async function main() {
       agent.bot = Object.assign(new EventEmitter(), { output: '', interrupt_code: false, players: {}, game: { dimension: 'overworld' }, entity: { position: { x: 0, y: 64, z: 0 } }, inventory: { items: () => [] }, modes: { isOn: () => false, pause() {}, unpause() {}, flushBehaviorLog: () => '' } })
       agent.clearBotLogs = () => { agent.bot.output = ''; agent.bot.interrupt_code = false }
       agent.requestInterrupt = () => { agent.bot.interrupt_code = true; agent.interrupt?.() }
-      agent.prompter = { profile: { model: 'codex/gpt-6-luna' }, skill_libary: { getAllSkillDocs: async () => ['skills.wait\nWait for a bounded number of milliseconds.', 'skills.goToPlayer\nNavigate to a named player and return false when it is missing.'] }, withBotRules: async text => { rules.push(text); return text + '\nCURRENT RULES' } }
+      agent.prompter = { profile: { model: 'codex/gpt-6-luna' }, skill_libary: { getAllSkillDocs: async () => ['skills.wait\nWait for a bounded number of milliseconds.', 'skills.goToPlayer\nNavigate to a named player and return false when it is missing.', 'communication.sendToBot\nSend a bounded peer message into an authenticated native task inbox.'] }, withBotRules: async text => { rules.push(text); return text + '\nCURRENT RULES' } }
       agent.history = { memory: 'vision used to be unavailable', invalidations: 0, invalidateSummaries() { this.invalidations++ }, getHistory: () => [{ role: 'user', content: 'test' }], add: async (...args) => rows.push(args), checkpointAdd: async (...args) => { rows.push(args); await agent.history.save(); return { saved: true } }, save: async () => {} }
       agent.routeResponse = (source, text) => routed.push(text)
       agent.self_prompter = { state: null, prompt: '', stopForRecovery() {}, isStopped: () => true, isActive: () => false, shouldInterrupt: () => false }
@@ -114,6 +114,144 @@ async function main() {
     const settledOutput = agent.bot.output
     await delay(130)
     assert.equal(agent.actions.executing, false)
+
+    // Native peer communication is an owned SDK call and is acknowledged only after inbox acceptance.
+    const { default: convoManager } = await load('src/agent/conversation.js')
+    const { serverProxy } = await load('src/agent/mindserver_proxy.js')
+    const savedProxy = { socket: serverProxy.socket, managementReady: serverProxy.managementReady,
+      managementCredential: serverProxy.managementCredential, connectionGeneration: serverProxy.connectionGeneration,
+      serverGeneration: serverProxy.serverGeneration }
+    const sentNative = []
+    serverProxy.socket = { emit(event, recipient, payload, acknowledge) {
+      sentNative.push({ event, recipient, payload })
+      acknowledge({ accepted: true, messageId: payload.nativeMessage.id,
+        taskId: payload.nativeMessage.senderTaskId, receiverTaskId: 'peer-current-task' })
+    } }
+    serverProxy.managementReady = true
+    serverProxy.managementCredential = { token: 'synthetic-token', spawnId: 'synthetic-spawn' }
+    serverProxy.connectionGeneration = 5
+    serverProxy.serverGeneration = 'synthetic-hub-generation'
+    const peerAgent = makeAgent('PeerSender')
+    peerAgent.currentTaskId = 'peer-sender-task'
+    convoManager.initAgent(peerAgent)
+    convoManager.updateAgents([{ name: 'PeerSender', in_game: true }, { name: 'PeerReceiver', in_game: true }])
+    let nativeRuntime
+    const peerInputs = []
+    nativeRuntime = new CodexRuntime(peerAgent, { makeSession: () => ({
+      open: async () => {},
+      runTurn: async input => {
+        peerInputs.push(input)
+        if (peerInputs.length === 1) {
+          const native = { id: 'peer-message-1', senderTaskId: 'other-task', senderActionId: 'other-action',
+            senderConnectionGeneration: 4, senderManagementGeneration: 2, senderAgent: 'PeerReceiver',
+            senderSpawnId: 'other-spawn', receiverConnectionGeneration: 5, hubGeneration: 'synthetic-hub-generation' }
+          assert.equal(nativeRuntime.acceptPeerMessage('PeerReceiver', 'please inspect the chest', native,
+            { connectionGeneration: 5 }).accepted, true)
+          const duplicate = nativeRuntime.acceptPeerMessage('PeerReceiver', 'please inspect the chest', native,
+            { connectionGeneration: 5 })
+          assert.equal(duplicate.accepted, true)
+          assert.equal(duplicate.duplicate, true, 'same sender/message ID is accepted idempotently')
+          for (let index = nativeRuntime.seenNativeMessageIds.size; index < 256; index++) nativeRuntime.seenNativeMessageIds.add(`filled-${index}`)
+          const oldAfterCapacity = nativeRuntime.acceptPeerMessage('PeerReceiver', 'duplicate', native,
+            { connectionGeneration: 5 })
+          assert.equal(oldAfterCapacity.duplicate, true, 'seen IDs remain retained at the dedupe cap')
+          const overCapacity = nativeRuntime.acceptPeerMessage('PeerReceiver', 'new', { ...native, id: 'new-at-cap' },
+            { connectionGeneration: 5 })
+          assert.equal(overCapacity.accepted, false, 'new IDs are rejected instead of evicting replay protection')
+          const oldConnection = nativeRuntime.acceptPeerMessage('PeerReceiver', 'old connection', { ...native, id: 'old-conn' },
+            { connectionGeneration: 4 })
+          assert.equal(oldConnection.accepted, false, 'inbox admission rejects a replaced receiver connection')
+          return { operation: Promise.resolve({ success: true }) }
+        }
+        return { operation: null, messages: ['task finished'] }
+      }, close: async () => {} }) })
+    peerAgent.codexRuntime = nativeRuntime
+    assert.equal(await nativeRuntime.run('operator', () => true, 'peer-sender-task'), true)
+    assert.equal(peerInputs.filter(input => input.includes('please inspect the chest')).length, 1,
+      'an accepted peer message appears once at the following native turn')
+    assert.equal(peerInputs[1].includes('sender task other-task'), true, 'sender task identity is distinct from receiver task')
+    assert.equal(peerAgent.currentTaskId, 'peer-sender-task')
+    const invalidatedAgent = makeAgent('NativeInboxInvalidation')
+    invalidatedAgent.currentTaskId = 'receiver-old-task'
+    const invalidatedRuntime = new CodexRuntime(invalidatedAgent)
+    invalidatedRuntime.taskId = 'receiver-old-task'
+    invalidatedRuntime.active = true
+    invalidatedRuntime.acceptingNativeInbox = true
+    invalidatedRuntime._taskScope = { taskId: 'receiver-old-task', messageGeneration: 0, managementGeneration: 0,
+      connectionGeneration: 5, isCurrent: () => invalidatedAgent.currentTaskId === 'receiver-old-task'
+        && invalidatedAgent._messageGeneration === 0 && serverProxy.connectionGeneration === 5 }
+    const invalidationEnvelope = { id: 'invalidate-on-stop', senderTaskId: 'other-task', senderActionId: 'action',
+      senderConnectionGeneration: 4, senderManagementGeneration: 2, senderAgent: 'PeerReceiver',
+      senderSpawnId: 'other-spawn', receiverConnectionGeneration: 5, hubGeneration: 'synthetic-hub-generation' }
+    assert.equal(invalidatedRuntime.acceptPeerMessage('PeerReceiver', 'queued before stop', invalidationEnvelope,
+      { connectionGeneration: 5 }).accepted, true)
+    invalidatedAgent.currentTaskId = 'receiver-new-task'
+    invalidatedAgent._messageGeneration++
+    assert.equal(invalidatedRuntime.acceptPeerMessage('PeerReceiver', 'old message', { ...invalidationEnvelope, id: 'after-new-task' },
+      { connectionGeneration: 5 }).accepted, false, 'a superseded native task cannot accept more inbox messages')
+    invalidatedRuntime.cancel('superseded')
+    assert.equal(invalidatedRuntime.nativeInbox.length, 0, 'Stop/task replacement invalidates already queued inbox messages')
+
+    const nativeSendAgent = makeAgent('NativeSend')
+    await until(() => nativeSendAgent.coder.code_template && nativeSendAgent.coder.code_lint_template)
+    nativeSendAgent.currentTaskId = 'native-send-task'
+    convoManager.initAgent(nativeSendAgent)
+    convoManager.updateAgents([{ name: 'NativeSend', in_game: true }, { name: 'PeerReceiver', in_game: true }])
+    // Exercise the actual generated SDK + ActionManager ownership with a one-operation fake session.
+    const nativeSendRuntime = new CodexRuntime(nativeSendAgent, { makeSession: ({ execute }) => {
+      let turn = 0
+      return { open: async () => {}, runTurn: async () => ++turn === 1
+        ? { operation: execute('await communication.sendToBot("PeerReceiver", "owned send");\nlog(bot, "ack retained");') }
+        : { operation: null, messages: ['sent'] }, close: async () => {} }
+    } })
+    nativeSendAgent.codexRuntime = nativeSendRuntime
+    const sendOutput = await nativeSendRuntime.run('operator', () => true, 'native-send-task')
+    assert.equal(sendOutput, true)
+    assert.equal(sentNative.length, 1)
+    assert.equal(sentNative[0].event, 'chat-message')
+    assert.equal(sentNative[0].recipient, 'PeerReceiver')
+    assert.equal(sentNative[0].payload.nativeMessage.senderTaskId, 'native-send-task')
+    assert.equal(typeof sentNative[0].payload.nativeMessage.senderActionId, 'string')
+    assert.ok(sentNative[0].payload.nativeMessage.senderActionId.length > 0)
+    const sendTraceFile = (await fs.readdir(path.join(root, 'bots/NativeSend/histories')))[0]
+    const sendTrace = (await fs.readFile(path.join(root, 'bots/NativeSend/histories', sendTraceFile), 'utf8'))
+      .trim().split('\n').map(line => JSON.parse(line))
+    assert.match(sendTrace.find(event => event.type === 'operation_result').result.message, /ack retained/)
+
+    // A stopped owner rejects the pending send; a late transport ACK cannot revive it.
+    const lateAck = deferred()
+    serverProxy.socket.emit = (event, recipient, payload, acknowledge) => { sentNative.push({ event, recipient, payload }); lateAck.resolve(acknowledge) }
+    const cancelAgent = makeAgent('NativeCancel')
+    await until(() => cancelAgent.coder.code_template && cancelAgent.coder.code_lint_template)
+    cancelAgent.currentTaskId = 'cancelled-send-task'
+    convoManager.initAgent(cancelAgent)
+    convoManager.updateAgents([{ name: 'NativeCancel', in_game: true }, { name: 'PeerReceiver', in_game: true }])
+    let cancelRuntime
+    cancelRuntime = new CodexRuntime(cancelAgent, { makeSession: ({ execute }) => {
+      let turn = 0
+      return { open: async () => {}, runTurn: async () => ++turn === 1
+        ? { operation: execute('await communication.sendToBot("PeerReceiver", "cancel me");') }
+        : { operation: null, messages: ['unexpected'] }, close: async () => {} }
+    } })
+    cancelAgent.codexRuntime = cancelRuntime
+    const cancelRun = cancelRuntime.run('operator', () => true, 'cancelled-send-task')
+    const lateAcknowledge = await lateAck.promise
+    cancelRuntime.cancel('user-stop')
+    await cancelAgent.actions.stop('user-stop')
+    assert.equal(await cancelRun, false, 'cancelled send does not complete or report the native task')
+    lateAcknowledge({ accepted: true, messageId: sentNative.at(-1).payload.nativeMessage.id,
+      taskId: 'cancelled-send-task', receiverTaskId: 'late-task' })
+    assert.equal(cancelRuntime.nativeInbox.length, 0, 'late ACK cannot restore an invalidated inbox')
+
+    // Normal legacy chat still uses the original anonymous chat-message shape.
+    settings.chat_bot_messages = false
+    convoManager.initAgent(peerAgent)
+    convoManager.updateAgents([{ name: 'PeerSender', in_game: true }, { name: 'PeerReceiver', in_game: true }])
+    convoManager.sendToBot('PeerReceiver', 'legacy conversation')
+    assert.equal(sentNative.at(-1).payload.nativeMessage, undefined)
+    assert.equal(sentNative.at(-1).payload.message, 'legacy conversation')
+    Object.assign(serverProxy, savedProxy)
+
     assert.equal(agent.bot.output, settledOutput, 'no late output mutates state after action settlement')
     const bad = await agent.actions.runAction('lint', () => agent.coder.executeCode('await skills.nonexistent(bot);'), { timeout: 0 })
     assert.equal(bad.success, false)
@@ -204,6 +342,56 @@ async function main() {
       <= Date.parse(taskEvents.find(event => event.type === 'response_reported').reportedAt),
       'model generation checkpoint and actual report time remain separate events')
     assert.ok(taskEvents.every(event => event.taskId === 'eval-task-1'), 'accepted task ID reaches every task event')
+    let replayAck
+    const invalidationsBeforeReplay = mainAgent.history.invalidations
+    const intentEpochBeforeReplay = mainAgent.actions.intentEpoch
+    assert.equal(await mainAgent.handleMessage('operator', 'must not replay', null,
+      { taskId: 'eval-task-1', onAccepted: value => { replayAck = value } }), false,
+      'a completed operator task ID is rejected instead of starting a new native task')
+    assert.equal(replayAck.accepted, false)
+    assert.equal(mainAgent.history.invalidations, invalidationsBeforeReplay, 'stale duplicate does not cancel or invalidate the current turn')
+    assert.equal(mainAgent.actions.intentEpoch, intentEpochBeforeReplay, 'stale duplicate does not begin a second user intent')
+    assert.equal((await fs.readdir(path.join(root, 'bots/MainPath/histories'))).length, traceFiles.length,
+      'stale duplicate does not create a second task trace or terminal')
+
+    const dedupeAgent = Object.create(Agent.prototype)
+    dedupeAgent._messageGeneration = 0
+    let admissionGate = deferred()
+    let admissionRuns = 0
+    dedupeAgent._handleMessageInternal = async (_source, _message, _limit, options) => {
+      admissionRuns++
+      dedupeAgent.currentTaskId = options.taskId
+      dedupeAgent.codexRuntime = { active: true }
+      options.onAccepted({ accepted: true, taskId: options.taskId })
+      await admissionGate.promise
+      return true
+    }
+    const acceptedAcks = []
+    const firstDispatch = dedupeAgent.handleMessage('operator', 'one task', null,
+      { taskId: 'active-dispatch', onAccepted: value => acceptedAcks.push(value) })
+    await until(() => acceptedAcks.length === 1)
+    assert.equal(await dedupeAgent.handleMessage('operator', 'duplicate', null,
+      { taskId: 'active-dispatch', onAccepted: value => acceptedAcks.push(value) }), true,
+      'resending the active task ID receives idempotent acceptance')
+    assert.equal(admissionRuns, 1, 'same active task ID is never executed twice')
+    assert.equal(acceptedAcks[1].duplicate, true)
+    admissionGate.resolve()
+    await firstDispatch
+    dedupeAgent.codexRuntime.active = false
+    assert.equal(await dedupeAgent.handleMessage('operator', 'old replay', null, { taskId: 'active-dispatch' }), false,
+      'the same ID cannot restart after its accepted task has ended')
+    const cappedAdmissionAgent = Object.create(Agent.prototype)
+    cappedAdmissionAgent.currentTaskId = 'retained-old-id'
+    cappedAdmissionAgent.codexRuntime = { active: true }
+    cappedAdmissionAgent._externalTaskAdmissions = new Map(Array.from({ length: 256 }, (_, index) => [
+      index === 0 ? 'retained-old-id' : `accepted-${index}`, { status: 'accepted', settled: Promise.resolve() }
+    ]))
+    assert.equal(await cappedAdmissionAgent.handleMessage('operator', 'old ID retry', null, { taskId: 'retained-old-id' }), true,
+      'the bounded admission cache retains old IDs rather than evicting replay protection')
+    let capacityAck
+    assert.equal(await cappedAdmissionAgent.handleMessage('operator', 'new task at cap', null,
+      { taskId: 'new-at-cap', onAccepted: value => { capacityAck = value } }), false)
+    assert.equal(capacityAck.accepted, false, 'capacity exhaustion rejects new task IDs explicitly')
     const saveFailureAgent = makeAgent('SaveFailure')
     await until(() => saveFailureAgent.coder.code_template && saveFailureAgent.coder.code_lint_template)
     saveFailureAgent.history.save = async () => { throw new Error('fixture save failure') }

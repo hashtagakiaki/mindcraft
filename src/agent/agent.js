@@ -28,6 +28,7 @@ const MAX_RECOVERY_EVENTS = 128;
 const AGENT_SHUTDOWN_STOP_GRACE_MS = 2800;
 const STANDALONE_EXIT_INTENT_FLUSH_MS = 500;
 const SHUTDOWN_MESSAGE_MAX_CHARS = 1000;
+const MAX_TASK_DISPATCH_IDS = 256;
 
 async function sendStandaloneExitIntent(outcome) {
     if (typeof process.send !== 'function' || process.connected !== true) return;
@@ -666,6 +667,51 @@ export class Agent {
     }
 
     async handleMessage(source, message, max_responses=null, internalOptions={}) {
+        const taskId = internalOptions?.taskId;
+        if (typeof taskId !== 'string' || !taskId) return this._handleMessageInternal(source, message, max_responses, internalOptions);
+        const admissions = this._externalTaskAdmissions ||= new Map();
+        const existing = admissions.get(taskId);
+        const acknowledge = value => {
+            try { internalOptions.onAccepted?.(value); }
+            catch (error) { console.error('Task acceptance acknowledgement failed:', error.message); }
+        };
+        if (existing) {
+            const wasPendingAtReceipt = existing.status === 'pending';
+            if (wasPendingAtReceipt) await existing.settled;
+            if (existing.status === 'accepted' && this.currentTaskId === taskId
+                && (wasPendingAtReceipt || this.codexRuntime?.active || this.actions?.executing)) {
+                acknowledge({ accepted: true, taskId, duplicate: true });
+                return true;
+            }
+            acknowledge({ accepted: false, taskId, error: 'task ID was already accepted or rejected and will not be restarted' });
+            return false;
+        }
+        if (admissions.size >= MAX_TASK_DISPATCH_IDS) {
+            acknowledge({ accepted: false, taskId, error: 'task ID dedupe capacity reached; new task IDs are not accepted' });
+            return false;
+        }
+        let settle;
+        const entry = { status: 'pending', settled: new Promise(resolve => { settle = resolve; }) };
+        admissions.set(taskId, entry);
+        let acknowledged = false;
+        const onAccepted = value => {
+            if (acknowledged || value?.accepted !== true || value.taskId !== taskId) return;
+            acknowledged = true;
+            entry.status = 'accepted';
+            settle();
+            acknowledge(value);
+        };
+        try {
+            const result = await this._handleMessageInternal(source, message, max_responses, { ...internalOptions, onAccepted });
+            if (entry.status === 'pending') { entry.status = 'rejected'; settle(); }
+            return result;
+        } catch (error) {
+            if (entry.status === 'pending') { entry.status = 'rejected'; settle(); }
+            throw error;
+        }
+    }
+
+    async _handleMessageInternal(source, message, max_responses=null, internalOptions={}) {
         if (this._shutdownStarted) return false;
         let acceptedAcknowledged = false;
         const acknowledgeAccepted = () => {

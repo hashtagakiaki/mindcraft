@@ -34,6 +34,8 @@ const settings_spec = JSON.parse(readFileSync(path.join(__dirname, 'public/setti
 class AgentConnection {
     constructor(settings, viewer_port) {
         this.socket = null;
+        this.connectionGeneration = null;
+        this.lastConnectionGeneration = null;
         this.settings = settings;
         this.in_game = false;
         this.full_state = null;
@@ -215,17 +217,29 @@ export function createMindServer(host_public = false, port = 8080) {
             }
         });
 
-        socket.on('connect-agent-process', (agentName, callback) => {
-            if (allowedBot(socket, agentName) && agent_connections[agentName]) {
-                agent_connections[agentName].socket = socket;
+        socket.on('connect-agent-process', (agentName, metadataOrCallback, acknowledgement) => {
+            const metadata = typeof metadataOrCallback === 'object' && metadataOrCallback !== null ? metadataOrCallback : null;
+            const callback = typeof metadataOrCallback === 'function' ? metadataOrCallback : acknowledgement;
+            const connection = agent_connections[agentName];
+            const requestedGeneration = metadata?.connectionGeneration;
+            const staleRegistration = protectedMode && Number.isInteger(requestedGeneration)
+                && Number.isInteger(connection?.lastConnectionGeneration)
+                && requestedGeneration <= connection.lastConnectionGeneration
+                && connection.socket !== socket;
+            if (allowedBot(socket, agentName) && connection && !staleRegistration) {
+                connection.socket = socket;
+                connection.connectionGeneration = Number.isInteger(requestedGeneration) ? requestedGeneration : null;
+                if (Number.isInteger(requestedGeneration)) connection.lastConnectionGeneration = requestedGeneration;
                 processAgentName = agentName;
                 agentsStatusUpdate();
-                callback?.({ accepted: true, agentName, spawnId: socket.data.identity.role === 'bot' ? socket.data.identity.spawnId : null });
+                callback?.({ accepted: true, agentName, spawnId: socket.data.identity.role === 'bot' ? socket.data.identity.spawnId : null,
+                    connectionGeneration: connection.connectionGeneration });
             } else callback?.({ accepted: false, error: 'MindServer rejected agent registration' });
         });
 
         socket.on('login-agent', (agentName, callback) => {
-            if (allowedBot(socket, agentName) && agent_connections[agentName]) {
+            if (allowedBot(socket, agentName) && agent_connections[agentName]
+                && (!protectedMode || agent_connections[agentName].socket === socket)) {
                 agent_connections[agentName].socket = socket;
                 agent_connections[agentName].in_game = true;
                 curAgentName = agentName;
@@ -245,6 +259,7 @@ export function createMindServer(host_public = false, port = 8080) {
                 console.log(`Agent ${disconnectedName} disconnected`);
                 agent_connections[disconnectedName].in_game = false;
                 agent_connections[disconnectedName].socket = null;
+                agent_connections[disconnectedName].connectionGeneration = null;
                 agentsStatusUpdate();
             }
             if (agent_listeners.includes(socket)) {
@@ -252,16 +267,54 @@ export function createMindServer(host_public = false, port = 8080) {
             }
         });
 
-        socket.on('chat-message', (agentName, json) => {
-            if (!allowedBot(socket, socket.data.identity.agentName)) return;
-            if (protectedMode && socket.data.identity.role !== 'bot') return;
+        socket.on('chat-message', (agentName, json, acknowledge) => {
+            if (!allowedBot(socket, socket.data.identity.agentName)) {
+                acknowledge?.({ accepted: false, error: 'sender identity is no longer current' });
+                return;
+            }
+            if (protectedMode && socket.data.identity.role !== 'bot') {
+                acknowledge?.({ accepted: false, error: 'authenticated bot identity required' });
+                return;
+            }
             if (!agent_connections[agentName]) {
                 console.warn(`Agent ${agentName} tried to send a message but is not logged in`);
+                acknowledge?.({ accepted: false, error: 'recipient is unavailable' });
                 return;
             }
             const sender = socket.data.identity.role === 'bot' ? socket.data.identity.agentName : curAgentName;
             console.log(`${sender} sending message to ${agentName}`);
-            if (agent_connections[agentName].socket?.connected) agent_connections[agentName].socket.emit('chat-message', sender, json);
+            const receiver = agent_connections[agentName].socket;
+            if (!receiver?.connected) {
+                acknowledge?.({ accepted: false, error: 'recipient is unavailable' });
+                return;
+            }
+            if (json?.nativeMessage) {
+                const native = json.nativeMessage;
+                const identity = socket.data.identity;
+                if (!protectedMode || identity?.role !== 'bot' || !identity.spawnId
+                    || agent_connections[identity.agentName]?.socket !== socket
+                    || agent_connections[identity.agentName]?.connectionGeneration !== native.senderConnectionGeneration
+                    || !allowedBot(receiver, agentName) || agent_connections[agentName].socket !== receiver
+                    || typeof native.id !== 'string' || !native.id
+                    || typeof native.senderTaskId !== 'string' || !native.senderTaskId
+                    || typeof native.senderActionId !== 'string' || !native.senderActionId
+                    || !Number.isInteger(native.senderConnectionGeneration)
+                    || !Number.isInteger(native.senderManagementGeneration)) {
+                    acknowledge?.({ accepted: false, error: 'native peer identity or task scope is invalid' });
+                    return;
+                }
+                const routed = { ...json, nativeMessage: { ...native, senderAgent: identity.agentName,
+                    senderSpawnId: identity.spawnId, receiverConnectionGeneration: agent_connections[agentName].connectionGeneration,
+                    hubGeneration: managementGeneration } };
+                receiver.emit('chat-message', sender, routed, result => {
+                    if (result?.accepted === true && result.messageId === native.id && result.taskId === native.senderTaskId)
+                        acknowledge?.({ accepted: true, messageId: native.id, taskId: native.senderTaskId,
+                            receiverTaskId: result.receiverTaskId ?? null });
+                    else acknowledge?.({ accepted: false, error: result?.error || 'recipient did not accept inbox message' });
+                });
+                return;
+            }
+            receiver.emit('chat-message', sender, json);
         });
 
         socket.on('set-agent-settings', (agentName, settings, callback) => {
@@ -417,6 +470,16 @@ const protectedSessions = { operator: null, observer: null };
 export function issueBotCredential(agentName, spawnId, token) {
     if (!protectedMode) return;
     if (!agent_connections[agentName] || typeof spawnId !== 'string' || typeof token !== 'string') throw new Error('Invalid bot credential registration');
+    const previous = botTokens.get(agentName);
+    if (previous && previous.spawnId !== spawnId) {
+        const connection = agent_connections[agentName];
+        if (connection) {
+            connection.socket = null;
+            connection.connectionGeneration = null;
+            connection.lastConnectionGeneration = null;
+            connection.in_game = false;
+        }
+    }
     botTokens.set(agentName, { spawnId, token });
 }
 export function revokeBotCredential(agentName, spawnId) {

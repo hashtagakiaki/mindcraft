@@ -89,16 +89,25 @@ async function main() {
   const methodStart = agentSource.indexOf('    async handleMessage(')
   const methodEnd = agentSource.indexOf('\n    async ', methodStart + 10)
   const method = agentSource.slice(methodStart, methodEnd)
+  const internalStart = agentSource.indexOf('    async _handleMessageInternal(')
+  const internalEnd = agentSource.indexOf('\n    async ', internalStart + 10)
+  const internalMethod = agentSource.slice(internalStart, internalEnd)
   const history = []
   const commands = []
   const accepted = []
   const handle = vm.runInNewContext(`({${method}}).handleMessage`, {
     convoManager: { isOtherAgent: () => false }, containsCommand: message => message.startsWith('!') ? message.split('(')[0] : null,
     commandExists: () => true, isAction: () => true, settings: { max_commands: 1 }, recipientContext,
+    executeCommand: async (_agent, message) => { commands.push(message); return null }, randomUUID: () => 'fixture-task', console,
+    MAX_TASK_DISPATCH_IDS: 256
+  })
+  const internalHandle = vm.runInNewContext(`({${internalMethod}})._handleMessageInternal`, {
+    convoManager: { isOtherAgent: () => false }, containsCommand: message => message.startsWith('!') ? message.split('(')[0] : null,
+    commandExists: () => true, isAction: () => true, settings: { max_commands: 1 }, recipientContext,
     executeCommand: async (_agent, message) => { commands.push(message); return null }, randomUUID: () => 'fixture-task', console
   })
   const commandAgent = { name: 'Bot2', _messageGeneration: 0, actions: { beginUserIntent() {} }, checkTaskDone: async () => {},
-    history: { add: async (...args) => history.push(args) }, routeResponse() {} }
+    history: { add: async (...args) => history.push(args) }, routeResponse() {}, _handleMessageInternal: internalHandle }
   await handle.call(commandAgent, 'ADMIN', '!newAction("build")', null, { recipients: ['Bot2', 'Bot3'], taskId: 'command-task', onAccepted: value => accepted.push(value) })
   assert.match(history[0][1], /ADMIN.*Bot2, Bot3/)
   assert.equal(history[1][1], '!newAction("build")')

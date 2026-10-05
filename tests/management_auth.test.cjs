@@ -116,8 +116,8 @@ export async function shutdown(request) { return closeHandler?.(request) }
     const botA = await connect(url, credentialA1.token)
     const botB = await connect(url, credentialB1.token)
     clients.push(botA, botB)
-    const regA = await ack(botA, 'connect-agent-process', 'botA')
-    const regB = await ack(botB, 'connect-agent-process', 'botB')
+    const regA = await ack(botA, 'connect-agent-process', 'botA', { connectionGeneration: 3 })
+    const regB = await ack(botB, 'connect-agent-process', 'botB', { connectionGeneration: 7 })
     assert.equal(regA.spawnId, credentialA1.spawnId)
     assert.equal(regB.accepted, true)
     botA.emit('login-agent', 'botA')
@@ -151,25 +151,51 @@ export async function shutdown(request) { return closeHandler?.(request) }
     assert.equal(globalThis.__createdAgents, 1)
 
     let botChat
-    botB.on('chat-message', (sender, json) => { botChat = { sender, json } })
+    botB.on('chat-message', (sender, json, acknowledge) => {
+      botChat = { sender, json }
+      if (json?.nativeMessage) acknowledge({ accepted: true, messageId: json.nativeMessage.id,
+        taskId: json.nativeMessage.senderTaskId, receiverTaskId: 'botB-active-task' })
+    })
     botA.emit('chat-message', 'botB', { from: 'forged bot name', message: 'hello' })
     await delay(50)
     assert.equal(botChat.sender, 'botA', 'bot-to-bot chat uses authenticated source identity')
+    const nativeAck = await ack(botA, 'chat-message', 'botB', { message: 'native hello', nativeMessage: {
+      id: 'native-message-1', senderTaskId: 'botA-task-1', senderActionId: 'action-1',
+      senderConnectionGeneration: 3, senderManagementGeneration: 2,
+    } })
+    assert.deepEqual(nativeAck, { accepted: true, messageId: 'native-message-1', taskId: 'botA-task-1', receiverTaskId: 'botB-active-task' },
+      'native transport ACK returns recipient inbox acceptance and its separate task ID')
+    assert.equal(botChat.json.nativeMessage.senderAgent, 'botA', 'hub overwrites sender identity from the authenticated socket')
+    assert.equal(botChat.json.nativeMessage.senderSpawnId, 'spawn-a1')
+    assert.equal(botChat.json.nativeMessage.receiverConnectionGeneration, 7)
+    assert.equal(botChat.json.nativeMessage.hubGeneration, settingsA.management.generation)
 
     botA.disconnect()
     await delay(20)
     const reconnectA = await connect(url, credentialA1.token)
     clients.push(reconnectA)
-    assert.equal((await ack(reconnectA, 'connect-agent-process', 'botA')).accepted, true,
+    assert.equal((await ack(reconnectA, 'connect-agent-process', 'botA', { connectionGeneration: 4 })).accepted, true,
       'same spawned child keeps its credential across transport reconnect')
+    const olderSameSpawnSocket = await connect(url, credentialA1.token)
+    clients.push(olderSameSpawnSocket)
+    assert.equal((await ack(olderSameSpawnSocket, 'connect-agent-process', 'botA', { connectionGeneration: 3 })).accepted, false,
+      'an older authenticated socket cannot replace the current connection generation')
+    assert.equal((await ack(olderSameSpawnSocket, 'chat-message', 'botB', { message: 'stale same-spawn message', nativeMessage: {
+      id: 'stale-connection-message', senderTaskId: 'old-task', senderActionId: 'old-action',
+      senderConnectionGeneration: 3, senderManagementGeneration: 1,
+    } })).accepted, false, 'native message from an old same-spawn connection is rejected')
+    reconnectA.disconnect()
+    await delay(20)
+    assert.equal((await ack(olderSameSpawnSocket, 'connect-agent-process', 'botA', { connectionGeneration: 3 })).accepted, false,
+      'disconnecting the latest socket does not erase the generation high-water mark')
     module.issueBotCredential('botA', 'spawn-a2', 'c'.repeat(64))
-    assert.deepEqual(await ack(reconnectA, 'get-settings', 'botA'), { success: false, error: 'MindServer authorization denied' },
+    assert.deepEqual(await ack(olderSameSpawnSocket, 'get-settings', 'botA'), { success: false, error: 'MindServer authorization denied' },
       'old already-connected spawn loses authority immediately after replacement')
     const oldReconnect = await connect(url, credentialA1.token, true)
     clients.push(oldReconnect)
     const botANew = await connect(url, 'c'.repeat(64))
     clients.push(botANew)
-    assert.equal((await ack(botANew, 'connect-agent-process', 'botA')).spawnId, 'spawn-a2',
+    assert.equal((await ack(botANew, 'connect-agent-process', 'botA', { connectionGeneration: 1 })).spawnId, 'spawn-a2',
       'new spawn receives only its own generation credential')
 
     const staticResponse = await fetch(`${url}/`)
