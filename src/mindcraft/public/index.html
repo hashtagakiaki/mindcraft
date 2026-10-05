@@ -329,7 +329,7 @@
     </div>
     <section id="bot-output-log" aria-label="Bot output log">
         <h2>Bot output log</h2>
-        <div class="bot-output-meta">Saved in this browser · newest 200 entries</div>
+        <div class="bot-output-meta">Loaded from server history · newest 200 entries</div>
         <div id="bot-output-entries" aria-live="polite"><div class="bot-output-meta">No bot output yet.</div></div>
     </section>
     <div id="agents"></div>
@@ -402,7 +402,6 @@
         const agentSettings = {};
         const botOutputEntries = document.getElementById('bot-output-entries');
         const MAX_BOT_OUTPUT_ENTRIES = 200;
-        const BOT_OUTPUT_LOG_STORAGE_KEY = 'mindcraft.botOutputLog.v1';
         const botOutputLog = [];
         const inventoryOpen = {};
         let currentAgents = [];
@@ -413,42 +412,26 @@
             entry.className = 'bot-output-entry';
             const meta = document.createElement('div');
             meta.className = 'bot-output-meta';
-            meta.textContent = `${new Date(record.at).toLocaleTimeString()} · ${record.agentName}`;
+            meta.textContent = `${new Date(record.at).toLocaleString()} · ${record.agentName}`;
             const content = document.createElement('div');
             content.className = 'bot-output-content';
             content.textContent = record.message;
             entry.append(meta, content);
             botOutputEntries.append(entry);
         }
-        function persistBotOutputLog() {
-            const savedEntries = [...botOutputLog];
-            while (savedEntries.length) {
-                try {
-                    localStorage.setItem(BOT_OUTPUT_LOG_STORAGE_KEY, JSON.stringify(savedEntries));
-                    return;
-                } catch {
-                    savedEntries.shift();
-                }
+        function renderBotOutputLog() {
+            botOutputEntries.replaceChildren();
+            if (!botOutputLog.length) {
+                const empty = document.createElement('div');
+                empty.className = 'bot-output-meta';
+                empty.textContent = 'No bot output yet.';
+                botOutputEntries.append(empty);
+                return;
             }
+            for (const record of botOutputLog) renderBotOutput(record);
+            const log = document.getElementById('bot-output-log');
+            log.scrollTop = log.scrollHeight;
         }
-        function restoreBotOutputLog() {
-            try {
-                const saved = JSON.parse(localStorage.getItem(BOT_OUTPUT_LOG_STORAGE_KEY) || '[]');
-                if (!Array.isArray(saved)) return;
-                const records = saved.slice(-MAX_BOT_OUTPUT_ENTRIES).filter(record =>
-                    typeof record?.at === 'string' && Number.isFinite(Date.parse(record.at))
-                    && typeof record.agentName === 'string' && typeof record.message === 'string');
-                if (records.length) botOutputEntries.replaceChildren();
-                for (const record of records) {
-                    botOutputLog.push(record);
-                    renderBotOutput(record);
-                }
-                if (botOutputLog.length) document.getElementById('bot-output-log').scrollTop = document.getElementById('bot-output-log').scrollHeight;
-            } catch {
-                // Storage may be unavailable or contain invalid data; the live UI remains usable.
-            }
-        }
-        restoreBotOutputLog();
         function updateStatus(connected) {
             if (!statusEl) return;
             if (connected) {
@@ -469,6 +452,13 @@
         socket.on('connect', () => {
             updateStatus(true);
             subscribeToState();
+            socket.emit('get-bot-output-log', result => {
+                if (!result?.success || !Array.isArray(result.entries)) return;
+                const liveEntries = botOutputLog.filter(record => record.live);
+                botOutputLog.splice(0, botOutputLog.length, ...result.entries, ...liveEntries);
+                while (botOutputLog.length > MAX_BOT_OUTPUT_ENTRIES) botOutputLog.shift();
+                renderBotOutputLog();
+            });
             // Clear all cached settings on reconnect
             Object.keys(agentSettings).forEach(name => delete agentSettings[name]);
         });
@@ -599,15 +589,13 @@
         document.getElementById('closeCreateAgentBtn').addEventListener('click', hideCreateAgentModal);
 
         socket.on('bot-output', (agentName, message) => {
-            if (botOutputEntries.firstElementChild?.classList.contains('bot-output-meta')) botOutputEntries.replaceChildren();
-            const record = { at: new Date().toISOString(), agentName: String(agentName), message: String(message) };
+            const record = { at: new Date().toISOString(), agentName: String(agentName), message: String(message), live: true };
             botOutputLog.push(record);
             renderBotOutput(record);
             while (botOutputLog.length > MAX_BOT_OUTPUT_ENTRIES) {
                 botOutputLog.shift();
                 botOutputEntries.firstElementChild?.remove();
             }
-            persistBotOutputLog();
             document.getElementById('bot-output-log').scrollTop = document.getElementById('bot-output-log').scrollHeight;
         });
 

@@ -11,6 +11,7 @@ import { attachPlaceStoreLifecycle, PlaceStore } from './place_store.js';
 import { attachPlaceRpc } from './place_rpc.js';
 import { createHash, randomUUID, randomBytes, timingSafeEqual } from 'crypto';
 import { createStatePoller } from './state_poller.js';
+import { readBotOutputHistory } from './bot_output_history.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Mindserver is:
@@ -425,6 +426,12 @@ export function createMindServer(host_public = false, port = 8080) {
                 if (!protectedMode) io.emit('bot-output', agentName, message);
                 else for (const recipient of io.sockets.sockets.values()) if (recipient.data.identity?.role !== 'observer') recipient.emit('bot-output', agentName, message);
             }
+        });
+
+        socket.on('get-bot-output-log', callback => {
+            if (!allowed(socket, ['operator', 'legacy'])) return deny(callback);
+            const entries = readBotOutputHistory(process.cwd(), Object.keys(agent_connections));
+            if (typeof callback === 'function') callback({ success: true, entries });
         });
 
         socket.on('listen-to-agents', () => {
