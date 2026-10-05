@@ -177,6 +177,7 @@ export class Agent {
 
     pauseManagement(reason = 'management') {
         if (this._shutdownStarted) return Promise.resolve({ stopped: false, reason: 'shutdown' });
+        this.history?.invalidateSummaries?.();
         void this.codexRuntime?.cancel(reason);
         this.managementPaused = true;
         this._managementInterruption = true;
@@ -684,6 +685,7 @@ export class Agent {
         if (this.managementPaused && !isUserStop && !isUserRestart && !isSafeQuery) return false;
         if (this.actions?.managementIntentRequired && !isHumanIntent && !isUserStop && !isUserRestart && !isSafeQuery) return false;
         let generation = internalOptions.generation ?? this._messageGeneration;
+        if (isHumanIntent || isUserStop || isUserStfu) this.history?.invalidateSummaries?.();
         if (isHumanIntent || isUserStop || isUserStfu) await this.codexRuntime?.cancel(isHumanIntent ? 'superseded' : 'user');
         if (isHumanIntent) {
             this._userIntentGeneration = (this._userIntentGeneration || 0) + 1;
@@ -777,6 +779,13 @@ export class Agent {
         console.log('received message from', source, ':', message);
 
         const checkInterrupt = () => this._shutdownStarted || this.managementPaused || this.actions.managementPaused || this.actions.managementIntentRequired || (!recoveryId && this.self_prompter.shouldInterrupt(self_prompt)) || this.shut_up || convoManager.responseScheduledFor(source) || this.actions.userStopped;
+        const addHistory = async (name, content) => {
+            if (settings.agent_runtime === 'codex-session') {
+                const saved = await this.history.checkpointAdd(name, content);
+                return saved?.saved === true;
+            }
+            return this.history.add(name, content);
+        };
         
         let behavior_log = this.bot.modes.flushBehaviorLog().trim();
         if (behavior_log.length > 0) {
@@ -785,14 +794,14 @@ export class Agent {
                 behavior_log = '...' + behavior_log.substring(behavior_log.length - MAX_LOG);
             }
             behavior_log = 'Recent behaviors log: \n' + behavior_log;
-            await this.history.add('system', behavior_log);
-            if (!isCurrent()) return false;
+            const saved = await addHistory('system', behavior_log);
+            if (!isCurrent() || !saved) return false;
         }
 
         // Handle other user messages
-        await this.history.add(source, message);
-        if (!isCurrent()) return false;
-        this.history.save();
+        const historyAdded = await addHistory(source, message);
+        if (!isCurrent() || !historyAdded) return false;
+        if (settings.agent_runtime !== 'codex-session') this.history.save();
 
         if (settings.agent_runtime === 'codex-session') {
             // Internal messages cannot launch a second actor alongside this task.
@@ -913,7 +922,7 @@ export class Agent {
         }
         else {
             // otherwise, use open chat
-            this.openChat(message);
+            await this.openChat(message);
             // note that to_player could be another bot, but if we get here the conversation has ended
         }
     }

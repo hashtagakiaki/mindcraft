@@ -300,7 +300,7 @@ export async function executeCommand(agent, message) {
       inventory: { fixtureItems: [], items() { return [...this.fixtureItems] } },
       modes: { flushBehaviorLog() { return '' } },
     }),
-    history: { add() {}, save() {}, getHistory() { return [] } },
+    history: { add() { return true }, save() {}, getHistory() { return [] } },
     prompter: { responses: [], calls: 0, async promptConvo() { this.calls++; const response = this.responses.shift(); return await (typeof response === 'function' ? response() : response) } },
     routeResponse() {}, async openChat() {}, checkTaskDone: async () => {},
     cleanKill() { this.cleanKills++ },

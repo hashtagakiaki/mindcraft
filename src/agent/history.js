@@ -15,6 +15,9 @@ export class History {
         this.turns = [];
         this.pendingHistoryChunks = [];
         this.summaryEpoch = 0;
+        this.summaryDrainPromise = null;
+        this.summaryDiagnostic = null;
+        this.persistSummaryChunks = new WeakSet();
         this.shutdownStarted = false;
         this.shutdownSavePromise = null;
 
@@ -34,8 +37,7 @@ export class History {
         return JSON.parse(JSON.stringify(this.turns));
     }
 
-    async summarizeMemories(turns) {
-        const epoch = this.summaryEpoch;
+    async summarizeMemories(turns, epoch = this.summaryEpoch) {
         console.log("Storing memories...");
         let memory = await this.agent.prompter.promptMemSaving(turns);
         if (this.shutdownStarted || epoch !== this.summaryEpoch) return false;
@@ -69,40 +71,112 @@ export class History {
 
     async add(name, content) {
         if (this.shutdownStarted) return false;
-        let role = 'assistant';
-        if (name === 'system') {
-            role = 'system';
-        }
-        else if (name !== this.name) {
-            role = 'user';
-            content = `${name}: ${content}`;
-        }
-        this.turns.push({role, content});
+        this._appendTurn(name, content);
 
         if (this.turns.length >= this.max_messages) {
-            let chunk = this.turns.splice(0, this.summary_chunk_size);
-            while (this.turns.length > 0 && this.turns[0].role === 'assistant')
-                chunk.push(this.turns.shift()); // remove until turns starts with system/user message
-
-            this.pendingHistoryChunks.push(chunk);
             const epoch = this.summaryEpoch;
+            this._queueSummaryChunk(this._takeSummaryChunk());
             let summarized;
-            try { summarized = await this.summarizeMemories(chunk); }
+            try { summarized = await this._ensureSummaryDrain(); }
             catch (error) {
                 if (this.shutdownStarted || epoch !== this.summaryEpoch) return false;
                 throw error;
             }
             if (!summarized || this.shutdownStarted) return false;
-            await this.appendFullHistory(chunk);
-            this.pendingHistoryChunks = this.pendingHistoryChunks.filter(pending => pending !== chunk);
         }
         return true;
+    }
+
+    async checkpointAdd(name, content) {
+        if (this.shutdownStarted) return { saved: false, skipped: 'shutdown in progress' };
+        this._appendTurn(name, content);
+        const saveResult = await this.save();
+        if (!saveResult.saved) return saveResult;
+        if (this.turns.length >= this.max_messages) {
+            this._queueSummaryChunk(this._takeSummaryChunk(), { persistAfter: true });
+            void this._ensureSummaryDrain().catch(error => {
+                this.summaryDiagnostic = String(error);
+                console.error(`Memory summary failed for ${this.name}:`, error);
+            });
+        }
+        return saveResult;
+    }
+
+    _appendTurn(name, content) {
+        let role = 'assistant';
+        if (name === 'system') role = 'system';
+        else if (name !== this.name) {
+            role = 'user';
+            content = `${name}: ${content}`;
+        }
+        this.turns.push({ role, content });
+    }
+
+    _takeSummaryChunk() {
+        const chunk = this.turns.splice(0, this.summary_chunk_size);
+        while (this.turns.length > 0 && this.turns[0].role === 'assistant')
+            chunk.push(this.turns.shift());
+        return chunk;
+    }
+
+    _queueSummaryChunk(chunk, { persistAfter = false } = {}) {
+        if (!chunk?.length) return;
+        if (persistAfter) this.persistSummaryChunks.add(chunk);
+        this.pendingHistoryChunks.push(chunk);
+    }
+
+    _ensureSummaryDrain() {
+        if (this.summaryDrainPromise) return this.summaryDrainPromise;
+        const drain = this._drainSummaryQueue();
+        this.summaryDrainPromise = drain;
+        drain.then(result => {
+            if (this.summaryDrainPromise === drain) this.summaryDrainPromise = null;
+            if (result === false && !this.shutdownStarted && this.pendingHistoryChunks.length)
+                void this._ensureSummaryDrain().catch(error => {
+                    this.summaryDiagnostic = String(error);
+                    console.error(`Memory summary failed for ${this.name}:`, error);
+                });
+        }, error => {
+            if (this.summaryDrainPromise === drain) this.summaryDrainPromise = null;
+            this.summaryDiagnostic = String(error);
+        });
+        return drain;
+    }
+
+    async _drainSummaryQueue() {
+        while (this.pendingHistoryChunks.length && !this.shutdownStarted) {
+            const chunk = this.pendingHistoryChunks[0];
+            const epoch = this.summaryEpoch;
+            const summarized = await this.summarizeMemories(chunk, epoch);
+            if (!summarized || this.shutdownStarted || epoch !== this.summaryEpoch) return false;
+            await this.appendFullHistory(chunk);
+            if (this.shutdownStarted || epoch !== this.summaryEpoch) return false;
+            const persistAfter = this.persistSummaryChunks.has(chunk);
+            if (this.pendingHistoryChunks[0] === chunk) this.pendingHistoryChunks.shift();
+            if (persistAfter) {
+                const saveResult = await this.save();
+                if (!saveResult.saved && !this.shutdownStarted) throw new Error('Could not persist summarized memory state');
+            }
+        }
+        return true;
+    }
+
+    invalidateSummaries() {
+        if (this.shutdownStarted) return this.summaryEpoch;
+        this.summaryEpoch += 1;
+        if (this.pendingHistoryChunks.length) {
+            this.turns = [...this.pendingHistoryChunks.flat(), ...this.turns];
+            this.pendingHistoryChunks = [];
+        }
+        return this.summaryEpoch;
     }
 
     beginShutdown() {
         if (this.shutdownStarted) return this.summaryEpoch;
         this.shutdownStarted = true;
         this.summaryEpoch += 1;
+        this.turns = [...this.pendingHistoryChunks.flat(), ...this.turns];
+        this.pendingHistoryChunks = [];
         return this.summaryEpoch;
     }
 
@@ -130,7 +204,7 @@ export class History {
         try {
             const data = {
                 memory: this.memory,
-                turns: this.turns,
+                turns: [...this.pendingHistoryChunks.flat(), ...this.turns],
                 self_prompting_state: this.agent.self_prompter?.state ?? null,
                 self_prompt: !this.agent.self_prompter || this.agent.self_prompter.isStopped() ? null : this.agent.self_prompter.prompt,
                 taskStart: this.agent.task?.taskStartTime ?? null,

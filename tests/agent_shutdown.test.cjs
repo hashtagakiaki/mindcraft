@@ -97,6 +97,40 @@ async function runHistoryFixture(root) {
     assert.deepEqual(shutdown, { saved: true, memoryPath: './bots/fixture/memory.json' })
     assert.deepEqual(await history.saveShutdownRecord('other', {}), shutdown, 'final save outcome must be idempotent')
 
+    let resolveCheckpointSummary
+    let checkpointPromptCount = 0
+    const checkpointHistory = new History({
+      ...agent,
+      name: 'fixture-checkpoint',
+      prompter: { promptMemSaving: () => {
+        checkpointPromptCount++
+        return new Promise(resolve => { resolveCheckpointSummary = resolve })
+      } },
+    })
+    for (let index = 1; index <= 5; index++) {
+      const saved = await checkpointHistory.checkpointAdd('fixture-checkpoint', `checkpoint turn ${index}`)
+      assert.equal(saved.saved, true, 'checkpoint persistence does not wait for a memory summary')
+    }
+    assert.equal(checkpointPromptCount, 1, 'threshold starts one background summary')
+    await checkpointHistory.checkpointAdd('fixture-checkpoint', 'checkpoint turn 6')
+    assert.equal(checkpointPromptCount, 1, 'single-flight summary does not start an unbounded second request')
+    const checkpointSaved = JSON.parse(await fs.readFile(path.join(dir, 'bots/fixture-checkpoint/memory.json'), 'utf8'))
+    assert.deepEqual(checkpointSaved.turns.map(turn => turn.content), [
+      'checkpoint turn 1', 'checkpoint turn 2', 'checkpoint turn 3', 'checkpoint turn 4', 'checkpoint turn 5', 'checkpoint turn 6',
+    ], 'checkpoint turns remain loadable while the summary is pending')
+    checkpointHistory.invalidateSummaries()
+    const pendingSaved = await checkpointHistory.saveShutdownRecord('fixture-stop', { reason: 'test' })
+    assert.equal(pendingSaved.saved, true, 'shutdown persists confirmed turns without waiting for summary')
+    resolveCheckpointSummary('stale checkpoint summary')
+    await delay(0)
+    const afterStaleSummary = JSON.parse(await fs.readFile(path.join(dir, 'bots/fixture-checkpoint/memory.json'), 'utf8'))
+    assert.equal(afterStaleSummary.memory, '', 'invalidated late summary cannot overwrite saved memory')
+    assert.match(afterStaleSummary.turns.map(turn => turn.content).join('\n'), /checkpoint turn 6/,
+      'pending turn checkpoint survives summary invalidation and shutdown')
+    const reopenedHistory = new History({ ...agent, name: 'fixture-checkpoint' })
+    assert.equal(reopenedHistory.load().turns.length, afterStaleSummary.turns.length,
+      'the existing memory.json format remains readable after checkpointed shutdown')
+
     let rejectSummary
     const failedHistory = new History({
       ...agent,
@@ -115,7 +149,7 @@ async function runHistoryFixture(root) {
     assert.equal(failedFinal.saved, true)
     const failedSaved = JSON.parse(await fs.readFile(path.join(dir, 'bots/fixture-failed/memory.json'), 'utf8'))
     assert.deepEqual(failedSaved.turns.slice(0, 5).map(turn => turn.content), ['one', 'two', 'three', 'four', 'five'])
-    return { lateSummaryInvalidated: true, lateSummaryFailureAbsorbed: true, pendingTurnsPreserved: true, finalRecordSavedWithoutLLM: true }
+    return { lateSummaryInvalidated: true, lateSummaryFailureAbsorbed: true, pendingTurnsPreserved: true, finalRecordSavedWithoutLLM: true, codexCheckpointIndependentOfSummary: true }
   } finally {
     process.chdir(previousCwd)
   }
@@ -327,7 +361,7 @@ function makeMinimalAgent(Agent, stop, save) {
     },
     self_prompter: { isActive: () => false, stop() {}, stopForShutdown() {} },
     history: {
-      add() {},
+      add() { return true },
       saveShutdownRecord(reason, outcome) { events.shutdowns.push({ reason, outcome }); return save(reason, outcome) },
     },
     task: { taskStartTime: 1 },

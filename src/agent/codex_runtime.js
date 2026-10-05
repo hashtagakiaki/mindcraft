@@ -33,6 +33,7 @@ export class CodexRuntime {
         this.agent = agent;
         this.selection = validateCodexRuntime(agent.prompter.profile);
         this.makeSession = options.makeSession ?? (opts => new CodexSession(opts));
+        this.traceFilePath = options.traceFilePath;
         this.abort = new AbortController();
         this.active = false;
     }
@@ -45,6 +46,7 @@ export class CodexRuntime {
     async run(source, isCurrent, taskId = randomUUID()) {
         const agent = this.agent;
         this.taskId = taskId;
+        this.terminalOutcome = null;
         const { config, model, effort } = this.selection;
         this.active = true;
         const acceptedAt = Date.now();
@@ -57,14 +59,42 @@ export class CodexRuntime {
         let reportedAt;
         const current = () => !this.abort.signal.aborted && isCurrent() && !agent.actions.userStopped;
         mkdirSync(`./bots/${agent.name}/histories`, { recursive: true });
-        const file = `./bots/${agent.name}/histories/codex-${randomUUID()}.jsonl`;
+        const file = this.traceFilePath ?? `./bots/${agent.name}/histories/codex-${randomUUID()}.jsonl`;
         let terminalWritten = false;
-        const record = (type, detail = {}) => appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), taskId, type, ...detail }) + '\n');
+        let traceWriteError = null;
+        let traceWriteFailureCount = 0;
+        const traceWriteFailures = [];
+        let traceWriteFailureLogged = false;
+        const record = (type, detail = {}) => {
+            try {
+                appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), taskId, type, ...detail }) + '\n');
+                return true;
+            } catch (error) {
+                traceWriteFailureCount++;
+                traceWriteError ||= String(error);
+                traceWriteFailures.push({ type, error: String(error) });
+                if (!traceWriteFailureLogged) {
+                    traceWriteFailureLogged = true;
+                    console.error(`Could not write Codex task trace for ${agent.name}:`, error);
+                }
+                return false;
+            }
+        };
         const finish = detail => {
             if (terminalWritten) return;
             terminalWritten = true;
-            record('finished', { ...detail, terminationReason: detail.terminationReason || budgetReason || null,
-                taskBudget: { elapsedMs: Date.now() - acceptedAt, acceptedOperations: operationCount, threadTurns: turnCount } });
+            const terminal = { ...detail, terminationReason: detail.terminationReason || budgetReason || null,
+                taskBudget: { elapsedMs: Date.now() - acceptedAt, acceptedOperations: operationCount, threadTurns: turnCount },
+                traceSaveSucceeded: traceWriteError === null,
+                traceWriteFailureCount,
+                ...(traceWriteFailures.length ? { traceWriteFailures: [...traceWriteFailures] } : {}),
+                ...(traceWriteError ? { traceSaveError: traceWriteError } : {}) };
+            const written = record('finished', terminal);
+            this.terminalOutcome = { ...terminal, terminalWritten: written,
+                traceWriteFailureCount,
+                traceWriteFailures: [...traceWriteFailures],
+                traceSaveSucceeded: written && traceWriteError === null,
+                ...(traceWriteError ? { traceSaveError: traceWriteError } : {}) };
         };
         const reachBudget = reason => {
             if (budgetReason) return;
@@ -132,16 +162,24 @@ export class CodexRuntime {
                 }
                 const response = turn.messages.join('\n').trim();
                 if (!response) throw new Error('Codex ended without an action or response');
-                await agent.history.add(agent.name, response);
+                const generatedAt = new Date().toISOString();
+                record('response_checkpoint', { response, generatedAt, reportStatus: 'pending' });
+                try {
+                    const checkpoint = await agent.history.checkpointAdd(agent.name, response);
+                    saveSucceeded = checkpoint?.saved === true;
+                    if (!saveSucceeded) record('history_checkpoint_error', { error: checkpoint?.error || checkpoint?.skipped || 'save failed' });
+                } catch (error) {
+                    saveSucceeded = false;
+                    record('history_checkpoint_error', { error: String(error) });
+                }
                 if (!current()) return false;
-                agent.routeResponse(source, response);
+                await agent.routeResponse(source, response);
                 reportedResponse = response;
                 reportedAt = new Date().toISOString();
                 completion = 'reported';
-                try { await agent.history.save(); saveSucceeded = true; }
-                catch (error) { saveSucceeded = false; throw error; }
+                record('response_reported', { generatedAt, reportedAt, response });
                 terminalDetail = { status: 'completed', completion: 'reported', terminationReason: 'reported', saveSucceeded, response, reportedAt };
-                return true;
+                return saveSucceeded;
             }
             return false;
         } catch (error) {
@@ -149,13 +187,21 @@ export class CodexRuntime {
             terminalDetail = { status: current() ? 'error' : 'cancelled', completion, terminationReason: current() ? 'error' : String(this.abort.signal.reason || 'cancelled'), saveSucceeded,
                 ...(reportedResponse === undefined ? {} : { response: reportedResponse, reportedAt }), error: String(error) };
             if (current()) {
-                agent.routeResponse(source, `Codex task failed: ${error.message}`);
-                await agent.history.add('system', `Codex task failed: ${error.message}`);
+                await agent.routeResponse(source, `Codex task failed: ${error.message}`);
+                try {
+                    const saved = await agent.history.checkpointAdd('system', `Codex task failed: ${error.message}`);
+                    if (saveSucceeded === null) saveSucceeded = saved?.saved === true;
+                } catch (saveError) {
+                    saveSucceeded = false;
+                    record('history_checkpoint_error', { error: String(saveError) });
+                }
+                terminalDetail.saveSucceeded = saveSucceeded;
             }
             return false;
         } finally {
             // A transport failure must also stop retained game work.
             let cleanupError = null;
+            if (!current()) agent.history?.invalidateSummaries?.();
             if ((failed || !current()) && agent.actions.currentAction?.id === this.actionId && this.actionId != null) {
                 try { await agent.actions.stop('session-cancelled'); }
                 catch (error) { cleanupError = String(error); }

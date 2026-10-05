@@ -164,7 +164,7 @@ export async function executeCommand(agent, message) {
         inventory: { items: () => [] },
         modes: { flushBehaviorLog() { return '' }, async update() { agent.modeTicks++ } }
       }),
-      history: { async add() {}, save() {}, getHistory() { return [] } },
+      history: { async add() { return true }, save() {}, getHistory() { return [] } },
       prompter: { responses: [], calls: 0, pendingPrompt: null, async promptConvo() { this.calls++; if (this.pendingPrompt) { const pending = this.pendingPrompt; this.pendingPrompt = null; return pending.promise } return this.responses.shift() || 'No new command.' } },
       modeTicks: 0, routeResponse() {}, async openChat() {}, checkTaskDone: async () => {},
       npc: { data: { goals: [{ text: 'stale NPC goal' }], curr_goal: { text: 'stale NPC goal' }, do_set_goal: true }, temp_goals: [{ text: 'stale temporary goal' }] },

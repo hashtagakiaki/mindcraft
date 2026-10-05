@@ -31,6 +31,7 @@ async function main() {
     const { ActionManager } = await load('src/agent/action_manager.js')
     const { Coder } = await load('src/agent/coder.js')
     const { CodexSession } = await load('src/process/codex_session.js')
+    const { History } = await load('src/agent/history.js')
     const { Agent } = await load('src/agent/agent.js')
     const { EventEmitter } = require('node:events')
     assert.throws(() => validateCodexRuntime({ model: 'openai/gpt-6-luna' }), /explicit codex/)
@@ -51,9 +52,9 @@ async function main() {
       agent.clearBotLogs = () => { agent.bot.output = ''; agent.bot.interrupt_code = false }
       agent.requestInterrupt = () => { agent.bot.interrupt_code = true; agent.interrupt?.() }
       agent.prompter = { profile: { model: 'codex/gpt-6-luna' }, skill_libary: { getAllSkillDocs: async () => ['skills.wait\nWait for a bounded number of milliseconds.', 'skills.goToPlayer\nNavigate to a named player and return false when it is missing.'] }, withBotRules: async text => { rules.push(text); return text + '\nCURRENT RULES' } }
-      agent.history = { memory: 'vision used to be unavailable', getHistory: () => [{ role: 'user', content: 'test' }], add: async (...args) => rows.push(args), save: async () => {} }
+      agent.history = { memory: 'vision used to be unavailable', invalidations: 0, invalidateSummaries() { this.invalidations++ }, getHistory: () => [{ role: 'user', content: 'test' }], add: async (...args) => rows.push(args), checkpointAdd: async (...args) => { rows.push(args); await agent.history.save(); return { saved: true } }, save: async () => {} }
       agent.routeResponse = (source, text) => routed.push(text)
-      agent.self_prompter = { stopForRecovery() {}, isActive: () => false, shouldInterrupt: () => false }
+      agent.self_prompter = { state: null, prompt: '', stopForRecovery() {}, isStopped: () => true, isActive: () => false, shouldInterrupt: () => false }
       agent.actions = new ActionManager(agent)
       agent.coder = new Coder(agent)
       return agent
@@ -189,6 +190,7 @@ async function main() {
     assert.equal(await mainAgent.handleMessage('operator', 'do the fixture task', null,
       { taskId: 'eval-task-1', onAccepted: value => { acknowledgement = value } }), true)
     assert.ok(mainAgent.codexRuntime, 'actual Agent.handleMessage uses the native runtime')
+    assert.equal(mainAgent.history.invalidations, 1, 'new accepted task invalidates any earlier summary epoch')
     assert.deepEqual(acknowledgement, { accepted: true, taskId: 'eval-task-1' })
     assert.equal(mainAgent.codexRuntime.taskId, 'eval-task-1')
     const traceFiles = await fs.readdir(path.join(root, 'bots/MainPath/histories'))
@@ -196,6 +198,11 @@ async function main() {
       .trim().split('\n').map(line => JSON.parse(line))
     assert.equal(taskEvents.filter(event => event.type === 'task_accepted').length, 1)
     assert.equal(taskEvents.filter(event => event.type === 'finished').length, 1)
+    assert.equal(taskEvents.filter(event => event.type === 'response_checkpoint').length, 1)
+    assert.equal(taskEvents.filter(event => event.type === 'response_reported').length, 1)
+    assert.ok(Date.parse(taskEvents.find(event => event.type === 'response_checkpoint').generatedAt)
+      <= Date.parse(taskEvents.find(event => event.type === 'response_reported').reportedAt),
+      'model generation checkpoint and actual report time remain separate events')
     assert.ok(taskEvents.every(event => event.taskId === 'eval-task-1'), 'accepted task ID reaches every task event')
     const saveFailureAgent = makeAgent('SaveFailure')
     await until(() => saveFailureAgent.coder.code_template && saveFailureAgent.coder.code_lint_template)
@@ -214,6 +221,65 @@ async function main() {
     assert.equal(saveFailureTerminals[0].saveSucceeded, false)
     assert.equal(saveFailureTerminals[0].response, 'I completed the request.')
     assert.ok(Number.isFinite(Date.parse(saveFailureTerminals[0].reportedAt)), 'response route time is preserved independently of save failure')
+    assert.equal(saveFailureEvents.filter(event => event.type === 'response_checkpoint').length, 1)
+    assert.equal(saveFailureEvents.filter(event => event.type === 'history_checkpoint_error').length, 1)
+    assert.equal(saveFailureEvents.filter(event => event.type === 'response_reported').length, 1,
+      'history I/O failure does not relabel a successfully routed response as unreported')
+
+    const brokenTracePath = path.join(root, 'trace-write-failure-directory')
+    await fs.mkdir(brokenTracePath)
+    const traceFailureAgent = makeAgent('TraceWriteFailure')
+    await until(() => traceFailureAgent.coder.code_template && traceFailureAgent.coder.code_lint_template)
+    const traceFailureRuntime = new CodexRuntime(traceFailureAgent, { traceFilePath: brokenTracePath, makeSession: () => ({
+      open: async () => {}, runTurn: async () => ({ operation: null, messages: ['The trace writer is unavailable.'] }), close: async () => {}
+    }) })
+    traceFailureAgent.codexRuntime = traceFailureRuntime
+    assert.equal(await traceFailureRuntime.run('operator', () => true, 'trace-write-failure-task'), true,
+      'JSONL checkpoint or terminal I/O failure does not block an otherwise accepted response')
+    assert.deepEqual(routed.filter(message => message === 'The trace writer is unavailable.'), ['The trace writer is unavailable.'],
+      'response routing is preserved when trace writes fail')
+    assert.equal(traceFailureRuntime.terminalOutcome.completion, 'reported')
+    assert.equal(traceFailureRuntime.terminalOutcome.saveSucceeded, true, 'memory checkpoint result remains distinct from task trace failure')
+    assert.equal(traceFailureRuntime.terminalOutcome.terminalWritten, false, 'failed terminal append is not reported as persisted')
+    assert.equal(traceFailureRuntime.terminalOutcome.traceSaveSucceeded, false)
+    assert.ok(traceFailureRuntime.terminalOutcome.traceWriteFailures.some(failure => failure.type === 'response_checkpoint'))
+    assert.ok(traceFailureRuntime.terminalOutcome.traceWriteFailures.some(failure => failure.type === 'finished'))
+
+    settings.max_messages = 5
+    let resolveSummary
+    const summaryPendingAgent = makeAgent('SummaryPending')
+    summaryPendingAgent.prompter.promptMemSaving = () => new Promise(resolve => { resolveSummary = resolve })
+    summaryPendingAgent.history = new History(summaryPendingAgent)
+    for (let index = 1; index <= 4; index++) await summaryPendingAgent.history.add('SummaryPending', `older turn ${index}`)
+    const summaryPendingRuntime = new CodexRuntime(summaryPendingAgent, { makeSession: () => ({
+      open: async () => {}, runTurn: async () => ({ operation: null, messages: ['The answer is checkpointed and reported.'] }), close: async () => {}
+    }) })
+    summaryPendingAgent.codexRuntime = summaryPendingRuntime
+    let finishRoute
+    summaryPendingAgent.routeResponse = async () => new Promise(resolve => { finishRoute = resolve })
+    const summaryRun = summaryPendingRuntime.run('operator', () => true, 'summary-pending-task')
+    await until(() => typeof finishRoute === 'function')
+    assert.equal(typeof resolveSummary, 'function', 'threshold summary remains pending while task ends')
+    const summaryPendingFiles = await fs.readdir(path.join(root, 'bots/SummaryPending/histories'))
+    const summaryTracePath = path.join(root, 'bots/SummaryPending/histories', summaryPendingFiles.find(file => file.startsWith('codex-')))
+    const beforeRouteEvents = (await fs.readFile(summaryTracePath, 'utf8'))
+      .trim().split('\n').map(line => JSON.parse(line))
+    assert.equal(beforeRouteEvents.filter(event => event.type === 'response_checkpoint').length, 1)
+    assert.equal(beforeRouteEvents.some(event => ['response_reported', 'finished'].includes(event.type)), false,
+      'generated response is checkpointed before routing, and terminal waits for route completion')
+    finishRoute()
+    assert.equal(await summaryRun, true, 'pending summary does not block report routing or task terminal')
+    const summaryPendingEvents = (await fs.readFile(summaryTracePath, 'utf8'))
+      .trim().split('\n').map(line => JSON.parse(line))
+    assert.deepEqual(summaryPendingEvents.filter(event => ['response_checkpoint', 'response_reported', 'finished'].includes(event.type)).map(event => event.type),
+      ['response_checkpoint', 'response_reported', 'finished'], 'generation checkpoint, actual report, and terminal are recorded independently')
+    const summaryPendingMemory = JSON.parse(await fs.readFile(path.join(root, 'bots/SummaryPending/memory.json'), 'utf8'))
+    assert.match(summaryPendingMemory.turns.map(turn => turn.content).join('\n'), /The answer is checkpointed and reported\./,
+      'response turn is durable before the summary finishes')
+    summaryPendingAgent.history.invalidateSummaries()
+    resolveSummary('late summary from an invalidated epoch')
+    await delay(0)
+    assert.equal(summaryPendingAgent.history.memory, '', 'late summary after invalidation cannot overwrite newer state')
 
     const eventsFor = async name => {
       const files = await fs.readdir(path.join(root, `bots/${name}/histories`))
@@ -298,6 +364,7 @@ async function main() {
     assert.equal(turnCapTerminal.taskBudget.threadTurns, 1)
     settings.codex_session = taskBudgets
     assert.equal(await mainAgent.handleMessage('operator', '!stop'), true)
+    assert.equal(mainAgent.history.invalidations, 2, 'Stop also invalidates any outstanding summary epoch')
     assert.equal(mainAgent.actions.userStopped, true, 'literal Stop remains available')
     // Rule contents can change between turns; never freeze an old snapshot in baseInstructions.
     const ruleAgent = makeAgent('Rules')

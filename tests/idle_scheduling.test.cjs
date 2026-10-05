@@ -77,7 +77,7 @@ async function main() {
     agent.bot = { output: '', interrupt_code: false, emit() {}, modes: { flushBehaviorLog: () => '' } }
     agent.clearBotLogs = Agent.prototype.clearBotLogs
     agent.history = {
-      async add() {},
+      async add() { return true },
       save() {},
       getHistory: () => []
     }
