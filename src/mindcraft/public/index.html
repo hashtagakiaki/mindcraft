@@ -559,6 +559,14 @@
             window.lastStates = states;
             Object.keys(states || {}).forEach(name => {
                 const st = states[name];
+                const freshnessEl = document.getElementById(`freshness-${name}`);
+                if (freshnessEl) {
+                    const status = st?._freshness?.status || 'unknown';
+                    const observedAt = st?._freshness?.observedAt;
+                    freshnessEl.textContent = status === 'fresh' ? `state: current (${new Date(observedAt).toLocaleTimeString()})`
+                        : status === 'stale' ? `state: stale (last update ${observedAt ? new Date(observedAt).toLocaleTimeString() : 'unknown'})`
+                            : 'state: unknown';
+                }
                 const healthEl = document.getElementById(`health-${name}`);
                 if (st && !st.error) {
                     const gp = st.gameplay || {};
@@ -786,6 +794,7 @@
                             ${showViewer ? `<div class="cell" style="grid-row: span 3; padding:0;">${viewerHTML}</div>` : ''}
                             <div class="cell" id="action-${agent.name}">action: -</div>
                             <div class="cell" id="mode-${agent.name}">gamemode: -</div>
+                            <div class="cell" id="freshness-${agent.name}">state: unknown</div>
                             <div class="cell" id="health-${agent.name}">health: -</div>
                             <div class="cell" id="hunger-${agent.name}">hunger: -</div>
                             <div class="cell" id="pos-${agent.name}">pos: -</div>

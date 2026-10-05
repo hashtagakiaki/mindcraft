@@ -393,6 +393,7 @@ async function runAgentShutdownFixtures(root) {
     let resolveStop
     const stopGate = new Promise(resolve => { resolveStop = resolve })
     const { agent, events } = makeMinimalAgent(Agent, () => stopGate, async () => ({ saved: true }))
+    agent.vision_interpreter = { async close() { events.cameraClose = true; return { closed: true, drained: false } } }
     agent.actions.executing = true
     assert.equal(typeof agent.shutdown, 'function', 'Agent.shutdown must be implemented')
     const startedAt = Date.now()
@@ -406,6 +407,8 @@ async function runAgentShutdownFixtures(root) {
     assert.equal(outcome.stopped, false, 'a pending action stop race is not successful stop evidence')
     assert.ok(outcome.stopResult?.phase || outcome.stopResult?.stopRequestedPhase, 'stop failure records phase evidence')
     assert.equal(outcome.saveResult?.saved, true)
+    assert.deepEqual(outcome.cameraResult, { closed: true, drained: false }, 'camera cleanup is bounded and pending drain is not reported as complete')
+    assert.equal(events.cameraClose, true, 'Agent shutdown closes its owned vision camera')
     assert.equal(events.shutdowns.length, 1)
     assert.equal(events.ends, 1, 'Minecraft end is called once after the final record')
     resolveStop({ stopped: true, phase: 'late-settled' })

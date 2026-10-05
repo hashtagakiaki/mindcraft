@@ -27,11 +27,11 @@ export class VisionInterpreter {
         if (direction === 'with') {
             await bot.look(player.yaw, player.pitch);
             result = `Looking in the same direction as ${player_name}\n`;
-            filename = await this.camera.capture();
+            filename = await this.camera.capture(this._captureOptions());
         } else {
             await bot.lookAt(new Vec3(player.position.x, player.position.y + player.height, player.position.z));
             result = `Looking at player ${player_name}\n`;
-            filename = await this.camera.capture();
+            filename = await this.camera.capture(this._captureOptions());
 
         }
 
@@ -47,7 +47,7 @@ export class VisionInterpreter {
         await bot.lookAt(new Vec3(x, y + 2, z));
         result = `Looking at coordinate ${x}, ${y}, ${z}\n`;
 
-        let filename = await this.camera.capture();
+        let filename = await this.camera.capture(this._captureOptions());
 
         return result + `Image analysis: "${await this.analyzeImage(filename)}"`;
     }
@@ -81,5 +81,14 @@ export class VisionInterpreter {
             console.warn('Error reading image:', error);
             return `Error reading image: ${error.message}`;
         }
+    }
+
+    _captureOptions() {
+        const context = this.agent.actions?.getCancellationContext?.() || null;
+        return { signal: context?.signal || null };
+    }
+
+    close(options) {
+        return this.camera?.close(options) || Promise.resolve({ closed: true, drained: true });
     }
 }

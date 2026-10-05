@@ -145,6 +145,9 @@ export class Agent {
                 stopResult = { stopped: false, reason: 'shutdown-error', error: String(error?.message || error), actionId: this.actions?.currentAction?.id ?? null, phase: this.actions?.currentAction?.phase || 'unknown' };
             }
             await sessionClosing;
+            let cameraResult = { closed: true, drained: true };
+            try { cameraResult = await (this.vision_interpreter?.close?.() ?? cameraResult); }
+            catch (error) { cameraResult = { closed: false, drained: false, error: String(error?.message || error) }; }
             const safeOutcome = { reason: intent.reason, restartIntent: intent.restartIntent, code: intent.code, message: intent.message || null, taskResult: this.taskResult || null, stopped: stopResult.stopped, stopResult };
             let saveResult = { saved: false, skipped: 'history unavailable' };
             try { saveResult = await (this.history?.saveShutdownRecord?.(intent.reason, safeOutcome) ?? saveResult); }
@@ -155,7 +158,7 @@ export class Agent {
                 try { this.bot.end(`Agent shutdown: ${intent.reason}`); ended = true; }
                 catch (error) { console.error('Could not end Minecraft connection:', error); }
             }
-            return { ...safeOutcome, saveResult, ended };
+            return { ...safeOutcome, saveResult, cameraResult, ended };
         });
         return this._shutdownPromise;
     }

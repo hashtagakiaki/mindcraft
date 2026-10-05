@@ -10,6 +10,7 @@ import settings from '../../settings.js';
 import { attachPlaceStoreLifecycle, PlaceStore } from './place_store.js';
 import { attachPlaceRpc } from './place_rpc.js';
 import { createHash, randomUUID, randomBytes, timingSafeEqual } from 'crypto';
+import { createStatePoller } from './state_poller.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Mindserver is:
@@ -393,6 +394,9 @@ export function createMindServer(host_public = false, port = 8080) {
         storePromise: placeStorePromise,
         beforeClose: async reason => {
             hubClosing = true;
+            statePoller?.stop();
+            statePoller = null;
+            agent_listeners.splice(0, agent_listeners.length);
             placeRpcClosing = true;
             botTokens.clear();
             protectedSessions.operator = null;
@@ -526,30 +530,16 @@ function agentsStatusUpdate(socket) {
 }
 
 
-let listenerInterval = null;
+let statePoller = null;
 function addListener(listener_socket) {
     if (agent_listeners.includes(listener_socket)) return;
     agent_listeners.push(listener_socket);
     if (agent_listeners.length === 1) {
-        listenerInterval = setInterval(async () => {
-            const states = {};
-            for (let agentName in agent_connections) {
-                let agent = agent_connections[agentName];
-                if (agent.in_game) {
-                    try {
-                        const state = await new Promise((resolve) => {
-                            agent.socket.emit('get-full-state', (s) => resolve(s));
-                        });
-                        states[agentName] = state;
-                    } catch (e) {
-                        states[agentName] = { error: String(e) };
-                    }
-                }
-            }
-            for (let listener of agent_listeners) {
-                listener.emit('state-update', states);
-            }
-        }, 1000);
+        statePoller = createStatePoller({
+            getConnections: () => agent_connections,
+            emit: states => { for (const listener of agent_listeners) listener.emit('state-update', states); },
+        });
+        statePoller.start();
     }
 }
 
@@ -558,8 +548,8 @@ function removeListener(listener_socket) {
     if (index < 0) return;
     agent_listeners.splice(index, 1);
     if (agent_listeners.length === 0) {
-        clearInterval(listenerInterval);
-        listenerInterval = null;
+        statePoller?.stop();
+        statePoller = null;
     }
 }
 
