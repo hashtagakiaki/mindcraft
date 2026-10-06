@@ -329,7 +329,7 @@ export class Agent {
 
             // Log and Analyze
             // handleDisconnection handles logging to console and server
-            const { type } = handleDisconnection(this.name, reason);
+            const { type } = handleDisconnection(this.name, reason, this.bot.version);
      
             if (this.requestShutdown) void this.requestShutdown('connection-lost', { restartIntent: true, code: 1 });
             else void this.shutdown('connection-lost', { restartIntent: true, code: 1 });
@@ -1037,7 +1037,7 @@ export class Agent {
         this.bot.on('end', (reason) => {
             if (!this._disconnectHandled) {
                 this._disconnectHandled = true;
-                const { msg } = handleDisconnection(this.name, reason);
+                const { msg } = handleDisconnection(this.name, reason, this.bot.version);
                 if (this.requestShutdown) void this.requestShutdown('connection-lost', { restartIntent: true, code: 1 });
                 else void this.shutdown('connection-lost', { restartIntent: true, code: 1 });
             }
@@ -1049,7 +1049,7 @@ export class Agent {
         this.bot.on('kicked', (reason) => {
             if (!this._disconnectHandled) {
                 this._disconnectHandled = true;
-                const { msg } = handleDisconnection(this.name, reason);
+                const { msg } = handleDisconnection(this.name, reason, this.bot.version);
                 if (this.requestShutdown) void this.requestShutdown('connection-lost', { restartIntent: true, code: 1 });
                 else void this.shutdown('connection-lost', { restartIntent: true, code: 1 });
             }

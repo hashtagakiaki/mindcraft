@@ -1,3 +1,4 @@
+import chat from 'prismarine-chat';
 import { sendOutputToServer } from './mindserver_proxy.js';
 
 // Definitions of error types, keywords, and full human-readable messages.
@@ -47,10 +48,11 @@ export const log = (agentName, msg) => {
 };
 
 // Analyzes the kick reason and returns a full, human-readable sentence.
-export function parseKickReason(reason) {
+export function parseKickReason(reason, minecraftVersion = "1.21.1") {
     if (!reason) return { type: 'unknown', msg: 'Unknown reason (Empty)', isFatal: true };
     
-    const raw = (typeof reason === 'string' ? reason : JSON.stringify(reason)).toLowerCase();
+    const rawText = typeof reason === 'string' ? reason : JSON.stringify(reason);
+    const raw = rawText.toLowerCase();
 
     // Search for keywords in definitions
     for (const [type, def] of Object.entries(ERROR_DEFINITIONS)) {
@@ -60,19 +62,17 @@ export function parseKickReason(reason) {
         }
     }
     
-    // Fallback: Extract text from JSON
-    let fallback = raw;
-    try {
-        const obj = typeof reason === 'string' ? JSON.parse(reason) : reason;
-        fallback = obj.translate || obj.text || (obj.value?.translate) || raw;
-    } catch (_) {}
-    
+    // Reuse the installed Minecraft component decoder for NBT and JSON formats.
+    let fallback = rawText;
+    try { fallback = chat(minecraftVersion).fromNotch(reason).toString() || rawText; }
+    catch (_) {}
+
     return { type: 'other', msg: `Disconnected: ${fallback}`, isFatal: true };
 }
 
 // Centralized handler for disconnections.
-export function handleDisconnection(agentName, reason) {
-    const { type, msg } = parseKickReason(reason);
+export function handleDisconnection(agentName, reason, minecraftVersion) {
+    const { type, msg } = parseKickReason(reason, minecraftVersion);
     
     // Format: [LoginGuard] Error Message
     const finalMsg = `[LoginGuard] ${msg}`;

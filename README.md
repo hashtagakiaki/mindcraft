@@ -4,6 +4,10 @@
 
 The SDK documentation and code linter share one explicit `places`/`vision` method map. Relevant place methods are selected by task relevance; vision methods remain in the always-shown docs. The vision SDK reuses the existing screenshot interpretation commands; await a method and log its returned analysis into action output. It requires `allow_vision` and a vision-capable model, and returns a disabled message when unavailable. The vision SDK exposes only `lookAtPlayer` and `lookAtPosition`; `lookAtPosition` retains the existing aim at `y + 2`. When embeddings are unavailable, skill selection scores the documentation text directly.
 
+Generated vision calls use `await vision.lookAtPosition(x, y, z)` or `await vision.lookAtPlayer("Steve", "at")`, without a `bot` argument. Position coordinates must be finite numbers; player names must be nonempty strings and direction is `"at"` (default) or `"with"`. Invalid arguments fail before changing the view or capturing an image, so an owned operation can report the error and continue with a corrected call in the same task. Log the returned analysis, for example `log(bot, await vision.lookAtPosition(75, 73, -292));`.
+
+Minecraft disconnect reasons are decoded with the version-specific chat component decoder, including modern NBT reasons. The offline `tests/vision_sdk_validation.test.cjs` fixture checks Coder/SES/ActionManager rejection and continuation, chat commands, disabled vision, and reason decoding. Isolated vanilla 1.21.1 verification records are in [the LoginGuard investigation](../mindcraft-tools/docs/login-guard-invalid-rotation-20261006.md); camera/image analysis is stubbed in these checks.
+
 `blocked_actions` disables named chat commands and removes those commands from command documentation. It does not prohibit equivalent operations through the SDK, raw bot access, or plugins.
 
 ### Placement with a requested orientation

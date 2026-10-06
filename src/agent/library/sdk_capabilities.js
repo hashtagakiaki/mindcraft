@@ -10,8 +10,8 @@ export const SDK_CAPABILITIES = Object.freeze({
     vision: Object.freeze({
         enabledBy: 'settings.allow_vision and a vision-capable model',
         methods: Object.freeze({
-            lookAtPlayer: 'Look at a visible player or align the camera with their view, capture a screenshot, and return its image analysis.',
-            lookAtPosition: 'Aim toward coordinates, capture a screenshot, and return its image analysis. The camera aims two blocks above the supplied y coordinate.',
+            lookAtPlayer: 'Signature: vision.lookAtPlayer(playerName, direction = \"at\"). Example: await vision.lookAtPlayer(\"Steve\", \"at\"). playerName must be a nonempty string; direction is \"at\" or \"with\". Do not pass bot. Look at a visible player or align the camera with their view, capture a screenshot, and return its image analysis.',
+            lookAtPosition: 'Signature: vision.lookAtPosition(x, y, z), with three finite numbers. Example: await vision.lookAtPosition(75, 73, -292). Do not pass bot. Aim toward coordinates, capture a screenshot, and return its image analysis. The camera aims two blocks above the supplied y coordinate.',
         }),
     }),
     places: Object.freeze({

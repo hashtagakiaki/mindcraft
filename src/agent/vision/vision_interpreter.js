@@ -12,12 +12,15 @@ export class VisionInterpreter {
         }
     }
 
-    async lookAtPlayer(player_name, direction) {
+    async lookAtPlayer(player_name, direction = "at") {
         if (!this.allow_vision || !this.agent.prompter.vision_model.sendVisionRequest) {
             return "Vision is disabled. Use other methods to describe the environment.";
         }
         let result = "";
         const bot = this.agent.bot;
+        if (typeof player_name !== "string" || !player_name.trim() || !["at", "with"].includes(direction)) {
+            throw new TypeError('Use vision.lookAtPlayer(playerName, "at" | "with"); do not pass bot.');
+        }
         const player = bot.players[player_name]?.entity;
         if (!player) {
             return `Could not find player ${player_name}`;
@@ -44,6 +47,9 @@ export class VisionInterpreter {
         }
         let result = "";
         const bot = this.agent.bot;
+        if (![x, y, z].every(value => typeof value === "number" && Number.isFinite(value))) {
+            throw new TypeError("Use vision.lookAtPosition(x, y, z) with finite numbers; do not pass bot.");
+        }
         await bot.lookAt(new Vec3(x, y + 2, z));
         result = `Looking at coordinate ${x}, ${y}, ${z}\n`;
 

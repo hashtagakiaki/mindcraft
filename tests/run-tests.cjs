@@ -617,6 +617,7 @@ async function main() {
   execFileSync(node, [path.join(__dirname, 'state_poller.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'camera_lifecycle.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'vision_request_ownership.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'vision_sdk_validation.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'message_targets.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'bot_rules.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'partial_read_capture.test.cjs'), path.join(repo, 'src/utils/partial_read_capture.js')], { stdio: 'inherit' })
