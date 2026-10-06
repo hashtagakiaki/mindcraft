@@ -25,6 +25,8 @@ export class History {
         // Natural language memory as a summary of recent messages + previous memory
         this.memory = '';
         this.taskDiagnostics = null;
+        this.codexThread = null;
+        this.historySequence = 0;
 
         // Maximum number of messages to keep in context before saving chunk to memory
         this.max_messages = settings.max_messages;
@@ -81,7 +83,9 @@ export class History {
         if (this.shutdownStarted) return false;
         this._appendTurn(name, content);
 
-        if (this.turns.length >= this.max_messages) {
+        if (settings.agent_runtime === 'codex-session') {
+            await this._trimNativeHistory();
+        } else if (this.turns.length >= this.max_messages) {
             const epoch = this.summaryEpoch;
             this._queueSummaryChunk(this._takeSummaryChunk());
             let summarized;
@@ -95,12 +99,15 @@ export class History {
         return true;
     }
 
-    async checkpointAdd(name, content) {
+    async checkpointAdd(name, content, { codexThreadId } = {}) {
         if (this.shutdownStarted) return { saved: false, skipped: 'shutdown in progress' };
         this._appendTurn(name, content);
+        if (codexThreadId && this.codexThread?.threadId === codexThreadId)
+            this.codexThread.historySequence = this.historySequence;
+        if (settings.agent_runtime === 'codex-session') await this._trimNativeHistory();
         const saveResult = await this.save();
         if (!saveResult.saved) return saveResult;
-        if (this.turns.length >= this.max_messages) {
+        if (settings.agent_runtime !== 'codex-session' && this.turns.length >= this.max_messages) {
             this._queueSummaryChunk(this._takeSummaryChunk(), { persistAfter: true });
             void this._ensureSummaryDrain().catch(error => {
                 this.summaryDiagnostic = String(error);
@@ -108,6 +115,31 @@ export class History {
             });
         }
         return saveResult;
+    }
+
+    async _trimNativeHistory() {
+        // Codex owns the native context and compaction. Keep a bounded UI/seed history without a second model.
+        const limit = Number.isInteger(this.max_messages) && this.max_messages > 0 ? this.max_messages : 15;
+        if (this.turns.length > limit) await this.appendFullHistory(this.turns.splice(0, this.turns.length - limit));
+    }
+
+    getCodexThread(scope) {
+        const saved = this.codexThread;
+        return saved?.version === 1 && typeof saved.threadId === 'string' && saved.threadId.length > 0
+            && Object.keys(scope).every(key => saved.scope?.[key] === scope[key]) ? saved.threadId : null;
+    }
+
+    getCodexInput(resumed) {
+        if (!resumed) return this.getHistory();
+        const consumed = this.codexThread?.historySequence;
+        if (!Number.isSafeInteger(consumed)) return this.getHistory();
+        const count = Math.max(0, this.historySequence - consumed);
+        return count ? this.getHistory().slice(-count) : [];
+    }
+
+    async checkpointCodexThread(threadId, scope) {
+        this.codexThread = { version: 1, threadId, scope: { ...scope }, historySequence: this.historySequence };
+        return this.save();
     }
 
     _appendTurn(name, content) {
@@ -118,6 +150,7 @@ export class History {
             content = `${name}: ${content}`;
         }
         this.turns.push({ role, content });
+        this.historySequence++;
     }
 
     _takeSummaryChunk() {
@@ -209,6 +242,7 @@ export class History {
             this.turns = [...pending, ...this.turns];
             const detail = typeof outcome === 'string' ? outcome : JSON.stringify(outcome);
             this.turns.push({ role: 'system', content: `Agent shutdown (${reason || 'unspecified'}). Final outcome: ${detail}. Natural language shutdown summary skipped.` });
+            this.historySequence++;
             try {
                 await this.save({ final: true });
                 return { saved: true, memoryPath: this.memory_fp };
@@ -225,6 +259,8 @@ export class History {
             const data = {
                 memory: this.memory,
                 task_diagnostics: this.taskDiagnostics,
+                codex_thread: this.codexThread,
+                history_sequence: this.historySequence,
                 turns: [...this.pendingHistoryChunks.flat(), ...this.turns],
                 self_prompting_state: this.agent.self_prompter?.state ?? null,
                 self_prompt: !this.agent.self_prompter || this.agent.self_prompter.isStopped() ? null : this.agent.self_prompter.prompt,
@@ -256,6 +292,9 @@ export class History {
             const data = JSON.parse(readFileSync(this.memory_fp, 'utf8'));
             this.memory = data.memory || '';
             this.turns = data.turns || [];
+            this.codexThread = data.codex_thread ?? null;
+            this.historySequence = Number.isSafeInteger(data.history_sequence) && data.history_sequence >= this.turns.length
+                ? data.history_sequence : this.turns.length;
             // Old memory files remain valid; scope mismatch is never silently imported.
             const diagnostic = readTaskDiagnostics(this.agent, data.task_diagnostics ?? null);
             this.taskDiagnostics = diagnostic.available ? diagnostic.snapshot : null;
@@ -273,6 +312,8 @@ export class History {
         this.turns = [];
         this.memory = '';
         this.taskDiagnostics = null;
+        this.codexThread = null;
+        this.historySequence = 0;
         this.taskDiagnosticsUnavailable = null;
     }
 }

@@ -13,7 +13,7 @@ export class VisionInterpreter {
     }
 
     async lookAtPlayer(player_name, direction = "at") {
-        if (!this.allow_vision || !this.agent.prompter.vision_model.sendVisionRequest) {
+        if (!this._visionAvailable()) {
             return "Vision is disabled. Use other methods to describe the environment.";
         }
         let result = "";
@@ -42,7 +42,7 @@ export class VisionInterpreter {
     }
 
     async lookAtPosition(x, y, z) {
-        if (!this.allow_vision || !this.agent.prompter.vision_model.sendVisionRequest) {
+        if (!this._visionAvailable()) {
             return "Vision is disabled. Use other methods to describe the environment.";
         }
         let result = "";
@@ -63,7 +63,7 @@ export class VisionInterpreter {
             throw new TypeError("Use vision.lookAtBlock(x, y, z) with finite numbers; do not pass bot.");
         }
         const observedAt = new Date().toISOString();
-        if (!this.allow_vision || !this.agent.prompter.vision_model.sendVisionRequest) {
+        if (!this._visionAvailable()) {
             return { status: 'vision_disabled', target: null, aim: null, observedAt, analysis: null,
                 reason: "Vision is disabled. Use other methods to describe the environment." };
         }
@@ -103,8 +103,15 @@ export class VisionInterpreter {
 
     async analyzeImage(filename) {
         const context = this.agent.actions?.getCancellationContext?.() || null;
+        const native = this.agent.codexRuntime?.active ? this.agent.codexRuntime : null;
         try {
             const imageBuffer = fs.readFileSync(`${this.fp}/${filename}.jpg`);
+            if (native) {
+                context?.signal?.throwIfAborted();
+                const attachment = native.attachImage(imageBuffer, { observedAt: new Date().toISOString(),
+                    centerBlock: this.getCenterBlockInfo() });
+                return `Screenshot attached to this operation's tool result; interpret the image directly. ${JSON.stringify(attachment)}`;
+            }
             const messages = this.agent.history.getHistory();
 
             const blockInfo = this.getCenterBlockInfo();
@@ -114,10 +121,14 @@ export class VisionInterpreter {
             return result + `\n${blockInfo}`;
 
         } catch (error) {
-            if (context?.signal?.aborted || error?.name === 'AbortError') throw error;
+            if (native || context?.signal?.aborted || error?.name === 'AbortError') throw error;
             console.warn('Error reading image:', error);
             return `Error reading image: ${error.message}`;
         }
+    }
+
+    _visionAvailable() {
+        return this.allow_vision && (!!this.agent.codexRuntime?.active || !!this.agent.prompter.vision_model?.sendVisionRequest);
     }
 
     _captureOptions() {

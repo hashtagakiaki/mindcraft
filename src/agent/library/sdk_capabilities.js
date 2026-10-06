@@ -44,7 +44,10 @@ export const SDK_CAPABILITIES = Object.freeze({
 export function getCapabilityDocs() {
     return Object.entries(SDK_CAPABILITIES).filter(([namespace]) => namespace !== 'communication' || settings.agent_runtime === 'codex-session').flatMap(([namespace, capability]) =>
         Object.entries(capability.methods).map(([method, description]) =>
-            `${namespace}.${method}\n${description}\nRuntime availability: ${capability.enabledBy}.\nSDK admission is checked by the host; raw bot and plugin access is outside this guarantee.`));
+            `${namespace}.${method}\n${description}\nRuntime availability: ${capability.enabledBy}.\n`
+            + (namespace === 'vision' && settings.agent_runtime === 'codex-session'
+                ? 'During an owned native task, capture attaches the JPEG directly to minecraft_execute and returns an attachment marker instead of a separate model analysis; interpret the image yourself. Up to four images, each at most 2 MiB, per operation. No separate vision_model is required.\n' : '')
+            + 'SDK admission is checked by the host; raw bot and plugin access is outside this guarantee.'));
 }
 
 export function getCapabilityMethodNames() {

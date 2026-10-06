@@ -53,4 +53,4 @@
 - 記載したcheckを実行してfull diffを確認し、credentialと生成runtime dataをGitへ含めない。
 - `autonomy`上の `origin` だけへcommit/pushし、他repoがpinする前にremote commit SHAを確認する。
 
-- `agent_runtime: "codex-session"` はroot settingsの明示opt-in。`src/process/codex_session.js` は既存owned CLI helperの親登録ACKとprocess回収を再利用する。native task中は旧recovery modelを並行起動しない。機能追加だけでmanual play pinを更新・bot切替しない。
+- `agent_runtime: "codex-session"` はroot settingsの明示opt-in。標準tool待機・遅延SDK説明・scope付きthread再開・画像入力の仕様とCLI検証範囲は[README](README.md#opt-in-codex-task-session)と[移行記録](docs/codex-standard-harness-20261006.md)を参照する。`src/process/codex_session.js` は既存owned CLI helperの親登録ACKとprocess回収を再利用する。native task中は旧recovery modelを並行起動しない。機能追加だけでmanual play pinを更新・bot切替しない。

@@ -6,10 +6,11 @@ const os = require('node:os')
 const path = require('node:path')
 const { Readable } = require('node:stream')
 const { pathToFileURL } = require('node:url')
+const { moduleRoot } = require('./dependency_root.cjs')
 
 async function main() {
   const sourceRoot = path.resolve(__dirname, '..')
-  const dependencyRoot = path.resolve(__dirname, '../../mindcraft-eval/runtime/upstream/node_modules')
+  const dependencyRoot = moduleRoot();
   const fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'mindcraft-camera-lifecycle-'))
   await fs.symlink(dependencyRoot, path.join(fixtureRoot, 'node_modules'), 'dir')
   await fs.copyFile(path.join(sourceRoot, 'src/agent/vision/camera.js'), path.join(fixtureRoot, 'camera.js'))
