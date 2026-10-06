@@ -4,6 +4,7 @@ Native Minecraft tasks reuse the Codex app-server mechanisms for SDK discovery, 
 
 | Concern | Previous native behavior | Result |
 |---|---|---|
+| Fixed gameplay instructions | JavaScript array injected as base instructions | Tracked bot AGENTS.md copied into the private runtime cwd; standard workspace instruction discovery |
 | SDK context | Full SDK embedded in each task's base instructions | Existing docs registered as deferred `minecraft_sdk` documentation tools; standard tool_search/code mode discovers them |
 | Operation wait | Running acknowledgement, turn interrupt, completed result in a new turn | Actual settled result returned to the pending dynamic tool call |
 | Conversation | Ephemeral thread per request; old local conversation injected again | Scoped persistent thread resumed across requests; only new local context is sent |
@@ -28,6 +29,16 @@ The final probe used the implemented **CodexSession and SDK documentation adapte
 
 The standard automatic compaction mechanism is retained; the probe explicitly invoked it to verify the endpoint and retained history. It did not force a naturally full context window. Deferred SDK specs are restored with a saved thread, so bot/world/model/effort/SDK/vision scope mismatches start fresh. Missing Codex rollouts fail explicitly rather than replaying game work. `load_memory: false` prevents loading the pointer on bot restart; requests within one running bot may still share its newly created thread.
 
+## Fixed instructions follow-up
+
+Fixed gameplay/recovery/tool-use guidance now lives in [`src/process/codex/AGENTS.md`](../src/process/codex/AGENTS.md). CodexSession places it in the owned temporary cwd before launching app-server and leaves `baseInstructions` unset. The repository's development AGENTS.md is not copied. The runtime keeps changing capabilities in decision inputs and refreshes shared bot rules before every decision.
+
+A disposable CLI 0.160.1 probe demonstrated that `environments: []` prevents workspace AGENTS discovery, even with a file present. Omitting that field allows the standard cwd loader to read it; `selectedCapabilityRoots: []` can remain. A marker present only in the workspace file was returned on a new thread. After replacing the file in the next session's cwd and resuming the same thread, the model returned the new policy marker and retained a conversation marker. No shell, file, web or Minecraft operation was requested. The sandbox remains read-only, shell/web disabled and non-Minecraft tool calls rejected by the existing transport boundary.
+
+The final implemented CodexSession was also exercised with the tracked gameplay file and no custom base instructions: deferred documentation discovery, direct image interpretation, Japanese reporting, persisted-thread resume and explicit compaction retained the same synthetic image/marker evidence described above. The probe made three synthetic execution calls and no game operations.
+
+Scope protocol 2 starts a fresh thread once for this migration because old threads persist the previous custom base instructions. Later fixed-file changes are read on normal session startup/resume. AGENTS.md still contributes model context; this replaces custom instruction management rather than claiming token savings. The task trace records the instruction source path and current capability values instead of embedding the fixed instruction array.
+
 ## Regression checks and boundaries
 
 The required Node20 offline suite, syntax check and whitespace check cover the final source. Native fixtures verify pending-result waiting, commentary/final separation, fast completion, partial failure, shared rules after every SDK result, queued-call admission closing on rule-read failure, cancellation/actual drain, peer authentication, task budgets, thread save/reload/scope/reset, and new recipient/behavior context without full history reinjection. Native images use the real interpreter/Coder/ActionManager boundary with a fixture camera: no helper vision call, current-owner admission, four-image/2 MiB bounds, partial images on failure and metadata-only host traces. Existing legacy memory/vision and process ownership checks remain in the suite.
@@ -36,4 +47,4 @@ The camera fixture now uses the existing dependency resolver rather than assumin
 
 These checks do not verify rendered Minecraft image quality or play success rates. The older [goal-recovery live results](native-goal-recovery-20261006.md) tested their recorded implementation, not this transport change. No manual-play pin, bundle or running service was changed. Goals and operator steering are outside this migration.
 
-Official implementation references: [app-server protocol](https://learn.chatgpt.com/docs/app-server), [native deferred-tool guide](https://developers.openai.com/api/docs/guides/tools-tool-search), and installed-version [tool registry](https://github.com/openai/codex/blob/rust-v0.160.1/codex-rs/core/src/tools/spec_plan.rs) / [dynamic tool response wait](https://github.com/openai/codex/blob/rust-v0.160.1/codex-rs/core/src/tools/handlers/dynamic.rs).
+Official implementation references: [standard AGENTS discovery](https://learn.chatgpt.com/docs/agent-configuration/agents-md), [app-server protocol](https://learn.chatgpt.com/docs/app-server), [native deferred-tool guide](https://developers.openai.com/api/docs/guides/tools-tool-search), and installed-version [tool registry](https://github.com/openai/codex/blob/rust-v0.160.1/codex-rs/core/src/tools/spec_plan.rs) / [dynamic tool response wait](https://github.com/openai/codex/blob/rust-v0.160.1/codex-rs/core/src/tools/handlers/dynamic.rs).

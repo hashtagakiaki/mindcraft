@@ -319,8 +319,15 @@ async function main() {
     const events = [], gate = deferred()
     let calls = 0
     const session = new CodexSession({ model: 'gpt-6-luna', record: (type, detail) => events.push({ type, detail }), execute: async () => { calls++; return gate.promise } })
+    const nativeRequest = session.request.bind(session)
+    let threadParams
+    session.request = (method, params) => { if (method === 'thread/start') threadParams = params; return nativeRequest(method, params) }
     try {
-      await session.open('fixture', new AbortController().signal)
+      await session.open(new AbortController().signal)
+      assert.equal(Object.hasOwn(threadParams, 'baseInstructions'), false)
+      assert.equal(Object.hasOwn(threadParams, 'environments'), false, 'default workspace access enables native AGENTS discovery')
+      assert.deepEqual(threadParams.selectedCapabilityRoots, [], 'unrelated capabilities remain unselected')
+      assert.equal(await fs.readFile(path.join(session.cwd, 'AGENTS.md'), 'utf8'), await fs.readFile(path.join(root, 'src/process/codex/AGENTS.md'), 'utf8'))
       let finished = false
       const running = session.runTurn('do work').finally(() => { finished = true })
       await until(() => calls === 1)
@@ -525,7 +532,10 @@ async function main() {
     assert.match(resumedStart.input, /NEW_BEHAVIOR_LOG/)
     assert.doesNotMatch(resumedStart.input, /verified/, 'the previous native answer was already part of the thread')
     assert.doesNotMatch(resumedStart.input, /OLDER_REQUEST_MARKER/, 'resumed thread is not fed the old conversation again')
-    assert.doesNotMatch(resumedStart.instructions, /Wait for a bounded number/, 'full SDK text is absent from base instructions')
+    assert.doesNotMatch(await fs.readFile(path.join(root, 'src/process/codex/AGENTS.md'), 'utf8'), /Wait for a bounded number/, 'full SDK stays out of fixed instructions')
+    assert.equal(resumedStart.instructionsFile, 'src/process/codex/AGENTS.md')
+    assert.equal(resumedStart.capabilities.max_block_edits_per_check, 8)
+    assert.match(persistentTraces.find(row => row.taskId === 'persistent-second' && row.type === 'turn_input').input, /CURRENT CAPABILITIES/)
     for (const scope of [{ ...savedThread.scope, bot: 'Other' }, { ...savedThread.scope, worldId: 'another-world' },
       { ...savedThread.scope, model: 'another-model' }, { ...savedThread.scope, sdk: 'changed-sdk' }]) {
       assert.equal(persistentAgent.history.getCodexThread(scope), null)
@@ -726,7 +736,7 @@ async function main() {
     await until(() => modelWaitAgent.coder.code_template && modelWaitAgent.coder.code_lint_template)
     let modelWaitClosed = false
     const modelWaitRuntime = new CodexRuntime(modelWaitAgent, { makeSession: () => ({
-      open: async (_instructions, signal) => { signal.addEventListener('abort', () => {}, { once: true }) },
+      open: async signal => { signal.addEventListener('abort', () => {}, { once: true }) },
       runTurn: async () => new Promise((resolve, reject) => {
         const abort = () => reject(new Error('model wait aborted'))
         modelWaitRuntime.abort.signal.addEventListener('abort', abort, { once: true })
@@ -800,25 +810,25 @@ async function main() {
     assert.equal(await mainAgent.handleMessage('operator', '!stop'), true)
     assert.equal(mainAgent.history.invalidations, 2, 'Stop also invalidates any outstanding summary epoch')
     assert.equal(mainAgent.actions.userStopped, true, 'literal Stop remains available')
-    // Rule contents can change between turns; never freeze an old snapshot in baseInstructions.
+    // Rule contents can change between decisions; keep them out of the fixed AGENTS.md.
     const ruleAgent = makeAgent('Rules')
-    let rule = 'first rule', base, turnCount = 0
+    let rule = 'first rule', turnCount = 0
     const inputs = []
     const acceptedRequest = { role: 'user', content: 'Complete the original requested outcome.' }
     ruleAgent.history.getHistory = () => [acceptedRequest]
     ruleAgent.prompter.withBotRules = async text => text + '\n' + rule
     const ruleRuntime = new CodexRuntime(ruleAgent, { makeSession: ({ execute }) => ({
-      open: async instructions => { base = instructions },
+      open: async () => {},
       runTurn: async input => { inputs.push(input); turnCount++; if (turnCount === 1) { rule = 'updated rule'; ruleAgent.history.getHistory = () => [{ role: 'system', content: 'Later operation context.' }]; return { operation: execute('await Promise.resolve();'), messages: [] } } return { operation: null, messages: ['done'] } },
       close: async () => {}
     }) })
     ruleAgent.codexRuntime = ruleRuntime
     await until(() => ruleAgent.coder.code_template && ruleAgent.coder.code_lint_template)
     assert.equal(await ruleRuntime.run('operator', () => true), true)
-    assert.ok(!base.includes('first rule'))
+    assert.doesNotMatch(await fs.readFile(path.join(root, 'src/process/codex/AGENTS.md'), 'utf8'), /first rule/)
     assert.ok(inputs[0].endsWith('first rule'))
     assert.ok(inputs[1].endsWith('updated rule'))
-    const resumedRequest = inputs[1].split('CURRENT OPERATOR REQUEST (still active):\n')[1].split('\nCOMPLETED OPERATION RESULT:')[0]
+    const resumedRequest = inputs[1].split('CURRENT OPERATOR REQUEST (still active):\n')[1].split('\nCURRENT CAPABILITIES:')[0]
     assert.deepEqual(JSON.parse(resumedRequest), acceptedRequest, 'resumed decisions retain the accepted goal even when later history changes')
     // Stop/new intent/management/shutdown invalidate retained work; stale result cannot resume.
     for (const reason of ['user', 'superseded', 'management', 'shutdown']) {

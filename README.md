@@ -401,6 +401,8 @@ Root `settings.js` の `agent_runtime: "codex-session"` と `allow_insecure_codi
 
 `minecraft_execute` で複数skillをまとめたJavaScriptを既存Coder/SES/lintとActionManagerへ渡す。Codex標準のdynamic tool応答待機を使い、settleした結果をその呼出しへ返す。操作ごとのturn interrupt・次turnへの結果手渡し・実行中のLLM pollingは行わない。現在のshared bot rulesと受理済みpeer contextを結果に添え、読込失敗や取消後に判断を再開しない。
 
+固定のbot行動指示は [`src/process/codex/AGENTS.md`](src/process/codex/AGENTS.md) が正本。起動前にbot専用の一時cwdへ `AGENTS.md` として配置し、Codex標準のworkspace instruction読込に任せる。`baseInstructions` の独自上書きは行わない。新規開始・thread再開時にその時点のファイルを読む。vision可否、検索半径、観察までの編集上限は各判断の `CURRENT CAPABILITIES`、共有bot規約は従来どおり判断ごとの再読込で渡す。開発用のrepo root `AGENTS.md` はbotのcwdに置かない。AGENTS.mdもモデルのcontextへ入るため、ファイル化そのものをトークン削減とは扱わない。旧埋込指示が保存されたthreadを使わないよう、この移行時はscope protocolを更新して一度だけ新規threadにする。以後の指示ファイル更新は標準の再読込で反映する。
+
 SDK全量をbaseInstructionsへ埋め込まず、既存文書を `minecraft_sdk` namespaceの `deferLoading: true` ツールとして登録する。ツールは説明を読むだけで、ゲーム操作は `minecraft_execute` が所有する。Codex標準のtool_search/code modeで必要な説明を発見する。モデルmetadataがcode_mode_onlyの場合も入口を許可し、実行ツールはprocess限定の `code_mode.direct_only_tool_namespaces=["functions"]` で直接公開する。独自検索indexや説明選択modelは追加しない。CLIへ仕様を登録するサイズと、モデルに常時公開するcontextサイズは区別する。
 
 world scope（root `place_world_id`）がある場合、同じbot/world/model/effort/SDK仕様のthreadをoperator request間で再開する。既存 `memory.json` の `codex_thread` にversion・thread ID・scope・ローカル履歴cursorを保存し、会話・画像と標準compactionはCodexのCODEX_HOME側が所有する。再開時は未送信のローカルcontext（最新依頼・recipient context・behavior logなど）だけを渡し、過去会話全量を再注入しない。bot/world/model/SDK・vision設定の不一致、history clear、再起動時の `load_memory: false` は新しいthreadにする。world scopeがない場合はtask限定のephemeral threadを使う。保存threadがCodex側にない場合は明示的なtask errorとなり、ゲーム操作は自動replayしない。
@@ -419,4 +421,4 @@ native Codexではphaseが `commentary` の途中説明をUIへ流し、最終�
 
 OllamaのHTTP/model失敗は通常回答文字列にせず失敗として返し、`params.request_timeout_ms`（既定120000ms）と実fetch cancellation signalを適用する。会話差替え、vision、memory要約、codingの既存owner signalを使い、要約epoch invalidationは現在の要約requestもcancelする。usageはproviderが返した数値だけをrequest開始時のpurpose/task/action scopeへ記録し、欠測値は省略する。Codex legacy visionもowned CLI cancellationを共有する。[D11記録](docs/model-request-ownership-stage4-20261005.md)。
 
-Offline fixtureは `node tests/codex_session.test.cjs`（上記Node20）で実行し、通常suiteにも含まれる。fake app-serverと所有helperで同一turn内のtool result待機、phase、thread再開とscope/reset、native画像と上限、高速完了、部分失敗、停滞、停止/差替え/管理切断/shutdownの結果破棄、本体message入口を確認する。実ゲーム結果はbenchmark repoの記録を参照。manual playのsource pinや稼働botはこの追加で自動更新されない。
+Offline fixtureは `node tests/codex_session.test.cjs`（上記Node20）で実行し、通常suiteにも含まれる。fake app-serverと所有helperでAGENTS配置と標準読込設定、同一turn内のtool result待機、phase、thread再開とscope/reset、native画像と上限、高速完了、部分失敗、停滞、停止/差替え/管理切断/shutdownの結果破棄、本体message入口を確認する。実ゲーム結果はbenchmark repoの記録を参照。manual playのsource pinや稼働botはこの追加で自動更新されない。

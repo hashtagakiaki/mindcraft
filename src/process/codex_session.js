@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline';
 import { authorizeAndStart, getCodexEnvironment } from '../models/codex.js';
 
 const REQUEST_TIMEOUT_MS = 120000;
+const instructionsPath = new URL('./codex/AGENTS.md', import.meta.url);
 const helperPath = fileURLToPath(new URL('./owned_cli.js', import.meta.url));
 
 // JSON-RPC transport only. The existing helper registers and reaps its owned CLI.
@@ -23,11 +24,13 @@ export class CodexSession {
         this.waitingTools = 0;
     }
 
-    async open(instructions, signal) {
+    async open(signal) {
         this.signal = signal;
         this.requestId = randomUUID();
         this.cwd = await mkdtemp(path.join(tmpdir(), 'mindcraft-codex-'));
         await writeFile(path.join(this.cwd, '.mindcraft-codex-owner'), this.requestId, { flag: 'wx', mode: 0o600 });
+        // Let Codex discover fixed gameplay guidance through its standard workspace loader.
+        await copyFile(instructionsPath, path.join(this.cwd, 'AGENTS.md'));
         if (signal?.aborted) throw new Error('Session cancelled');
         const args = ['app-server', '--listen', 'stdio://', '--disable', 'shell_tool', '-c', 'web_search="disabled"',
             '-c', 'code_mode.direct_only_tool_namespaces=["functions"]'];
@@ -58,14 +61,13 @@ export class CodexSession {
             // Deferred SDK documentation/search still uses Codex's native code-mode harness.
             config: { model_reasoning_effort: this.effort },
             approvalPolicy: 'never', sandbox: 'read-only',
-            baseInstructions: instructions,
         };
         let response;
         if (this.threadId) {
             response = await this.request('thread/resume', { ...params, threadId: this.threadId });
             this.resumed = true;
         } else response = await this.request('thread/start', { ...params,
-            ephemeral: !this.persistent, environments: [], selectedCapabilityRoots: [],
+            ephemeral: !this.persistent, selectedCapabilityRoots: [],
             dynamicTools: [{ type: 'function', name: 'minecraft_execute',
                 description: 'Execute compound JavaScript with the Minecraft SDK. Await the actual completed result in this tool call; partial mutations survive failure. Discover SDK documentation before using unfamiliar methods.',
                 inputSchema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'], additionalProperties: false } }, ...this.tools],
