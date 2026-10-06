@@ -2,13 +2,34 @@
 
 ## Personal development fork
 
-The SDK documentation and code linter share one explicit `places`/`vision` method map. Relevant place methods are selected by task relevance; vision methods remain in the always-shown docs. The vision SDK reuses the existing screenshot interpretation commands; await a method and log its returned analysis into action output. It requires `allow_vision` and a vision-capable model, and returns a disabled message when unavailable. The vision SDK exposes only `lookAtPlayer` and `lookAtPosition`; `lookAtPosition` retains the existing aim at `y + 2`. When embeddings are unavailable, skill selection scores the documentation text directly.
+The SDK documentation and code linter share one explicit `places`/`vision` method map. Relevant place methods are selected by task relevance; vision methods remain in the always-shown docs. The vision SDK reuses the existing screenshot interpretation commands; await a method and log its returned analysis into action output. It requires `allow_vision` and a vision-capable model, and returns a disabled message when unavailable. The vision SDK exposes `lookAtPlayer`, `lookAtPosition`, and `lookAtBlock`; `lookAtPosition` retains the existing aim at `y + 2`, while `lookAtBlock` resolves a loaded block and aims at its center. When embeddings are unavailable, skill selection scores the documentation text directly.
 
 Generated vision calls use `await vision.lookAtPosition(x, y, z)` or `await vision.lookAtPlayer("Steve", "at")`, without a `bot` argument. Position coordinates must be finite numbers; player names must be nonempty strings and direction is `"at"` (default) or `"with"`. Invalid arguments fail before changing the view or capturing an image, so an owned operation can report the error and continue with a corrected call in the same task. Log the returned analysis, for example `log(bot, await vision.lookAtPosition(75, 73, -292));`.
 
 Minecraft disconnect reasons are decoded with the version-specific chat component decoder, including modern NBT reasons. The offline `tests/vision_sdk_validation.test.cjs` fixture checks Coder/SES/ActionManager rejection and continuation, chat commands, disabled vision, and reason decoding. Isolated vanilla 1.21.1 verification records are in [the LoginGuard investigation](../mindcraft-tools/docs/login-guard-invalid-rotation-20261006.md); camera/image analysis is stubbed in these checks.
 
 `blocked_actions` disables named chat commands and removes those commands from command documentation. It does not prohibit equivalent operations through the SDK, raw bot access, or plugins.
+
+### Inspect an explicit target and continue after a failure
+
+Use absolute coordinates to distinguish nearby targets:
+
+```js
+const target = world.inspectBlockAt(bot, 10, 64, -3);
+const chest = await skills.inspectChestAt(bot, 10, 64, -3);
+log(bot, JSON.stringify(chest));
+log(bot, JSON.stringify(await vision.lookAtBlock(10, 64, -3)));
+```
+
+`inspectBlockAt` returns loaded state, position/name/properties, distance, Mineflayer visibility/canDig checks, dimension and observation time. Unloaded targets remain unknown. `inspectChestAt` returns the actual selected position, contents and time; it never substitutes a nearest chest. Double chest contents are combined. The existing nearest `viewChest(bot)` keeps its boolean contract. An opened container is closed on success, failure or cancellation. Container observations are historical reads, not inventory transfers.
+
+`skills.approachBlock(bot, x, y, z)` uses the existing owned pathfinder and `GoalLookAtBlock`, without digging or scaffolding, then rechecks reach and block-center visibility. It returns `ready`, `unknown` or `blocked` with a fresh target observation and reason. Movement alone is not successful interaction. A visible face of a partial block may still have an occluded center; this is reported as blocked rather than bypassing the dig guard. `breakBlockAt` uses this approach when out of reach or occluded. `goToPosition`, `breakBlockAt` and legacy placement reject invalid Bot/finite coordinates before side effects, with a corrected example; strict orientation placement keeps its existing `false` validation contract.
+
+`vision.lookAtBlock(x,y,z)` takes no Bot argument. It returns `{status, target, aim, observedAt, analysis}`; unknown targets cause no view change or capture. Existing position commands/SDK retain the `y+2` aim. Offline fixtures stub image interpretation; live image quality and chest/build correctness require dedicated trusted templates and observers.
+
+Native tasks can read `diagnostics.lastTask()` to explain the previous task's exact error and code without replaying it. The bounded snapshot is saved in existing `memory.json`, scoped by Bot name and configured `place_world_id`; no scope, missing records, old format or mismatches return `available:false` with a reason. It retains the latest six operations plus the latest failure, bounded skill results and confirmed/unconfirmed changes with timestamps. Code/error/output limits are 6000/4000/3000 characters; structural entries and depth are also bounded. Raw Bot/plugin changes may be untracked. The initial model input lists availability and task identity; details are read only when requested. Bundle handoff can carry the existing memory file; old trace files are never automatically replayed. Save success is recorded separately in `diagnosticSaveSucceeded`.
+
+The Node20 `tests/targeted_sdk.test.cjs`, `tests/vision_sdk_validation.test.cjs` and `tests/codex_session.test.cjs` fixtures exercise the real Coder/SES/ActionManager boundary. They cover distinct targets, validation before side effects, unknown/occluded/unreachable targets, cancellation and close, compatibility, and diagnosis in a new task after a saved TypeError.
 
 ### Placement with a requested orientation
 

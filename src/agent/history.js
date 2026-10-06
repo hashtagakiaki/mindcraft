@@ -1,6 +1,7 @@
 import { writeFileSync, readFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from 'fs';
 import { NPCData } from './npc/data.js';
 import settings from './settings.js';
+import { readTaskDiagnostics } from './task_diagnostics.js';
 
 
 export class History {
@@ -23,6 +24,7 @@ export class History {
 
         // Natural language memory as a summary of recent messages + previous memory
         this.memory = '';
+        this.taskDiagnostics = null;
 
         // Maximum number of messages to keep in context before saving chunk to memory
         this.max_messages = settings.max_messages;
@@ -31,6 +33,12 @@ export class History {
         this.summary_chunk_size = 5; 
         // chunking reduces expensive calls to promptMemSaving and appendFullHistory
         // and improves the quality of the memory summary
+    }
+
+    getTaskDiagnostics() {
+        if (!this.taskDiagnostics && this.taskDiagnosticsUnavailable)
+            return { available: false, reason: this.taskDiagnosticsUnavailable };
+        return readTaskDiagnostics(this.agent);
     }
 
     getHistory() { // expects an Examples object
@@ -216,6 +224,7 @@ export class History {
         try {
             const data = {
                 memory: this.memory,
+                task_diagnostics: this.taskDiagnostics,
                 turns: [...this.pendingHistoryChunks.flat(), ...this.turns],
                 self_prompting_state: this.agent.self_prompter?.state ?? null,
                 self_prompt: !this.agent.self_prompter || this.agent.self_prompter.isStopped() ? null : this.agent.self_prompter.prompt,
@@ -247,6 +256,10 @@ export class History {
             const data = JSON.parse(readFileSync(this.memory_fp, 'utf8'));
             this.memory = data.memory || '';
             this.turns = data.turns || [];
+            // Old memory files remain valid; scope mismatch is never silently imported.
+            const diagnostic = readTaskDiagnostics(this.agent, data.task_diagnostics ?? null);
+            this.taskDiagnostics = diagnostic.available ? diagnostic.snapshot : null;
+            this.taskDiagnosticsUnavailable = diagnostic.available ? null : diagnostic.reason;
             console.log('Loaded memory:', this.memory);
             return data;
         } catch (error) {
@@ -259,5 +272,7 @@ export class History {
         this.invalidateSummaries();
         this.turns = [];
         this.memory = '';
+        this.taskDiagnostics = null;
+        this.taskDiagnosticsUnavailable = null;
     }
 }

@@ -18,7 +18,7 @@ export class SkillLibrary {
         this.embedding_model = embedding_model;
         this.skill_docs_embeddings = {};
         this.skill_docs = null;
-        this.always_show_skills = ['skills.placeBlock', 'skills.wait', 'skills.breakBlockAt', 'skills.collectBlock', 'skills.craftRecipe', 'vision.lookAtPlayer', 'vision.lookAtPosition']
+        this.always_show_skills = ['skills.placeBlock', 'skills.wait', 'skills.breakBlockAt', 'skills.collectBlock', 'skills.craftRecipe', 'vision.lookAtPlayer', 'vision.lookAtPosition', 'vision.lookAtBlock']
     }
     async initSkillLibrary() {
         const skillDocs = [...getSkillDocs(), ...getCapabilityDocs()];

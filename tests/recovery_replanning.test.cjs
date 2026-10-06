@@ -109,7 +109,7 @@ async function updateUntil(check) {
 
 async function testNonMovementPhases() {
   for (const phase of [
-    'generating', 'staging', 'linting', 'waiting-for-smelting', 'opening-furnace',
+    'generating', 'staging', 'linting', 'inspecting-chest', 'waiting-for-smelting', 'opening-furnace',
     'furnace-transfer-input', 'collecting-furnace-output', 'collecting-furnace-input',
     'collecting-furnace-fuel', 'confirming-furnace-snapshot', 'confirming-player-inventory-after-stop',
   ]) {

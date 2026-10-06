@@ -1,6 +1,12 @@
 import settings from '../settings.js';
 
 export const SDK_CAPABILITIES = Object.freeze({
+    diagnostics: Object.freeze({
+        enabledBy: "settings.agent_runtime === 'codex-session' and a configured place_world_id",
+        methods: Object.freeze({
+            lastTask: 'Signature: diagnostics.lastTask(). Read the bounded previous task snapshot for this bot and configured world: code, exact errors, skill results, confirmed/unconfirmed changes and observation times. Returns available:false with a reason when missing or scope mismatched. Historical changes are not current world state; never replay operations automatically. For a synchronous query use await Promise.resolve(); log(bot, JSON.stringify(diagnostics.lastTask()));',
+        }),
+    }),
     communication: Object.freeze({
         enabledBy: "settings.agent_runtime === 'codex-session' with an authenticated MindServer management connection and an active owned task operation",
         methods: Object.freeze({
@@ -12,6 +18,7 @@ export const SDK_CAPABILITIES = Object.freeze({
         methods: Object.freeze({
             lookAtPlayer: 'Signature: vision.lookAtPlayer(playerName, direction = \"at\"). Example: await vision.lookAtPlayer(\"Steve\", \"at\"). playerName must be a nonempty string; direction is \"at\" or \"with\". Do not pass bot. Look at a visible player or align the camera with their view, capture a screenshot, and return its image analysis.',
             lookAtPosition: 'Signature: vision.lookAtPosition(x, y, z), with three finite numbers. Example: await vision.lookAtPosition(75, 73, -292). Do not pass bot. Aim toward coordinates, capture a screenshot, and return its image analysis. The camera aims two blocks above the supplied y coordinate.',
+            lookAtBlock: 'Signature: vision.lookAtBlock(x, y, z), with three finite numbers. Example: log(bot, JSON.stringify(await vision.lookAtBlock(75, 73, -292))). Do not pass bot. Resolve the loaded block, aim at its block center, and return actual aim, target position/properties, observation time, and image analysis. Unknown blocks cause no look or capture; lookAtPosition retains y+2.',
         }),
     }),
     places: Object.freeze({

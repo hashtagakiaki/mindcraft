@@ -9,6 +9,7 @@ const NON_MOVEMENT_ACTION_PHASES = new Set([
     'generating',
     'staging',
     'linting',
+    'inspecting-chest',
     'waiting-for-smelting',
     'furnace-inventory-baseline',
     'confirming-furnace-snapshot',

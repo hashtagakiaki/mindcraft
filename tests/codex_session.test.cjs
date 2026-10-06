@@ -51,7 +51,7 @@ async function main() {
       agent.bot = Object.assign(new EventEmitter(), { output: '', interrupt_code: false, players: {}, game: { dimension: 'overworld' }, entity: { position: { x: 0, y: 64, z: 0 } }, inventory: { items: () => [] }, modes: { isOn: () => false, pause() {}, unpause() {}, flushBehaviorLog: () => '' } })
       agent.clearBotLogs = () => { agent.bot.output = ''; agent.bot.interrupt_code = false }
       agent.requestInterrupt = () => { agent.bot.interrupt_code = true; agent.interrupt?.() }
-      agent.prompter = { profile: { model: 'codex/gpt-6-luna' }, skill_libary: { getAllSkillDocs: async () => ['skills.wait\nWait for a bounded number of milliseconds.', 'skills.goToPlayer\nNavigate to a named player and return false when it is missing.', 'communication.sendToBot\nSend a bounded peer message into an authenticated native task inbox.'] }, withBotRules: async text => { rules.push(text); return text + '\nCURRENT RULES' } }
+      agent.prompter = { profile: { model: 'codex/gpt-6-luna' }, skill_libary: { getAllSkillDocs: async () => ['skills.wait\nWait for a bounded number of milliseconds.', 'skills.goToPlayer\nNavigate to a named player and return false when it is missing.', 'communication.sendToBot\nSend a bounded peer message into an authenticated native task inbox.', 'diagnostics.lastTask\nRead bounded previous task diagnostics.'] }, withBotRules: async text => { rules.push(text); return text + '\nCURRENT RULES' } }
       agent.history = { memory: 'vision used to be unavailable', invalidations: 0, invalidateSummaries() { this.invalidations++ }, getHistory: () => [{ role: 'user', content: 'test' }], add: async (...args) => rows.push(args), checkpointAdd: async (...args) => { rows.push(args); await agent.history.save(); return { saved: true } }, save: async () => {} }
       agent.routeResponse = (source, text) => routed.push(text)
       agent.self_prompter = { state: null, prompt: '', stopForRecovery() {}, isStopped: () => true, isActive: () => false, shouldInterrupt: () => false }
@@ -407,6 +407,7 @@ async function main() {
     assert.equal(saveFailureTerminals.length, 1, 'save failure still emits one terminal event')
     assert.equal(saveFailureTerminals[0].completion, 'reported')
     assert.equal(saveFailureTerminals[0].saveSucceeded, false)
+    assert.equal(saveFailureTerminals[0].diagnosticSaveSucceeded, false, 'diagnostic checkpoint failure is separately reported')
     assert.equal(saveFailureTerminals[0].response, 'I completed the request.')
     assert.ok(Number.isFinite(Date.parse(saveFailureTerminals[0].reportedAt)), 'response route time is preserved independently of save failure')
     assert.equal(saveFailureEvents.filter(event => event.type === 'response_checkpoint').length, 1)
@@ -474,6 +475,118 @@ async function main() {
     resolveSummary('late summary from an invalidated epoch')
     await delay(0)
     assert.equal(summaryPendingAgent.history.memory, '', 'late summary after invalidation cannot overwrite newer state')
+
+    // Cross-task diagnostics are a projection in existing memory, never replayed code.
+    settings.place_world_id = 'fixture-world-a'
+    const diagnosticAgent = makeAgent('Diagnostics')
+    diagnosticAgent.history = new History(diagnosticAgent)
+    await until(() => diagnosticAgent.coder.code_template && diagnosticAgent.coder.code_lint_template)
+    const faultyCode = 'log(bot, "partial before error");\nawait Promise.resolve();\nbot.health = 19;\nbot.modes.missing.isOn();'
+    const diagnosticRuntime = new CodexRuntime(diagnosticAgent, { makeSession: ({ execute }) => {
+      let turn = 0
+      return { open: async () => {}, runTurn: async () => ++turn === 1
+        ? { operation: execute(faultyCode) } : { messages: ['An isOn TypeError stopped the operation.'] }, close: async () => {} }
+    } })
+    diagnosticAgent.codexRuntime = diagnosticRuntime
+    assert.equal(await diagnosticRuntime.run('operator', () => true, 'failed-diagnostic-task'), true)
+    const storedDiagnostic = JSON.parse(await fs.readFile(path.join(root, 'bots/Diagnostics/memory.json'), 'utf8')).task_diagnostics
+    assert.equal(storedDiagnostic.scope.bot, 'Diagnostics')
+    assert.equal(storedDiagnostic.scope.worldId, 'fixture-world-a')
+    assert.equal(storedDiagnostic.status, 'completed')
+    assert.equal(storedDiagnostic.operations[0].success, false, 'task reporting is distinct from operation failure')
+    assert.equal(storedDiagnostic.lastFailure.code, faultyCode)
+    assert.match(storedDiagnostic.lastFailure.error, /TypeError[\s\S]*isOn/)
+    assert.match(storedDiagnostic.lastFailure.output, /partial before error/)
+    assert.equal(storedDiagnostic.lastFailure.observed.health, 19, 'state after partial raw mutation survives the error')
+    assert.ok(Number.isFinite(Date.parse(storedDiagnostic.lastFailure.observedAt)))
+    // Loading the copied memory simulates the existing bundle handoff format.
+    diagnosticAgent.history = new History(diagnosticAgent)
+    diagnosticAgent.history.load()
+    let diagnosticInput
+    const explanationRuntime = new CodexRuntime(diagnosticAgent, { makeSession: ({ execute }) => {
+      let turn = 0
+      return { open: async () => {}, runTurn: async input => {
+        if (++turn === 1) {
+          diagnosticInput = input
+          return { operation: execute('await Promise.resolve();\nlog(bot, JSON.stringify(diagnostics.lastTask()));') }
+        }
+        assert.match(input, /TypeError[\s\S]*isOn/)
+        assert.match(input, /bot\.modes\.missing\.isOn/)
+        return { messages: ['The previous operation failed while calling bot.modes.missing.isOn().'] }
+      }, close: async () => {} }
+    } })
+    diagnosticAgent.codexRuntime = explanationRuntime
+    assert.equal(await explanationRuntime.run('operator', () => true, 'explain-diagnostic-task'), true)
+    assert.match(diagnosticInput, /failed-diagnostic-task/)
+    assert.doesNotMatch(diagnosticInput, /partial before error/, 'initial input provides an index rather than injecting all traces')
+    assert.equal(diagnosticAgent.bot.health, 19, 'diagnostic lookup never replays the earlier mutation')
+    const explanationFiles = await fs.readdir(path.join(root, 'bots/Diagnostics/histories'))
+    const diagnosticEvents = (await Promise.all(explanationFiles.filter(file => file.startsWith('codex-')).map(file =>
+      fs.readFile(path.join(root, 'bots/Diagnostics/histories', file), 'utf8')))).join('\n').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    const lookupResult = diagnosticEvents.find(event => event.taskId === 'explain-diagnostic-task' && event.type === 'operation_result')
+    assert.equal(lookupResult.result.success, true, 'SDK is available through real Coder/SES/linter/ActionManager')
+    assert.match(lookupResult.result.message, /failed-diagnostic-task/)
+    assert.doesNotMatch(lookupResult.result.message, /\"taskId\":\"explain-diagnostic-task\"/, 'lookup returns prior task even after the current task begins')
+    const otherBot = makeAgent('OtherDiagnosticBot')
+    otherBot.history = new History(otherBot)
+    otherBot.history.memory_fp = diagnosticAgent.history.memory_fp
+    otherBot.history.load()
+    assert.match(otherBot.history.getTaskDiagnostics().reason, /different bot\/world/)
+    settings.place_world_id = 'fixture-world-b'
+    assert.match(diagnosticAgent.history.getTaskDiagnostics().reason, /different bot\/world/)
+    settings.place_world_id = null
+    assert.match(diagnosticAgent.history.getTaskDiagnostics().reason, /scope unavailable/)
+    settings.place_world_id = 'fixture-world-a'
+    const { createTaskDiagnostics, appendOperationDiagnostic, readTaskDiagnostics } = await load('src/agent/task_diagnostics.js')
+    const boundedDiagnostic = createTaskDiagnostics(diagnosticAgent, 'bounded-task')
+    for (let index = 0; index < 20; index++) appendOperationDiagnostic(boundedDiagnostic, 'x'.repeat(10000), {
+      success: index !== 0, message: 'y'.repeat(10000), executionStatus: index === 0 ? 'error' : 'completed',
+      skillResults: Array.from({ length: 100 }, () => ({ skill: 'example', status: 'returned', error: 'z'.repeat(10000) })),
+      confirmedChanges: [{ quantity: 3, target: { x: 1, y: 64, z: 2 }, observedAt: new Date().toISOString() }],
+      unconfirmedChanges: [{ reason: 'cancelled after partial mutation', confirmedQuantity: 1 }],
+    })
+    assert.equal(boundedDiagnostic.operations.length, 6)
+    assert.equal(boundedDiagnostic.operationsTruncated, true)
+    assert.equal(boundedDiagnostic.lastFailure.success, false, 'latest failure remains available after later successful operations')
+    assert.equal(boundedDiagnostic.operations[0].codeTruncated, true)
+    assert.equal(boundedDiagnostic.operations[0].skillResultsTruncated, true)
+    assert.equal(boundedDiagnostic.operations[0].confirmedChanges[0].quantity, 3)
+    assert.equal(boundedDiagnostic.operations[0].unconfirmedChanges[0].confirmedQuantity, 1)
+    assert.ok(JSON.stringify(boundedDiagnostic).length < 256000)
+    assert.equal(readTaskDiagnostics(diagnosticAgent, boundedDiagnostic).available, true)
+    assert.equal(readTaskDiagnostics(diagnosticAgent, null).available, false)
+    const legacyMemoryAgent = makeAgent('LegacyDiagnosticMemory')
+    legacyMemoryAgent.history = new History(legacyMemoryAgent)
+    await fs.writeFile(legacyMemoryAgent.history.memory_fp, JSON.stringify({ memory: 'old format', turns: [] }))
+    legacyMemoryAgent.history.load()
+    assert.match(legacyMemoryAgent.history.getTaskDiagnostics().reason, /no previous/)
+
+    // A draining replaced task cannot overwrite a newer task's checkpoint.
+    const replacementAgent = makeAgent('DiagnosticReplacement')
+    replacementAgent.history = new History(replacementAgent)
+    const replacementBody = deferred(), replacementStarted = deferred()
+    replacementAgent.coder.executeCode = async () => { replacementStarted.resolve(); await replacementBody.promise }
+    replacementAgent.interrupt = () => {}
+    let oldCurrent = true
+    const oldRuntime = new CodexRuntime(replacementAgent, { makeSession: ({ execute }) => ({
+      open: async () => {}, runTurn: async () => ({ operation: execute('old mutation') }), close: async () => {}
+    }) })
+    replacementAgent.codexRuntime = oldRuntime
+    const oldRun = oldRuntime.run('operator', () => oldCurrent, 'replaced-diagnostic-task')
+    await replacementStarted.promise
+    oldCurrent = false
+    await oldRuntime.cancel('superseded')
+    const newerRuntime = new CodexRuntime(replacementAgent, { makeSession: () => ({
+      open: async () => {}, runTurn: async () => ({ messages: ['newer response'] }), close: async () => {}
+    }) })
+    replacementAgent.codexRuntime = newerRuntime
+    assert.equal(await newerRuntime.run('operator', () => true, 'replacement-diagnostic-task'), true)
+    replacementBody.resolve()
+    assert.equal(await oldRun, false)
+    const replacementMemory = JSON.parse(await fs.readFile(replacementAgent.history.memory_fp, 'utf8'))
+    assert.equal(replacementMemory.task_diagnostics.taskId, 'replacement-diagnostic-task')
+    assert.equal(replacementMemory.task_diagnostics.status, 'completed')
+    settings.place_world_id = null
 
     const eventsFor = async name => {
       const files = await fs.readdir(path.join(root, `bots/${name}/histories`))

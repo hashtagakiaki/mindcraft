@@ -51,18 +51,24 @@ async function main() {
     const { parseKickReason, handleDisconnection } = await load('src/agent/connection_handler.js')
     const { getCapabilityDocs } = await load('src/agent/library/sdk_capabilities.js')
     const calls = []
+    let afterLookAt = null
+    let captureSignal = null
+    const chest = { name: 'chest', stateId: 123, position: { x: 75, y: 73, z: -292 },
+      getProperties: () => ({ facing: 'north', type: 'single', waterlogged: false }) }
     const bot = new EventEmitter()
     Object.assign(bot, {
       username: 'Fixture', output: '', interrupt_code: false,
       entity: { position: { x: 75, y: 73, z: -292 } },
       players: { Steve: { entity: { position: { x: 2, y: 64, z: 3 }, height: 1.8, yaw: 1, pitch: 0.2 } } },
       modes: { pause() {}, unpause() {}, flushBehaviorLog: () => '', isOn: () => false },
-      async lookAt(point) { assert.ok([point.x, point.y, point.z].every(Number.isFinite)); calls.push(['lookAt', point.x, point.y, point.z]) },
+      blockAt(point) { return Math.floor(point.x) === 75 && Math.floor(point.y) === 73 && Math.floor(point.z) === -292 ? chest : null },
+      async lookAt(point) { assert.ok([point.x, point.y, point.z].every(Number.isFinite)); calls.push(['lookAt', point.x, point.y, point.z]); afterLookAt?.() },
       async look(yaw, pitch) { calls.push(['look', yaw, pitch]) },
     })
     const agent = {
       name: bot.username, bot, blocked_actions: [],
       clearBotLogs() { bot.output = ''; bot.interrupt_code = false },
+      requestInterrupt() { bot.interrupt_code = true },
       self_prompter: { isActive: () => false, isStopped: () => true },
       prompter: { vision_model: { sendVisionRequest() {} } },
     }
@@ -71,7 +77,7 @@ async function main() {
     await agent.prompter.skill_libary.initSkillLibrary()
     const vision = new VisionInterpreter(agent, false)
     vision.allow_vision = true
-    vision.camera = { async capture() { calls.push(['capture']); return 'fixture' } }
+    vision.camera = { async capture(options) { captureSignal = options.signal; calls.push(['capture']); return 'fixture' } }
     vision.analyzeImage = async () => 'fixture analysis'
     agent.vision_interpreter = vision
     const coder = Object.assign(Object.create(Coder.prototype), {
@@ -87,6 +93,11 @@ async function main() {
       'await vision.lookAtPosition(75,Infinity,-292);',
       'await vision.lookAtPosition("75",73,-292);',
       'await vision.lookAtPosition(75,73);',
+      'await vision.lookAtBlock(bot,75,73,-292);',
+      'await vision.lookAtBlock(NaN,73,-292);',
+      'await vision.lookAtBlock(75,Infinity,-292);',
+      'await vision.lookAtBlock("75",73,-292);',
+      'await vision.lookAtBlock(75,73);',
       'await vision.lookAtPlayer(bot,"Steve","at");',
       'await vision.lookAtPlayer("", "at");',
       'await vision.lookAtPlayer("Steve", "invalid");',
@@ -107,6 +118,39 @@ async function main() {
     assert.equal(good.taskId, 'same-task')
     assert.equal(good.operationSettlement, 'settled')
     assert.deepEqual(calls.splice(0), [['lookAt', 75, 75, -292], ['capture']])
+    agent.actions.beginUserIntent()
+    const blockResult = await run('log(bot, JSON.stringify(await vision.lookAtBlock(75.2,73.8,-291.8)));')
+    assert.equal(blockResult.success, true)
+    assert.equal(blockResult.operationSettlement, 'settled')
+    assert.equal(blockResult.skillResults.find(call => call.skill === 'vision.lookAtBlock').status, 'returned')
+    const observation = JSON.parse(blockResult.message.slice(blockResult.message.indexOf('{'), blockResult.message.lastIndexOf('}') + 1))
+    assert.equal(observation.status, 'observed')
+    assert.deepEqual(observation.target.position, chest.position)
+    assert.equal(observation.target.name, 'chest')
+    assert.equal(observation.target.stateId, 123)
+    assert.deepEqual(observation.target.properties, chest.getProperties())
+    assert.equal(observation.analysis, 'fixture analysis')
+    assert.ok(Number.isFinite(Date.parse(observation.observedAt)))
+    assert.ok(Number.isFinite(Date.parse(observation.target.observedAt)))
+    assert.deepEqual(observation.aim, { x: 75.5, y: 73.5, z: -291.5 })
+    assert.deepEqual(calls.splice(0), [['lookAt', 75.5, 73.5, -291.5], ['capture']])
+    assert.ok(captureSignal instanceof AbortSignal, 'block capture uses its ActionManager cancellation signal')
+    agent.actions.beginUserIntent()
+    const unknownResult = await run('log(bot, JSON.stringify(await vision.lookAtBlock(1000,73,-292)));')
+    assert.equal(unknownResult.success, true)
+    assert.match(unknownResult.message, /"status":"unknown"/)
+    assert.match(unknownResult.message, /Target block is not loaded/)
+    assert.equal(calls.length, 0, 'unknown block has no look/capture side effects')
+    agent.actions.beginUserIntent()
+    let stopPromise
+    afterLookAt = () => { stopPromise = agent.actions.stop('user') }
+    const cancelledResult = await run('log(bot, JSON.stringify(await vision.lookAtBlock(75,73,-292)));')
+    afterLookAt = null
+    assert.equal(cancelledResult.success, false)
+    assert.equal(cancelledResult.operationSettlement, 'settled')
+    assert.equal(cancelledResult.skillResults.find(call => call.skill === 'vision.lookAtBlock').status, 'cancelled')
+    assert.equal((await stopPromise).stopped, true)
+    assert.deepEqual(calls.splice(0), [['lookAt', 75.5, 73.5, -291.5]], 'Stop during aim prevents capture and analysis')
     for (const direction of [undefined, 'at', 'with']) {
       agent.actions.beginUserIntent()
       const args = direction === undefined ? '"Steve"' : `"Steve","${direction}"`
@@ -128,10 +172,12 @@ async function main() {
       else { vision.allow_vision = true; agent.prompter.vision_model = {} }
       assert.match(await vision.lookAtPosition(bot, 1, 2), /Vision is disabled/)
       assert.match(await vision.lookAtPlayer(bot, 'invalid'), /Vision is disabled/)
+      assert.equal((await vision.lookAtBlock(75, 73, -292)).status, 'vision_disabled')
       assert.equal(calls.length, 0)
     }
     const docs = getCapabilityDocs().join('\n')
     assert.match(docs, /vision\.lookAtPosition\(x, y, z\)/)
+    assert.match(docs, /vision\.lookAtBlock\(x, y, z\)/)
     assert.match(docs, /Do not pass bot/)
     const nbt = { type: 'compound', value: { translate: { type: 'string', value: 'multiplayer.disconnect.invalid_player_movement' } } }
     for (const [reason, expected] of [

@@ -1,7 +1,36 @@
 import settings from '../settings.js';
 import pf from 'mineflayer-pathfinder';
+import Vec3 from 'vec3';
 import * as mc from '../../utils/mcdata.js';
 
+
+
+export function inspectBlockAt(bot, x, y, z) {
+    /**
+     * Read one absolute block without moving. Unknown is not air. Visibility uses Mineflayer's block-center check; canDig is Mineflayer's dig admission check.
+     * @param {Bot} bot - Pass bot first.
+     * @param {number} x - Absolute x, not a relative offset.
+     * @param {number} y - Absolute y.
+     * @param {number} z - Absolute z.
+     * @returns {object} Loaded state, actual position/name/properties, corner distance, visibility, canDig, observation time and dimension. Unavailable checks are null.
+     * @example
+     * const target = world.inspectBlockAt(bot, 10, 64, -3);
+     * log(bot, JSON.stringify(target));
+     **/
+    if (!bot || typeof bot.blockAt !== 'function' || !bot.entity?.position || ![x, y, z].every(Number.isFinite)) {
+        throw new TypeError('world.inspectBlockAt(bot, x, y, z): pass bot first and three finite numbers. Example: world.inspectBlockAt(bot, 10, 64, -3)');
+    }
+    const requested = new Vec3(x, y, z).floored();
+    const block = bot.blockAt(requested);
+    const position = block?.position ?? requested;
+    return { loaded: block != null, position: { x: position.x, y: position.y, z: position.z },
+        name: block?.name ?? null, stateId: block?.stateId ?? null,
+        properties: block?.getProperties?.() ?? null,
+        distance: block ? bot.entity.position.distanceTo(position) : null,
+        visible: block && typeof bot.canSeeBlock === 'function' ? bot.canSeeBlock(block) : null,
+        canDig: block && typeof bot.canDigBlock === 'function' ? bot.canDigBlock(block) : null,
+        observedAt: new Date().toISOString(), dimension: bot.game?.dimension ?? null };
+}
 
 export function getNearestFreeSpace(bot, size=1, distance=8) {
     /**
@@ -46,11 +75,11 @@ export function getBlockAtPosition(bot, x=0, y=0, z=0) {
      * @param {Bot} bot - The bot to get the block for.
      * @param {number} x - The relative x offset to serach, default 0.
      * @param {number} y - The relative y offset to serach, default 0.
-     * @param {number} y - The relative z offset to serach, default 0. 
+     * @param {number} z - The relative z offset to search, default 0.
      * @returns {Block|null} - The loaded block, or null when the position is unknown/unloaded.
      * @example
      * let blockBelow = world.getBlockAtPosition(bot, 0, -1, 0);
-     * let blockAbove = world.getBlockAtPosition(bot, 0, 2, 0); since minecraft position is at the feet
+     * let blockAbove = world.getBlockAtPosition(bot, 0, 2, 0); // Minecraft position is at the feet
      **/
     return bot.blockAt(bot.entity.position.offset(x, y, z));
 }

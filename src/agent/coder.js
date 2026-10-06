@@ -162,7 +162,7 @@ export class Coder {
     async  _lintCode(code) {
         let result = '#### CODE ERROR INFO ###\n';
         const codeNoComments = code.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
-        const skillRegex = /((?:skills|world|places|vision|communication)\.(.*?))\(/g;
+        const skillRegex = /((?:skills|world|places|vision|communication|diagnostics)\.(.*?))\(/g;
         const skills = [];
         let match;
         while ((match = skillRegex.exec(codeNoComments)) !== null) {
@@ -240,6 +240,7 @@ export class Coder {
             world: guarded(world),
             vision: guarded({
                 lookAtPlayer: trackSkill('vision.lookAtPlayer', (playerName, direction) => this.agent.vision_interpreter.lookAtPlayer(playerName, direction)),
+                lookAtBlock: trackSkill('vision.lookAtBlock', (x, y, z) => this.agent.vision_interpreter.lookAtBlock(x, y, z)),
                 lookAtPosition: trackSkill('vision.lookAtPosition', (x, y, z) => this.agent.vision_interpreter.lookAtPosition(x, y, z)),
             }),
             communication: settings.agent_runtime === 'codex-session' ? guarded({
@@ -247,6 +248,10 @@ export class Coder {
                     if (!this.agent.codexRuntime) throw new Error('Native communication is unavailable outside an active Codex task');
                     return this.agent.codexRuntime.sendToBot(recipient, message);
                 }),
+            }) : undefined,
+            diagnostics: settings.agent_runtime === 'codex-session' ? guarded({
+                lastTask: () => this.agent.codexRuntime?.getLastTaskDiagnostics()
+                    ?? { available: false, reason: 'native task diagnostic unavailable' },
             }) : undefined,
             places: guarded(this.agent.places?.sdk),
             Vec3,

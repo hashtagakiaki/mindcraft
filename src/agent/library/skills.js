@@ -94,6 +94,21 @@ function waitForActionOrTimeout(bot, context, milliseconds) {
     });
 }
 
+
+function validateTargetCall(bot, x, y, z, signature) {
+    if (!bot || typeof bot.blockAt !== 'function' || !bot.entity?.position ||
+        ![x, y, z].every(Number.isFinite)) {
+        const example = signature.includes('blockType') ? `(bot, \"stone\", 10, 64, -3)` : `(bot, 10, 64, -3)`;
+        throw new TypeError(`${signature}: pass bot first and three finite coordinates. Example: await ${signature.split('(')[0]}${example};`);
+    }
+}
+
+function requireActiveTarget(bot) {
+    if (isActionCancelled(bot, getActionContext(bot))) {
+        throw new Error('Action cancelled before target interaction');
+    }
+}
+
 function guardFurnaceClicks(bot, window, context) {
     const client = bot._client;
     let state = furnaceClickGuards.get(client);
@@ -1098,9 +1113,9 @@ export async function breakBlockAt(bot, x, y, z) {
      * @returns {Promise<boolean>} true if the block was broken, false otherwise.
      * @example
      * let position = world.getPosition(bot);
-     * await skills.breakBlockAt(bot, position.x, position.y - 1, position.x);
+     * await skills.breakBlockAt(bot, position.x, position.y - 1, position.z);
      **/
-    if (x == null || y == null || z == null) throw new Error('Invalid position to break block at.');
+    validateTargetCall(bot, x, y, z, 'skills.breakBlockAt(bot, x, y, z)');
     let block = bot.blockAt(Vec3(x, y, z));
     if (!block) {
         recordUncertainty({ unit: 'block', target: { position: { x, y, z } },
@@ -1117,7 +1132,7 @@ export async function breakBlockAt(bot, x, y, z) {
             return true;
         }
 
-        if (bot.entity.position.distanceTo(block.position) > 4.5) {
+        if (typeof bot.canSeeBlock !== 'function' && bot.entity.position.distanceTo(block.position) > 4.5) {
             let pos = block.position;
             let movements = new pf.Movements(bot);
             movements.canPlaceOn = false;
@@ -1125,6 +1140,17 @@ export async function breakBlockAt(bot, x, y, z) {
             bot.pathfinder.setMovements(movements);
             await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
         }
+        if (typeof bot.canSeeBlock === 'function' &&
+            (bot.entity.position.distanceTo(block.position) > 4.5 || !bot.canSeeBlock(block))) {
+            const approach = await approachBlock(bot, x, y, z);
+            if (approach.status !== 'ready') {
+                log(bot, `Cannot break target: ${approach.reason ?? approach.status}.`);
+                return false;
+            }
+            block = bot.blockAt(new Vec3(x, y, z).floored());
+            if (!block || ['air', 'water', 'lava'].includes(block.name)) return false;
+        }
+        requireActiveTarget(bot);
         if (bot.game.gameMode !== 'creative') {
             await bot.tool.equipForBlock(block);
             const itemId = bot.heldItem ? bot.heldItem.type : null
@@ -1157,8 +1183,8 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
      * @returns {Promise<boolean>} true if the block was placed, false otherwise.
      * @example
      * let p = world.getPosition(bot);
-     * await skills.placeBlock(bot, "oak_log", p.x + 2, p.y, p.x);
-     * await skills.placeBlock(bot, "torch", p.x + 1, p.y, p.x, 'side');
+     * await skills.placeBlock(bot, "oak_log", p.x + 2, p.y, p.z);
+     * await skills.placeBlock(bot, "torch", p.x + 1, p.y, p.z, 'side');
      * const placed = await skills.placeBlock(bot, 'oak_stairs', p.x + 2, p.y, p.z, {facing:'west', half:'top'});
      * if (!placed) { log(bot, 'Placement failed; inspect the reported block state before continuing.'); return; }
      **/
@@ -1168,6 +1194,8 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
             navigate: (goal, movements) => goToGoal(bot, goal, movements),
         });
     }
+    validateTargetCall(bot, x, y, z, 'skills.placeBlock(bot, blockType, x, y, z, options)');
+    if (typeof blockType !== 'string' || !blockType.trim()) throw new TypeError('skills.placeBlock(bot, blockType, x, y, z): blockType must be a nonempty item/block name.');
     const target_dest = new Vec3(Math.floor(x), Math.floor(y), Math.floor(z));
 
     if (blockType === 'air') {
@@ -1610,6 +1638,93 @@ export async function takeFromChest(bot, itemName, num=-1) {
     return totalTaken > 0;
 }
 
+export async function approachBlock(bot, x, y, z) {
+    /**
+     * Move to a visible, reachable standing position for one absolute block, without digging or placing.
+     * @param {MinecraftBot} bot - Pass bot first.
+     * @param {number} x - Absolute block x.
+     * @param {number} y - Absolute block y.
+     * @param {number} z - Absolute block z.
+     * @returns {Promise<object>} status ready/unknown/blocked and fresh target observation; movement is not interaction success.
+     * @example
+     * log(bot, JSON.stringify(await skills.approachBlock(bot, 10, 64, -3)));
+     **/
+    validateTargetCall(bot, x, y, z, 'skills.approachBlock(bot, x, y, z)');
+    requireActiveTarget(bot);
+    let target = world.inspectBlockAt(bot, x, y, z);
+    const ready = t => t.loaded && t.distance <= 4.5 && t.visible === true;
+    if (!target.loaded) return { status: 'unknown', target, reason: 'Target is not loaded; no navigation started.' };
+    if (ready(target)) return { status: 'ready', target };
+    const previousMovements = bot.pathfinder.movements;
+    const movements = new pf.Movements(bot);
+    movements.canDig = false;
+    movements.canPlaceOn = false;
+    movements.allow1by1towers = false;
+    movements.allowFreeMotion = false;
+    const block = bot.blockAt(new Vec3(x, y, z).floored());
+    const goal = new pf.goals.GoalLookAtBlock(block.position, bot.world, {
+        reach: 4.5, entityHeight: bot.getControlState?.('sneak') ? 1.27 : 1.62,
+    });
+    let navigationError = null;
+    try {
+        await goToGoal(bot, goal, movements);
+    } catch (error) {
+        requireActiveTarget(bot);
+        navigationError = String(error);
+    } finally {
+        if (previousMovements) bot.pathfinder.setMovements(previousMovements);
+    }
+    requireActiveTarget(bot);
+    target = world.inspectBlockAt(bot, x, y, z);
+    if (!target.loaded) return { status: 'unknown', target, reason: 'Target unloaded during navigation.' };
+    if (ready(target)) return { status: 'ready', target };
+    return { status: 'blocked', target, reason: navigationError ||
+        'No standing position satisfies both reach and Mineflayer block-center visibility. A partial block face may be visible while its center is occluded.' };
+}
+
+export async function inspectChestAt(bot, x, y, z) {
+    /**
+     * Inspect the chest at absolute coordinates, returning actual container position, contents and observation time. Never selects a nearest substitute.
+     * @param {MinecraftBot} bot - Pass bot first.
+     * @param {number} x - Absolute chest x.
+     * @param {number} y - Absolute chest y.
+     * @param {number} z - Absolute chest z.
+     * @returns {Promise<object>} status observed/unknown/not_chest/blocked; cancellation throws and an opened container is always closed. Double chests expose combined contents.
+     * @example
+     * log(bot, JSON.stringify(await skills.inspectChestAt(bot, 10, 64, -3)));
+     **/
+    validateTargetCall(bot, x, y, z, 'skills.inspectChestAt(bot, x, y, z)');
+    requireActiveTarget(bot);
+    const isChest = t => ['chest', 'trapped_chest'].includes(t.name);
+    let target = world.inspectBlockAt(bot, x, y, z);
+    if (!target.loaded) return { status: 'unknown', target };
+    if (!isChest(target)) return { status: 'not_chest', target };
+    const approach = await approachBlock(bot, x, y, z);
+    if (approach.status !== 'ready') return approach;
+    requireActiveTarget(bot);
+    target = world.inspectBlockAt(bot, x, y, z);
+    if (!target.loaded) return { status: 'unknown', target };
+    if (!isChest(target)) return { status: 'not_chest', target, reason: 'Target changed during navigation.' };
+    const cancellation = getActionContext(bot);
+    const previousPhase = cancellation?.phase ?? 'executing';
+    setActionPhase(cancellation, 'inspecting-chest');
+    let chest;
+    try {
+        chest = await bot.openContainer(bot.blockAt(new Vec3(x, y, z).floored()));
+        requireActiveTarget(bot);
+        const result = { status: 'observed', position: target.position, target,
+            observedAt: new Date().toISOString(),
+            contents: chest.containerItems().map(item => ({ name: item.name, count: item.count, slot: item.slot })) };
+        recordConfirmation({ unit: 'container_observation', target: { position: result.position },
+            observedAt: result.observedAt, contents: result.contents });
+        return result;
+    } finally {
+        try { if (chest) await chest.close(); }
+        finally { setActionPhase(cancellation, previousPhase); }
+    }
+}
+
+
 export async function viewChest(bot) {
     /**
      * View the contents of the nearest chest.
@@ -1646,7 +1761,7 @@ export async function consume(bot, itemName="") {
      * @param {string} itemName, the item to eat/drink.
      * @returns {Promise<boolean>} true if the item was eaten, false otherwise.
      * @example
-     * await skills.eat(bot, "apple");
+     * await skills.consume(bot, "apple");
      **/
     let item, name;
     if (itemName) {
@@ -1952,19 +2067,17 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
     /**
      * Navigate to the given position.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {number} x, the x coordinate to navigate to. If null, the bot's current x coordinate will be used.
-     * @param {number} y, the y coordinate to navigate to. If null, the bot's current y coordinate will be used.
-     * @param {number} z, the z coordinate to navigate to. If null, the bot's current z coordinate will be used.
+     * @param {number} x, the x coordinate to navigate to. Must be a finite number.
+     * @param {number} y, the y coordinate to navigate to. Must be a finite number.
+     * @param {number} z, the z coordinate to navigate to. Must be a finite number.
      * @param {number} distance, the distance to keep from the position. Defaults to 2.
      * @returns {Promise<boolean>} true if the position was reached, false otherwise.
      * @example
-     * let position = world.world.getNearestBlock(bot, "oak_log", 64).position;
-     * await skills.goToPosition(bot, position.x, position.y, position.x + 20);
+     * let position = world.getNearestBlock(bot, "oak_log", 64).position;
+     * await skills.goToPosition(bot, position.x, position.y, position.z + 20);
      **/
-    if (x == null || y == null || z == null) {
-        log(bot, `Missing coordinates, given x:${x} y:${y} z:${z}`);
-        return false;
-    }
+    validateTargetCall(bot, x, y, z, 'skills.goToPosition(bot, x, y, z, min_distance = 2)');
+    if (!Number.isFinite(min_distance) || min_distance < 0) throw new TypeError('skills.goToPosition(bot, x, y, z, min_distance = 2): min_distance must be finite and nonnegative.');
     if (bot.modes.isOn('cheat')) {
         bot.chat('/tp @s ' + x + ' ' + y + ' ' + z);
         log(bot, `Teleported to ${x}, ${y}, ${z}.`);
@@ -2013,7 +2126,7 @@ export async function goToNearestBlock(bot, blockType,  min_distance=2, range=64
      * @param {number} range, the range to look for the block. Defaults to 64.
      * @returns {Promise<boolean>} true if the block was reached, false otherwise.
      * @example
-     * await skills.goToNearestBlock(bot, "oak_log", 64, 2);
+     * await skills.goToNearestBlock(bot, "oak_log", 2, 64);
      * **/
     const MAX_RANGE = 512;
     if (range > MAX_RANGE) {
@@ -2818,7 +2931,7 @@ export async function useToolOn(bot, toolName, targetName) {
      * @param {string} toolName - item name of the tool to equip, or "hand" for no tool.
      * @param {string} targetName - entity type, block type, or "nothing" for no target
      * @returns {Promise<boolean>} true if action succeeded
-     */
+     **/
     if (!bot.inventory.slots.find(slot => slot && slot.name === toolName) && !bot.game.gameMode === 'creative') {
         log(bot, `You do not have any ${toolName} to use.`);
         return false;
@@ -3180,6 +3293,8 @@ equip = trackSkill("skills.equip", equip);
 discard = trackSkill("skills.discard", discard);
 putInChest = trackSkill("skills.putInChest", putInChest);
 takeFromChest = trackSkill("skills.takeFromChest", takeFromChest);
+approachBlock = trackSkill("skills.approachBlock", approachBlock);
+inspectChestAt = trackSkill("skills.inspectChestAt", inspectChestAt);
 viewChest = trackSkill("skills.viewChest", viewChest);
 consume = trackSkill("skills.consume", consume);
 giveToPlayer = trackSkill("skills.giveToPlayer", giveToPlayer);

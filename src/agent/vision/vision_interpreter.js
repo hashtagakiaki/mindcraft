@@ -58,6 +58,37 @@ export class VisionInterpreter {
         return result + `Image analysis: "${await this.analyzeImage(filename)}"`;
     }
 
+    async lookAtBlock(x, y, z) {
+        if (![x, y, z].every(value => typeof value === "number" && Number.isFinite(value))) {
+            throw new TypeError("Use vision.lookAtBlock(x, y, z) with finite numbers; do not pass bot.");
+        }
+        const observedAt = new Date().toISOString();
+        if (!this.allow_vision || !this.agent.prompter.vision_model.sendVisionRequest) {
+            return { status: 'vision_disabled', target: null, aim: null, observedAt, analysis: null,
+                reason: "Vision is disabled. Use other methods to describe the environment." };
+        }
+        const bot = this.agent.bot;
+        const block = bot.blockAt(new Vec3(x, y, z));
+        if (!block) {
+            return { status: 'unknown', target: null, aim: null, observedAt, analysis: null,
+                reason: 'Target block is not loaded.' };
+        }
+        const position = { x: block.position.x, y: block.position.y, z: block.position.z };
+        const target = { position, name: block.name, stateId: block.stateId,
+            properties: { ...block.getProperties() }, observedAt };
+        const aim = { x: position.x + 0.5, y: position.y + 0.5, z: position.z + 0.5 };
+        const options = this._captureOptions();
+        options.signal?.throwIfAborted();
+        await bot.lookAt(new Vec3(aim.x, aim.y, aim.z));
+        options.signal?.throwIfAborted();
+        const filename = await this.camera.capture(options);
+        options.signal?.throwIfAborted();
+        const analysis = await this.analyzeImage(filename);
+        options.signal?.throwIfAborted();
+        return { status: analysis === null ? 'unknown' : 'observed', target, aim,
+            observedAt: new Date().toISOString(), analysis };
+    }
+
     getCenterBlockInfo() {
         const bot = this.agent.bot;
         const maxDistance = 128; // Maximum distance to check for blocks

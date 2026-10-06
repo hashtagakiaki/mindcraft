@@ -257,7 +257,7 @@ async function main() {
     assert.deepEqual(visionCalls, [['player', 'Alex', 'with'], ['position', 10, 64, 20]])
     assert.match(bot.output, /player image analysis/)
     assert.match(bot.output, /position image analysis/)
-    assert.match(bot.output, /lookAtPlayer,lookAtPosition/, 'vision exposes only the two observation methods')
+    assert.match(bot.output, /lookAtPlayer,lookAtBlock,lookAtPosition/, 'vision exposes only the three observation methods')
     const invalidVision = await coder._stageCode('await vision.capture();')
     assert.match(await coder._lintCode(invalidVision.src_lint_copy), /These functions do not exist/)
     console.log('place_agent.test.cjs: parser, session fallback, observation grounding, selected place context, private aliases, and SES SDK path passed')

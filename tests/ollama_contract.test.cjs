@@ -86,6 +86,7 @@ async function main() {
       for (const dir of dirs) await fs.mkdir(path.join(ownerRoot, dir), { recursive: true })
       await fs.writeFile(path.join(ownerRoot, 'package.json'), '{"type":"module"}')
       await fs.copyFile(path.resolve(__dirname, '../src/agent/history.js'), path.join(ownerRoot, 'src/agent/history.js'))
+      await fs.copyFile(path.resolve(__dirname, '../src/agent/task_diagnostics.js'), path.join(ownerRoot, 'src/agent/task_diagnostics.js'))
       await fs.copyFile(path.resolve(__dirname, '../src/models/prompter.js'), path.join(ownerRoot, 'src/models/prompter.js'))
       await fs.copyFile(path.resolve(__dirname, '../src/models/ollama.js'), path.join(ownerRoot, 'src/models/ollama.js'))
       await fs.copyFile(path.resolve(__dirname, '../src/utils/text.js'), path.join(ownerRoot, 'src/utils/text.js'))
