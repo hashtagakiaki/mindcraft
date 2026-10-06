@@ -15,6 +15,7 @@ async function main() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mindcraft-native-test-'))
   const oldCwd = process.cwd()
   const oldBin = process.env.MINDCRAFT_CODEX_BIN
+  const oldCodexHome = process.env.CODEX_HOME
   try {
     await fs.cp(path.join(repo, 'src'), path.join(root, 'src'), { recursive: true })
     await fs.writeFile(path.join(root, 'package.json'), '{"type":"module"}')
@@ -23,6 +24,12 @@ async function main() {
     await fs.mkdir(path.join(root, 'bots'))
     for (const file of ['bots/execTemplate.js', 'bots/lintTemplate.js', 'eslint.config.js']) await fs.copyFile(path.join(repo, file), path.join(root, file))
     process.chdir(root)
+    const sourceHome = path.join(root, 'user-codex-home')
+    await fs.mkdir(path.join(sourceHome, 'sessions'), { recursive: true })
+    await fs.writeFile(path.join(sourceHome, 'auth.json'), 'fixture auth')
+    await fs.writeFile(path.join(sourceHome, 'config.toml'), '# fixture config')
+    await fs.writeFile(path.join(sourceHome, 'AGENTS.md'), 'GLOBAL_DEVELOPMENT_MARKER')
+    process.env.CODEX_HOME = sourceHome
     const load = relative => import(pathToFileURL(path.join(root, relative)))
     const { default: settings } = await load('src/agent/settings.js')
     Object.assign(settings, { agent_runtime: 'codex-session', allow_insecure_coding: true, codex_session: { stall_timeout_ms: 60, action_timeout_ms: 2000, output_limit: 16000 }, language: 'en' })
@@ -334,7 +341,7 @@ async function main() {
 
     // Real transport + owned helper, disposable fake app-server. No model/network.
     const binary = path.join(root, 'fake-codex')
-    await fs.writeFile(binary, `#!${node}\nimport {createInterface} from 'node:readline';\nlet turn=0; const out=m=>process.stdout.write(JSON.stringify(m)+'\\n');\ncreateInterface({input:process.stdin}).on('line',line=>{const m=JSON.parse(line);\nif(m.method==='initialize')out({id:m.id,result:{}});\nif(m.method==='thread/start')out({id:m.id,result:{model:m.params.model,reasoningEffort:'medium',thread:{id:'t'}}});\nif(m.method==='turn/start'){turn++;out({id:m.id,result:{turn:{id:'u'+turn}}});if(turn===1)out({id:900,method:'item/tool/call',params:{threadId:'t',turnId:'u1',tool:'minecraft_execute',arguments:{code:'log(bot, "from tool");\\nawait Promise.resolve();'}}});else {out({method:'item/completed',params:{item:{type:'agentMessage',text:'verified'}}});out({method:'turn/completed',params:{turn:{id:'u'+turn,status:'completed'}}});}}\nif(m.method==='thread/resume')out({id:m.id,result:{model:m.params.model,reasoningEffort:'medium',thread:{id:m.params.threadId}}});\nif(m.id===900&&!m.method){if(!m.result?.contentItems?.[0]?.text)throw Error('missing completed tool result');out({method:'item/completed',params:{item:{type:'agentMessage',text:'checking state',phase:'commentary'}}});out({method:'item/completed',params:{item:{type:'agentMessage',text:'verified',phase:'final_answer'}}});out({method:'turn/completed',params:{turn:{id:'u1',status:'completed'}}});}\nif(m.method==='turn/interrupt')throw Error('unexpected model interruption');\n});`)
+    await fs.writeFile(binary, `#!${node}\nimport {createInterface} from 'node:readline';\nimport {existsSync,writeFileSync,readFileSync} from 'node:fs';\nimport path from 'node:path';\nif(!process.argv.includes('agents.enabled=false')||!process.argv.includes('cli_auth_credentials_store=\"file\"'))throw Error('missing bot isolation settings');\nif(existsSync(path.join(process.env.CODEX_HOME,'AGENTS.md')))throw Error('global instructions leaked');\nwriteFileSync(path.join(process.env.CODEX_HOME,'auth.json'),'fixture refreshed auth');\nlet turn=0; const out=m=>process.stdout.write(JSON.stringify(m)+'\\n');\ncreateInterface({input:process.stdin}).on('line',line=>{const m=JSON.parse(line);\nif(m.method==='initialize')out({id:m.id,result:{}});\nif(m.method==='thread/start'){writeFileSync(path.join(process.env.CODEX_HOME,'sessions','fixture-thread'),'t');out({id:m.id,result:{model:m.params.model,reasoningEffort:'medium',thread:{id:'t'}}});}\nif(m.method==='turn/start'){turn++;out({id:m.id,result:{turn:{id:'u'+turn}}});if(turn===1)out({id:900,method:'item/tool/call',params:{threadId:'t',turnId:'u1',tool:'minecraft_execute',arguments:{code:'log(bot, "from tool");\\nawait Promise.resolve();'}}});else {out({method:'item/completed',params:{item:{type:'agentMessage',text:'verified'}}});out({method:'turn/completed',params:{turn:{id:'u'+turn,status:'completed'}}});}}\nif(m.method==='thread/resume'){if(readFileSync(path.join(process.env.CODEX_HOME,'sessions','fixture-thread'),'utf8')!==m.params.threadId)throw Error('durable thread lost');out({id:m.id,result:{model:m.params.model,reasoningEffort:'medium',thread:{id:m.params.threadId}}});}\nif(m.id===900&&!m.method){if(!m.result?.contentItems?.[0]?.text)throw Error('missing completed tool result');out({method:'item/completed',params:{item:{type:'agentMessage',text:'checking state',phase:'commentary'}}});out({method:'item/completed',params:{item:{type:'agentMessage',text:'verified',phase:'final_answer'}}});out({method:'turn/completed',params:{turn:{id:'u1',status:'completed'}}});}\nif(m.method==='turn/interrupt')throw Error('unexpected model interruption');\n});`)
     await fs.chmod(binary, 0o700)
     process.env.MINDCRAFT_CODEX_BIN = binary
     const events = [], gate = deferred()
@@ -346,8 +353,14 @@ async function main() {
     try {
       await session.open(new AbortController().signal)
       assert.equal(Object.hasOwn(threadParams, 'baseInstructions'), false)
-      assert.equal(Object.hasOwn(threadParams, 'environments'), false, 'default workspace access enables native AGENTS discovery')
+      assert.equal(Object.hasOwn(threadParams, 'environments'), false, 'default workspace access enables native bot AGENTS discovery')
       assert.deepEqual(threadParams.selectedCapabilityRoots, [], 'unrelated capabilities remain unselected')
+      assert.notEqual(session.codexHome, sourceHome)
+      for (const name of ['auth.json', 'config.toml', 'sessions']) {
+        assert.equal(await fs.readlink(path.join(session.codexHome, name)), path.join(sourceHome, name))
+      }
+      await assert.rejects(fs.access(path.join(session.codexHome, 'AGENTS.md')), { code: 'ENOENT' })
+      assert.equal(await fs.readFile(path.join(sourceHome, 'auth.json'), 'utf8'), 'fixture refreshed auth', 'refresh writes through the existing auth backend')
       assert.equal(await fs.readFile(path.join(session.cwd, 'AGENTS.md'), 'utf8'), await fs.readFile(path.join(root, 'src/process/codex/AGENTS.md'), 'utf8'))
       let finished = false
       const running = session.runTurn('do work').finally(() => { finished = true })
@@ -361,6 +374,19 @@ async function main() {
       assert.equal(events.at(-1).detail.status, 'completed')
       assert.equal(calls, 1, 'the settled operation is never replayed')
     } finally { await session.close() }
+    await assert.rejects(fs.access(session.cwd), { code: 'ENOENT' })
+    assert.equal(await fs.readFile(path.join(sourceHome, 'AGENTS.md'), 'utf8'), 'GLOBAL_DEVELOPMENT_MARKER')
+    const botInstructions = path.join(root, 'src/process/codex/AGENTS.md')
+    const originalInstructions = await fs.readFile(botInstructions, 'utf8')
+    const refreshedInstructions = originalInstructions + '\nBOT_INSTRUCTIONS_UPDATED_ON_RESUME\n'
+    await fs.writeFile(botInstructions, refreshedInstructions)
+    const resumedSession = new CodexSession({ model: 'gpt-6-luna', threadId: session.threadId, execute: async () => ({ success: true }) })
+    try {
+      await resumedSession.open()
+      assert.notEqual(resumedSession.codexHome, session.codexHome, 'resume has a fresh isolated home')
+      assert.equal(await fs.readFile(path.join(resumedSession.cwd, 'AGENTS.md'), 'utf8'), refreshedInstructions)
+      assert.equal(resumedSession.resumed, true, 'saved thread survives removal of the earlier private home')
+    } finally { await resumedSession.close(); await fs.writeFile(botInstructions, originalInstructions) }
     // A failed rule refresh must close admission before another queued operation can start.
     let queuedExecutions = 0
     const queued = new CodexSession({ model: 'fixture', execute: async () => { queuedExecutions++; return { success: true } },
@@ -954,6 +980,7 @@ async function main() {
   } finally {
     process.chdir(oldCwd)
     if (oldBin === undefined) delete process.env.MINDCRAFT_CODEX_BIN; else process.env.MINDCRAFT_CODEX_BIN = oldBin
+    if (oldCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = oldCodexHome
     await fs.rm(root, { recursive: true, force: true })
   }
 }

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
@@ -36,11 +36,22 @@ export class CodexSession {
         const args = ['app-server', '--strict-config', '--listen', 'stdio://', '--disable', 'shell_tool', '-c', 'web_search="disabled"',
             '-c', 'features.code_mode.direct_only_tool_namespaces=["functions"]',
             '-c', 'features.apps=false', '-c', 'features.plugins=false', '-c', 'features.multi_agent=false',
+            '-c', 'agents.enabled=false', '-c', 'cli_auth_credentials_store="file"',
             '-c', 'features.skill_search=false',
             '-c', `skills.max_context_tokens=${BOT_SKILL_CATALOG_TOKEN_LIMIT}`];
+        // Share only existing file auth/config and durable rollouts, never global AGENTS/skills.
+        // Keep normal credential refresh writing through the auth symlink.
+        const env = getCodexEnvironment();
+        const sourceHome = path.resolve(env.CODEX_HOME || path.join(homedir(), '.codex'));
+        this.codexHome = await mkdtemp(path.join(this.cwd, 'codex-home-'));
+        await mkdir(path.join(sourceHome, 'sessions'), { recursive: true });
+        for (const name of ['auth.json', 'config.toml', 'sessions']) {
+            await symlink(path.join(sourceHome, name), path.join(this.codexHome, name));
+        }
+        env.CODEX_HOME = this.codexHome;
         this.child = spawn(process.execPath, [helperPath, this.requestId,
             process.env.MINDCRAFT_CODEX_BIN || 'codex', JSON.stringify(args), this.cwd],
-        { cwd: this.cwd, env: getCodexEnvironment(), stdio: ['pipe', 'pipe', 'ignore', 'ipc'], detached: process.platform !== 'win32' });
+        { cwd: this.cwd, env, stdio: ['pipe', 'pipe', 'ignore', 'ipc'], detached: process.platform !== 'win32' });
         this.record('helper_started', { pid: this.child.pid });
         this.exited = new Promise(resolve => this.child.once('close', resolve));
         this.child.on('close', code => { this.closed = true; this.fail(new Error(`Codex session exited (${code})`)); });

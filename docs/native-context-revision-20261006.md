@@ -2,6 +2,8 @@
 
 手動playのsource `a4788ec75630ea8a13aa1a0e3a143ae4d6c3d7a1` と、2026-10-06 15:25:55–15:26:26 JSTの新規Bot2 taskを基準に修正した。旧play履歴の事例を新バンドルの実行結果として扱っていない。[新規task採取レポート](../../play/observations/context-sample-20261006T152536-Bot2/REPORT.md)に生入力・tool呼出し・rolloutの所在がある。
 
+この文書はsource `c02dc0237f98de4d99a506578bc9226f7702feaf` の検証記録。残ったglobal AGENTSとmulti-agent説明は[後続の分離変更](native-context-isolation-20261006.md)で除いた。以下の数値・残存内容は当時の観察として保持する。
+
 ## 実装した挙動
 
 - CLI 0.160.1の正しいキー `features.code_mode.direct_only_tool_namespaces=["functions"]` と `--strict-config` を使用する。旧キーはstrict起動でunknown fieldになった。正しいキーでも `tools.tool_search` は存在しなかった。
