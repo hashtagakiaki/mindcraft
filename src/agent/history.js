@@ -3,6 +3,9 @@ import { NPCData } from './npc/data.js';
 import settings from './settings.js';
 import { readTaskDiagnostics } from './task_diagnostics.js';
 
+const isShutdownNotice = turn => turn.role === 'system'
+    && /^Agent shutdown \(.*\)\. Final outcome: [\s\S]*\. Natural language shutdown summary skipped\.$/.test(turn.content);
+
 
 export class History {
     constructor(agent) {
@@ -64,18 +67,21 @@ export class History {
     }
 
     async appendFullHistory(to_store) {
-        if (this.full_history_fp === undefined) {
-            const string_timestamp = new Date().toLocaleString().replace(/[/:]/g, '-').replace(/ /g, '').replace(/,/g, '_');
-            this.full_history_fp = `./bots/${this.name}/histories/${string_timestamp}.json`;
-            writeFileSync(this.full_history_fp, '[]', 'utf8');
-        }
         try {
+            if (this.full_history_fp === undefined) {
+                const string_timestamp = new Date().toLocaleString().replace(/[/:]/g, '-').replace(/ /g, '').replace(/,/g, '_');
+                const filename = `./bots/${this.name}/histories/${string_timestamp}.json`;
+                writeFileSync(filename, '[]', 'utf8');
+                this.full_history_fp = filename;
+            }
             const data = readFileSync(this.full_history_fp, 'utf8');
             let full_history = JSON.parse(data);
             full_history.push(...to_store);
             writeFileSync(this.full_history_fp, JSON.stringify(full_history, null, 4), 'utf8');
+            return true;
         } catch (err) {
             console.error(`Error reading ${this.name}'s full history file: ${err.message}`);
+            return false;
         }
     }
 
@@ -120,7 +126,8 @@ export class History {
     async _trimNativeHistory() {
         // Codex owns the native context and compaction. Keep a bounded UI/seed history without a second model.
         const limit = Number.isInteger(this.max_messages) && this.max_messages > 0 ? this.max_messages : 15;
-        if (this.turns.length > limit) await this.appendFullHistory(this.turns.splice(0, this.turns.length - limit));
+        const count = this.turns.length - limit;
+        if (count > 0 && await this.appendFullHistory(this.turns.slice(0, count))) this.turns.splice(0, count);
     }
 
     getCodexThread(scope) {
@@ -130,11 +137,12 @@ export class History {
     }
 
     getCodexInput(resumed) {
-        if (!resumed) return this.getHistory();
+        const history = this.getHistory();
         const consumed = this.codexThread?.historySequence;
-        if (!Number.isSafeInteger(consumed)) return this.getHistory();
         const count = Math.max(0, this.historySequence - consumed);
-        return count ? this.getHistory().slice(-count) : [];
+        // Select the raw sequence delta before projection; filtered notices must not shift the cursor.
+        const unsent = resumed && Number.isSafeInteger(consumed) ? (count ? history.slice(-count) : []) : history;
+        return unsent.filter(turn => !isShutdownNotice(turn));
     }
 
     async checkpointCodexThread(threadId, scope) {
@@ -241,8 +249,13 @@ export class History {
             this.pendingHistoryChunks = [];
             this.turns = [...pending, ...this.turns];
             const detail = typeof outcome === 'string' ? outcome : JSON.stringify(outcome);
-            this.turns.push({ role: 'system', content: `Agent shutdown (${reason || 'unspecified'}). Final outcome: ${detail}. Natural language shutdown summary skipped.` });
-            this.historySequence++;
+            const notice = { role: 'system', content: `Agent shutdown (${reason || 'unspecified'}). Final outcome: ${detail}. Natural language shutdown summary skipped.` };
+            // Operational records belong in the existing archive, without consuming native conversation slots.
+            // Retain the raw notice in memory if archival fails. Legacy shutdown history stays unchanged.
+            if (settings.agent_runtime !== 'codex-session' || !await this.appendFullHistory([notice])) {
+                this.turns.push(notice);
+                this.historySequence++;
+            }
             try {
                 await this.save({ final: true });
                 return { saved: true, memoryPath: this.memory_fp };

@@ -26,7 +26,7 @@ async function main() {
     const load = relative => import(pathToFileURL(path.join(root, relative)))
     const { default: settings } = await load('src/agent/settings.js')
     Object.assign(settings, { agent_runtime: 'codex-session', allow_insecure_coding: true, codex_session: { stall_timeout_ms: 60, action_timeout_ms: 2000, output_limit: 16000 }, language: 'en' })
-    const { CodexRuntime: NativeCodexRuntime, validateCodexRuntime, observedState } = await load('src/agent/codex_runtime.js')
+    const { CodexRuntime: NativeCodexRuntime, validateCodexRuntime, observedState, modelObservation, modelOperationResult } = await load('src/agent/codex_runtime.js')
     // Scripted model decisions use the same wait-for-tool-result boundary as app-server.
     // Existing multi-step scripts remain useful for host ownership/error/budget scenarios.
     class CodexRuntime extends NativeCodexRuntime {
@@ -89,6 +89,27 @@ async function main() {
     assert.equal(nativeObservation.observationScope.managementConnectionReady, false)
     assert.equal(nativeObservation.observationScope.managementServerGeneration, null)
     assert.match(nativeObservation.observationScope.observedAt, /^\d{4}-\d\d-\d\dT/)
+    const rawObservation = { ...nativeObservation, items: [
+      { name: 'oak_boat', count: 1 }, { name: 'oak_boat', count: 1 },
+      { name: 'wooden_axe', count: 1, durabilityUsed: 2, maxDurability: 59 },
+      { name: 'wooden_axe', count: 1, durabilityUsed: 8, maxDurability: 59 }
+    ], equipment: [{ slot: 45, name: 'shield', count: 1, durabilityUsed: 10, maxDurability: 336 }] }
+    const projection = modelObservation(rawObservation)
+    assert.deepEqual(projection.inventory, { oak_boat: 2, wooden_axe: 2 })
+    assert.deepEqual(projection.tools.map(tool => tool.remaining), [57, 51], 'individual tool durability is retained')
+    assert.equal(projection.equipment[0].remaining, 326)
+    assert.equal(Object.hasOwn(projection, 'items'), false)
+    const rawOperation = { success: false, error: 'EXACT_FAILURE', domainReturn: false, operationSettlement: 'settled',
+      observed: rawObservation, confirmedChanges: [{ block: 'chest' }], unconfirmedChanges: [{ block: 'unknown' }],
+      trackingScope: 'public SDK only', lateDiagnostics: [], stopRequestedPhase: null }
+    const projectedOperation = modelOperationResult(rawOperation)
+    assert.equal(projectedOperation.domainReturn, false)
+    assert.equal(projectedOperation.error, 'EXACT_FAILURE')
+    assert.deepEqual(projectedOperation.confirmedChanges, rawOperation.confirmedChanges)
+    assert.deepEqual(projectedOperation.unconfirmedChanges, rawOperation.unconfirmedChanges)
+    assert.equal(projectedOperation.operationSettlement, 'settled')
+    assert.equal(projectedOperation.trackingScope, 'public SDK only')
+    assert.equal(rawOperation.observed.items.length, 4, 'raw diagnostics remain unchanged')
     await until(() => agent.coder.code_template && agent.coder.code_lint_template)
     const result = await agent.actions.runAction('compound', () => agent.coder.executeCode('log(bot, "first");\nawait Promise.resolve();\nlog(bot, "second");'), { timeout: 0, outputLimit: 16000 })
     assert.equal(result.success, true)
@@ -499,6 +520,43 @@ async function main() {
     assert.match(summaryPendingMemory.turns.at(-1).content, /The answer is checkpointed/)
     assert.equal(summaryCalls, 0, 'Codex owns native compaction, not promptMemSaving')
 
+    // Old shutdown records remain readable but never consume model input or raw sequence deltas.
+    const historyAgent = makeAgent('ContextHistory')
+    historyAgent.history = new History(historyAgent)
+    const history = historyAgent.history
+    const shutdown = 'Agent shutdown (restart). Final outcome: {"saved":true}. Natural language shutdown summary skipped.'
+    await history.add('operator', 'EARLIER_INTENT')
+    await history.add('system', shutdown)
+    await history.checkpointCodexThread('history-thread', {})
+    await history.add('system', shutdown)
+    await history.add('system', 'RECIPIENT_CONTEXT and concrete failure')
+    await history.add('operator', 'CURRENT_INTENT')
+    assert.equal(history.getHistory().length, 5)
+    assert.deepEqual(history.getCodexInput(true).map(turn => turn.content),
+      ['RECIPIENT_CONTEXT and concrete failure', 'operator: CURRENT_INTENT'])
+    assert.equal(history.getCodexInput(false).length, 3)
+    await history.checkpointCodexThread('history-thread', {})
+    assert.deepEqual(history.getCodexInput(true), [], 'filtering does not rewind the raw cursor')
+    const sequence = history.historySequence
+    assert.equal((await history.saveShutdownRecord('fixture')).saved, true)
+    assert.equal(history.historySequence, sequence, 'archived shutdown does not consume conversation sequence')
+    const archive = JSON.parse(await fs.readFile(history.full_history_fp, 'utf8'))
+    assert.match(archive.at(-1).content, /Agent shutdown/)
+    const restoredHistory = new History(historyAgent)
+    restoredHistory.load()
+    assert.equal(restoredHistory.getHistory().length, 5, 'old raw shutdown notices stay in memory')
+    assert.deepEqual(restoredHistory.getCodexInput(true), [])
+    await restoredHistory.add('operator', 'AFTER_RESTART')
+    assert.deepEqual(restoredHistory.getCodexInput(true).map(turn => turn.content), ['operator: AFTER_RESTART'])
+    const failureHistoryAgent = makeAgent('ContextArchiveFailure')
+    const failureHistory = new History(failureHistoryAgent)
+    failureHistory.full_history_fp = './bots/ContextArchiveFailure/histories'
+    await failureHistory.add('operator', 'intent preserved')
+    assert.equal((await failureHistory.saveShutdownRecord('failed archive')).saved, true)
+    assert.match(failureHistory.getHistory().at(-1).content, /Agent shutdown/,
+      'archive failure retains the raw notice in the saved memory')
+    assert.equal(failureHistory.getCodexInput(false).length, 1)
+
     // Stored native threads survive a new runtime/History instance, but never cross scopes.
     settings.place_world_id = 'harness-world'
     const persistentAgent = makeAgent('Persistent')
@@ -516,6 +574,7 @@ async function main() {
     persistentAgent.history = new History(persistentAgent)
     assert.equal(persistentAgent.history.codexThread, null, 'without load_memory, a new instance starts fresh')
     persistentAgent.history.load()
+    await persistentAgent.history.add('system', shutdown)
     await persistentAgent.history.add('system', 'NEW_RECIPIENT_CONTEXT')
     await persistentAgent.history.add('system', 'NEW_BEHAVIOR_LOG')
     await persistentAgent.history.add('operator', 'LATEST_REQUEST_MARKER')
@@ -528,6 +587,7 @@ async function main() {
       .map(name => fs.readFile('bots/Persistent/histories/' + name, 'utf8')))).join('\n').trim().split('\n').filter(Boolean).map(JSON.parse)
     const resumedStart = persistentTraces.find(row => row.taskId === 'persistent-second' && row.type === 'task_start')
     assert.match(resumedStart.input, /LATEST_REQUEST_MARKER/)
+    assert.doesNotMatch(resumedStart.input, /Agent shutdown/)
     assert.match(resumedStart.input, /NEW_RECIPIENT_CONTEXT/)
     assert.match(resumedStart.input, /NEW_BEHAVIOR_LOG/)
     assert.doesNotMatch(resumedStart.input, /verified/, 'the previous native answer was already part of the thread')
@@ -829,7 +889,43 @@ async function main() {
     assert.ok(inputs[0].endsWith('first rule'))
     assert.ok(inputs[1].endsWith('updated rule'))
     const resumedRequest = inputs[1].split('CURRENT OPERATOR REQUEST (still active):\n')[1].split('\nCURRENT CAPABILITIES:')[0]
+    const readTask = text => JSON.parse(text.split('CURRENT TASK:\n')[1].split('\n')[0])
+    const firstTask = readTask(inputs[0]), nextTask = readTask(inputs[1])
+    assert.equal(firstTask.self.name, 'Rules')
+    assert.equal(firstTask.budget.hostDecisionsUsed, 1)
+    assert.equal(nextTask.budget.hostDecisionsUsed, 2)
+    assert.equal(nextTask.budget.remainingOperations, firstTask.budget.remainingOperations - 1)
+    assert.ok(nextTask.budget.remainingMs <= firstTask.budget.remainingMs)
+    assert.match(inputs[0], /"native_peer_messages":false/)
     assert.deepEqual(JSON.parse(resumedRequest), acceptedRequest, 'resumed decisions retain the accepted goal even when later history changes')
+    // Capabilities follow effective connection/authentication, including legacy management.
+    const capabilityProxy = { socket: serverProxy.socket, managementReady: serverProxy.managementReady,
+      managementCredential: serverProxy.managementCredential }
+    for (const scenario of [
+      { connected: true, ready: true, authenticated: false, places: true, expectedPeer: false, expectedPlaces: true },
+      { connected: true, ready: true, authenticated: true, places: true, expectedPeer: true, expectedPlaces: true },
+      { connected: false, ready: true, authenticated: true, places: true, expectedPeer: false, expectedPlaces: false },
+      { connected: true, ready: false, authenticated: true, places: true, expectedPeer: false, expectedPlaces: false },
+      { connected: true, ready: true, authenticated: true, places: false, expectedPeer: true, expectedPlaces: false }
+    ]) {
+      serverProxy.socket = { connected: scenario.connected }
+      serverProxy.managementReady = scenario.ready
+      serverProxy.managementCredential = scenario.authenticated ? { token: 'fixture' } : null
+      const capabilityAgent = makeAgent('Capabilities')
+      capabilityAgent.currentTaskId = 'capability-task'
+      capabilityAgent.places = { isEnabled: () => scenario.places }
+      let observedCapabilities
+      const capabilityRuntime = new CodexRuntime(capabilityAgent, { makeSession: () => ({ open: async () => {},
+        runTurn: async input => {
+          observedCapabilities = JSON.parse(input.split('CURRENT CAPABILITIES:\n')[1].split('\n')[0])
+          return { messages: ['capabilities checked'] }
+        }, close: async () => {} }) })
+      capabilityAgent.codexRuntime = capabilityRuntime
+      assert.equal(await capabilityRuntime.run('operator', () => true, capabilityAgent.currentTaskId), true)
+      assert.equal(observedCapabilities.native_peer_messages, scenario.expectedPeer)
+      assert.equal(observedCapabilities.place_memory, scenario.expectedPlaces)
+    }
+    Object.assign(serverProxy, capabilityProxy)
     // Stop/new intent/management/shutdown invalidate retained work; stale result cannot resume.
     for (const reason of ['user', 'superseded', 'management', 'shutdown']) {
       const testAgent = makeAgent('Cancel' + reason)

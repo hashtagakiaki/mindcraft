@@ -56,3 +56,5 @@
 - `agent_runtime: "codex-session"` はroot settingsの明示opt-in。標準tool待機・遅延SDK説明・scope付きthread再開・画像入力の仕様とCLI検証範囲は[README](README.md#opt-in-codex-task-session)と[移行記録](docs/codex-standard-harness-20261006.md)を参照する。`src/process/codex_session.js` は既存owned CLI helperの親登録ACKとprocess回収を再利用する。native task中は旧recovery modelを並行起動しない。機能追加だけでmanual play pinを更新・bot切替しない。
 
 - bot固定指示の正本は `src/process/codex/AGENTS.md`。起動時に専用一時cwdへ配置して標準loaderで読む。repo rootの開発指示をbotへコピーしない。能力設定と更新可能なshared bot rulesはhostが判断ごとに渡す。標準読込に必要な既定workspace accessを残し、shell無効・read-only sandbox・Minecraft以外のtool拒否は維持する。
+
+- native botのSDK探索はCLI 0.160.1で実測した `ALL_TOOLS` のMinecraft説明名だけを最大3件表示する経路を使う。起動overrideは `features.code_mode.direct_only_tool_namespaces` が正しいキー。変更時はstrict-config・実rollout・新規/再開の説明と画像を隔離確認し、設定受理だけを効果の証拠にしない。context検証は [`docs/native-context-revision-20261006.md`](docs/native-context-revision-20261006.md) を参照。

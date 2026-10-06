@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline';
 import { authorizeAndStart, getCodexEnvironment } from '../models/codex.js';
 
 const REQUEST_TIMEOUT_MS = 120000;
+const BOT_SKILL_CATALOG_TOKEN_LIMIT = 1;
 const instructionsPath = new URL('./codex/AGENTS.md', import.meta.url);
 const helperPath = fileURLToPath(new URL('./owned_cli.js', import.meta.url));
 
@@ -32,8 +33,11 @@ export class CodexSession {
         // Let Codex discover fixed gameplay guidance through its standard workspace loader.
         await copyFile(instructionsPath, path.join(this.cwd, 'AGENTS.md'));
         if (signal?.aborted) throw new Error('Session cancelled');
-        const args = ['app-server', '--listen', 'stdio://', '--disable', 'shell_tool', '-c', 'web_search="disabled"',
-            '-c', 'code_mode.direct_only_tool_namespaces=["functions"]'];
+        const args = ['app-server', '--strict-config', '--listen', 'stdio://', '--disable', 'shell_tool', '-c', 'web_search="disabled"',
+            '-c', 'features.code_mode.direct_only_tool_namespaces=["functions"]',
+            '-c', 'features.apps=false', '-c', 'features.plugins=false', '-c', 'features.multi_agent=false',
+            '-c', 'features.skill_search=false',
+            '-c', `skills.max_context_tokens=${BOT_SKILL_CATALOG_TOKEN_LIMIT}`];
         this.child = spawn(process.execPath, [helperPath, this.requestId,
             process.env.MINDCRAFT_CODEX_BIN || 'codex', JSON.stringify(args), this.cwd],
         { cwd: this.cwd, env: getCodexEnvironment(), stdio: ['pipe', 'pipe', 'ignore', 'ipc'], detached: process.platform !== 'win32' });
@@ -74,7 +78,8 @@ export class CodexSession {
         });
         if (response.model !== this.model || response.reasoningEffort !== this.effort) throw new Error('Codex model or reasoning effort mismatch');
         this.threadId = response.thread.id;
-        this.record(this.resumed ? 'thread_resumed' : 'thread_started', { threadId: this.threadId, model: response.model, effort: response.reasoningEffort });
+        this.record(this.resumed ? 'thread_resumed' : 'thread_started', { threadId: this.threadId, model: response.model,
+            effort: response.reasoningEffort, instructionSources: response.instructionSources });
     }
 
     send(message) {

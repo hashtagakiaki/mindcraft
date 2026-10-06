@@ -5,7 +5,7 @@ Native Minecraft tasks reuse the Codex app-server mechanisms for SDK discovery, 
 | Concern | Previous native behavior | Result |
 |---|---|---|
 | Fixed gameplay instructions | JavaScript array injected as base instructions | Tracked bot AGENTS.md copied into the private runtime cwd; standard workspace instruction discovery |
-| SDK context | Full SDK embedded in each task's base instructions | Existing docs registered as deferred `minecraft_sdk` documentation tools; standard tool_search/code mode discovers them |
+| SDK context | Full SDK embedded in each task's base instructions | Existing docs registered as deferred `minecraft_sdk` documentation tools; code mode discovers selected method names (see the context correction below) |
 | Operation wait | Running acknowledgement, turn interrupt, completed result in a new turn | Actual settled result returned to the pending dynamic tool call |
 | Conversation | Ephemeral thread per request; old local conversation injected again | Scoped persistent thread resumed across requests; only new local context is sent |
 | Memory | Auxiliary model summarizes native local turns | Codex owns native compaction; local UI/seed turns remain bounded and archived |
@@ -18,7 +18,7 @@ The current SDK has 74 documentation entries / 32,415 characters, including the 
 
 Disposable app-server probes used the installed CLI **0.160.1**, explicit `gpt-6-luna` and medium effort. They executed no Minecraft commands and touched no live bots, server/world or Ollama. Probe-owned stored threads were deleted and CLI processes reaped afterward.
 
-Initial deferred discovery appeared unavailable despite provider `namespaceTools: true` and model `supports_search_tool: true`. Installed-version source and model metadata established that `tool_mode: code_mode_only` places search behind `functions.exec`. The original Minecraft instruction prohibited that entry point. Permitting native code mode for discovery resolved documentation calls. A process-local CLI override `code_mode.direct_only_tool_namespaces=["functions"]` exposes `minecraft_execute` directly so its images need no intermediate code-mode forwarding. Global Codex configuration was not changed.
+Initial deferred discovery appeared unavailable despite provider `namespaceTools: true` and model `supports_search_tool: true`. Installed-version source and model metadata established that `tool_mode: code_mode_only` places search behind `functions.exec`. The original Minecraft instruction prohibited that entry point. Permitting native code mode for discovery resolved documentation calls. The originally recorded override `code_mode.direct_only_tool_namespaces=["functions"]` was incorrect: CLI 0.160.1 strict configuration rejects it. The later real Bot2 sample also established that `tools.tool_search` was unavailable. The [context correction](native-context-revision-20261006.md) uses `features.code_mode.direct_only_tool_namespaces`, bounded SDK name lookup and direct execution, and verifies actual image delivery. Global Codex configuration was not changed.
 
 The final probe used the implemented **CodexSession and SDK documentation adapter**, with the owned CLI helper:
 

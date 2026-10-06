@@ -1,4 +1,4 @@
-// Codex's tool_search indexes these deferred specifications. No second search index/model.
+// Deferred documentation stays in the native registry; code mode discovers bounded names only.
 export function createSdkDocumentation(documents) {
     const docs = new Map();
     for (const document of documents) {
@@ -10,7 +10,7 @@ export function createSdkDocumentation(documents) {
     }
     return {
         tools: [{ type: 'namespace', name: 'minecraft_sdk',
-            description: 'Read-only Minecraft SDK documentation: movement, mining, crafting, containers, world observations, places, screenshots, diagnostics and peer messages. Discover with tool_search; execute the documented JavaScript through minecraft_execute.',
+            description: 'Read-only Minecraft SDK documentation. In functions.exec, filter ALL_TOOLS by names starting with minecraft_sdk__, match the needed method words, and print only up to 3 names. Call the selected documentation tool in code mode. Execute JavaScript with the directly exposed minecraft_execute outside code mode.',
             tools: [...docs].map(([name, documentation]) => ({ type: 'function', name, deferLoading: true,
                 description: `Read documentation only; does not execute a game operation.\n${documentation}`,
                 inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false } })),

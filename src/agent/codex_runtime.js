@@ -16,6 +16,7 @@ const MAX_NATIVE_DEDUPE_IDS = 256;
 const MAX_BLOCK_EDITS_PER_CHECK = 8;
 const MAX_OPERATION_IMAGES = 4;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+const NATIVE_CONTEXT_PROTOCOL = 3;
 
 export function validateCodexRuntime(profile) {
     if (settings.agent_runtime !== 'codex-session') return null;
@@ -34,7 +35,35 @@ export function observedState(bot, observationScope = createObservationScope(bot
     const items = bot.inventory?.items?.() ?? [];
     return { observationScope, position: p ? { x: p.x, y: p.y, z: p.z } : null, dimension: bot.game?.dimension,
         health: bot.health, food: bot.food, inventoryUnconfirmed: !!bot.inventoryUnconfirmed,
-        items: items.map(item => ({ name: item.name, count: item.count, durabilityUsed: item.durabilityUsed, maxDurability: item.maxDurability })) };
+        items: items.map(item => ({ name: item.name, count: item.count, durabilityUsed: item.durabilityUsed, maxDurability: item.maxDurability })),
+        equipment: [5, 6, 7, 8, 45].flatMap(slot => {
+            const item = bot.inventory?.slots?.[slot];
+            return item ? [{ slot, name: item.name, count: item.count, durabilityUsed: item.durabilityUsed, maxDurability: item.maxDurability }] : [];
+        }) };
+}
+
+export function modelObservation({ items = [], equipment = [], ...state }) {
+    const inventory = {};
+    const tools = [];
+    for (const item of items) {
+        inventory[item.name] = (inventory[item.name] ?? 0) + item.count;
+        if (Number.isFinite(item.maxDurability)) tools.push(item);
+    }
+    const durability = item => ({ name: item.name, count: item.count, ...(item.slot === undefined ? {} : { slot: item.slot }),
+        ...(Number.isFinite(item.maxDurability) ? { maxDurability: item.maxDurability,
+            remaining: Number.isFinite(item.durabilityUsed) ? item.maxDurability - item.durabilityUsed : null } : {}) });
+    return { ...state, inventory, tools: tools.map(durability), equipment: equipment.map(durability) };
+}
+
+export function modelOperationResult(result) {
+    const projected = { ...result };
+    // Preserve outcome/failure/partial-change evidence. Omit only empty operational auxiliaries.
+    for (const key of ['reason', 'stopRequestedPhase', 'watchdogAtPhase']) {
+        if (projected[key] === null) delete projected[key];
+    }
+    if (projected.lateDiagnostics?.length === 0) delete projected.lateDiagnostics;
+    if (projected.observed) projected.observed = modelObservation(projected.observed);
+    return projected;
 }
 
 // One owned task at a time; Codex owns the scoped conversation and its compaction.
@@ -251,14 +280,22 @@ export class CodexRuntime {
         try {
             const docs = await agent.prompter.skill_libary.getAllSkillDocs();
             const sdk = createSdkDocumentation(docs);
-            // Start fresh for the AGENTS migration: old threads retain embedded base instructions.
+            // Changed discovery/context contracts start fresh once; subsequent tasks resume normally.
             const scope = { bot: agent.name, worldId: settings.place_world_id, model, effort,
-                sdk: createHash('sha256').update(JSON.stringify({ docs, vision: !!settings.allow_vision, protocol: 2 })).digest('hex') };
+                sdk: createHash('sha256').update(JSON.stringify({ docs, vision: !!settings.allow_vision, protocol: NATIVE_CONTEXT_PROTOCOL })).digest('hex') };
             const persistent = typeof scope.worldId === 'string' && !!scope.worldId && !!agent.history.checkpointCodexThread;
             record('task_accepted', { source });
-            const capabilities = { vision: !!settings.allow_vision, max_search_radius: config.max_search_radius,
-                max_block_edits_per_check: MAX_BLOCK_EDITS_PER_CHECK };
-            const capabilityInput = '\nCURRENT CAPABILITIES:\n' + JSON.stringify(capabilities);
+            const currentCapabilities = () => {
+                const connected = serverProxy.managementReady && serverProxy.socket?.connected === true;
+                return { vision: !!settings.allow_vision, place_memory: !!(connected && agent.places?.isEnabled()),
+                    native_peer_messages: !!(connected && serverProxy.managementCredential && this._taskScope.isCurrent()),
+                    max_search_radius: config.max_search_radius, max_block_edits_per_check: MAX_BLOCK_EDITS_PER_CHECK };
+            };
+            const decisionContext = () => '\nCURRENT CAPABILITIES:\n' + JSON.stringify(currentCapabilities())
+                + '\nCURRENT TASK:\n' + JSON.stringify({ self: { name: agent.name }, taskId,
+                    budget: { remainingMs: Math.max(0, config.task_budget_ms - (Date.now() - acceptedAt)),
+                        remainingOperations: Math.max(0, config.max_operations - operationCount),
+                        hostDecisionsUsed: turnCount, remainingHostDecisions: Math.max(0, config.max_turns - turnCount) } });
             // Fail closed on unreadable shared rules, before creating a model request.
             await agent.prompter.withBotRules('');
             if (!current()) return false;
@@ -272,9 +309,8 @@ export class CodexRuntime {
                 }
                 turnCount++;
                 const input = await agent.prompter.withBotRules(this._appendNativeInbox(
-                    'Settled tool result.\nCURRENT OPERATOR REQUEST (still active):\n' + operatorRequest + capabilityInput + '\n'
-                    + (result.documentation ? 'SDK DOCUMENTATION RESULT:\n' : 'COMPLETED OPERATION RESULT:\n') + JSON.stringify(result) + '\n'
-                    + 'Compare this actual result with every requested condition. If unmet, infer/check the cause and use the existing SDK to change the failing conditions; an unchanged retry or an inspection alone does not resolve the goal. Verify the entire outcome after the last mutation before reporting. A failed method alone is not a concrete task blocker.', this._takeNativeInbox()));
+                    'Settled tool result.\nCURRENT OPERATOR REQUEST (still active):\n' + operatorRequest + decisionContext() + '\n'
+                    + (result.documentation ? 'SDK DOCUMENTATION RESULT:\n' : 'COMPLETED OPERATION RESULT:\n') + JSON.stringify(modelOperationResult(result)), this._takeNativeInbox()));
                 if (!current()) throw new Error('Stale task tool result');
                 record('tool_result', { input, images: this.images?.length ?? 0 });
                 const images = this.images ?? [];
@@ -291,22 +327,22 @@ export class CodexRuntime {
                 const saved = await agent.history.checkpointCodexThread(this.session.threadId, scope);
                 record('thread_checkpoint', { saved: saved?.saved === true, threadId: this.session.threadId });
             }
-            let input = 'Current conversation and older memory (current request is the final conversation entry):\n' + JSON.stringify({ previousTaskDiagnostic: this.previousTaskDiagnostic.available
+            let input = 'Conversation context and older memory (historical, not current state):\n' + JSON.stringify({ previousTaskDiagnostic: this.previousTaskDiagnostic.available
                 ? { available: true, taskId: this.previousTaskDiagnostic.snapshot.taskId, updatedAt: this.previousTaskDiagnostic.snapshot.updatedAt, status: this.previousTaskDiagnostic.snapshot.status }
                 : this.previousTaskDiagnostic, memory: this.session.resumed ? undefined : agent.history.memory,
                 turns: inputTurns,
-                observed: observedState(agent.bot, agent.getObservationScope?.()) });
-            record('task_start', { instructionsFile: 'src/process/codex/AGENTS.md', capabilities, input });
+                observed: modelObservation(observedState(agent.bot, agent.getObservationScope?.())) });
+            record('task_start', { instructionsFile: 'src/process/codex/AGENTS.md', capabilities: currentCapabilities(), input });
             while (current()) {
                 if (turnCount >= config.max_turns) {
                     reachBudget('thread-turns');
                     break;
                 }
-                input = this._appendNativeInbox(input + capabilityInput, this._takeNativeInbox());
+                turnCount++;
+                input = this._appendNativeInbox(input + '\nCURRENT OPERATOR REQUEST (still active):\n' + operatorRequest + decisionContext(), this._takeNativeInbox());
                 input = await agent.prompter.withBotRules(input);
                 if (!current()) return false;
                 record('turn_input', { input });
-                turnCount++;
                 const turn = await this.session.runTurn(input);
                 if (!current()) return false;
 
