@@ -24,6 +24,7 @@ const LOOK_TOLERANCE_DEGREES = 0.1;
 const LOOK_REFRESH_YAW_RADIANS = 0.01;
 const DEFAULT_SUPPORT_ORDER = ['bottom', 'top', 'north', 'south', 'east', 'west'];
 const SNEAK_EYE_HEIGHT = 1.27;
+const STANDING_EYE_HEIGHT = 1.62;
 
 function familyOf(name) {
     if (HORIZONTAL_BLOCKS.has(name)) return 'horizontal';
@@ -203,8 +204,9 @@ export function makePlacementGoal(bot, request, targets = expectedBlocks(request
         });
         goal.facesPos = goal.facesPos.filter(([direction]) => direction.y !== 0).concat(sideGoal.facesPos);
     }
-    // Placement crouches to avoid using the support. Search for a face that
-    // remains visible with that eye height instead of the goal's fixed 1.6.
+    const interactable = bot.pathfinder.movements?.interactableBlocks ?? new pf.Movements(bot).interactableBlocks;
+    // Interactive supports require crouching. Ordinary supports can use
+    // either posture; prefer standing at placement time to preserve normal use.
     goal.isEnd = node => {
         if (goal.isStandingIn(node)) return false;
         const currentCell = bot.entity.position.floored();
@@ -216,7 +218,10 @@ export function makePlacementGoal(bot, request, targets = expectedBlocks(request
             (node.y === currentCell.y || node.y === currentCell.y + 1)
             ? bot.entity.position.offset(0, SNEAK_EYE_HEIGHT, 0)
             : node.offset(0.5, SNEAK_EYE_HEIGHT, 0.5);
-        return goal.getFaceAndRef(head) !== null && targets.slice(1).every(target =>
+        const standing = goal.getFaceAndRef(head.offset(0, STANDING_EYE_HEIGHT - SNEAK_EYE_HEIGHT, 0));
+        const usableFace = goal.getFaceAndRef(head) !== null ||
+            (standing && !interactable.has(bot.blockAt(standing.ref)?.name));
+        return !!usableFace && targets.slice(1).every(target =>
             !(Math.floor(node.x) === target.position.x && Math.floor(node.z) === target.position.z &&
                 (Math.floor(node.y) === target.position.y || Math.floor(node.y) + 1 === target.position.y)));
     };
@@ -347,15 +352,20 @@ export async function placeBlockOriented(bot, blockType, position, options, dont
             if (cancelled(bot)) return fail('Action cancelled before the placement packet.');
             assertEmpty(bot, targets);
             supportRequirements(bot, request, targets);
-            // Sneaking prevents activating a support such as a chest or furnace.
+            // Crouch only to bypass an interactive support or when the face
+            // geometry requires it. Unconditional crouching changes placement
+            // semantics, including preventing adjacent chests from joining.
+            head = bot.entity.position.offset(0, STANDING_EYE_HEIGHT, 0);
+            candidate = goal.isStandingIn(bot.entity.position.floored()) ? null : goal.getFaceAndRef(head);
+            const needsSneak = !candidate || movements.interactableBlocks.has(bot.blockAt(candidate.ref)?.name);
             oldSneak = bot.getControlState?.('sneak') ?? false;
-            if (!oldSneak) {
-                bot.setControlState('sneak', true);
+            if (oldSneak !== needsSneak) {
+                bot.setControlState('sneak', needsSneak);
                 changedSneak = true;
                 await bot.waitForTicks(2);
             }
             goal = makePlacementGoal(bot, request, targets);
-            head = bot.entity.position.offset(0, bot.entity.eyeHeight ?? SNEAK_EYE_HEIGHT, 0);
+            head = bot.entity.position.offset(0, needsSneak ? SNEAK_EYE_HEIGHT : STANDING_EYE_HEIGHT, 0);
             candidate = goal.isStandingIn(bot.entity.position.floored()) ? null : goal.getFaceAndRef(head);
             if (!candidate) return fail('No visible placement face at the final position and eye height.');
             const reference = bot.blockAt(candidate.ref);
@@ -396,7 +406,7 @@ export async function placeBlockOriented(bot, blockType, position, options, dont
         observer?.cleanup();
         finishOwnedWait(wait, { outcome: cancelled(bot) ? 'cancelled' : placementError ? 'plugin-error' : 'settled', endedAt: new Date().toISOString() });
         if (!owner?.closed) context?.setPhase?.(oldPhase);
-        if (!owner?.closed && changedSneak && bot.getControlState?.('sneak') === true) bot.setControlState('sneak', oldSneak);
+        if (!owner?.closed && changedSneak && bot.getControlState?.('sneak') !== oldSneak) bot.setControlState('sneak', oldSneak);
         if (oldMovements && bot.pathfinder.movements === movements) bot.pathfinder.setMovements(oldMovements);
     }
 }

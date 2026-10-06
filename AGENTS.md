@@ -44,6 +44,7 @@
 - 隔離Minecraft live確認はCaseServerのloopback `25569` / `25570`だけを使う。`25566`は禁止。productionやsystem serviceを変更しない。
 - craft同期helper、`craftRecipe` wrapper、farm skillはこのforkの通常sourceとして管理する。eval/play runtimeはmanifestのfull SHAからexportし、play overlaysは `../mindcraft-tools/` 側で適用する。manifest更新前にforkのcommitをown originへpushし、eval側で検証する。
 - 向き指定は `placeBlock` のoptions objectと `block_placement.js` が所有する。既存文字列 `placeOn` は互換経路。設置規則/private Mineflayer adapterを一か所に保ち、serverで未確認の向きを成功扱いしない。`skills.js` をdisposable fixtureへcopyするときはこのhelperもcopyする。実測範囲はREADMEのplacement verification recordを参照する。
+- 設置時の姿勢は既存 `Movements.interactableBlocks` を使って選び、通常supportで常にスニークさせない。隣接チェストの結合も姿勢で変わる。向きだけの確認をラージチェスト完成と扱わず、両方のtypeを再観察する。汎用回復方針と姿勢の実測は [`docs/native-goal-recovery-20261006.md`](docs/native-goal-recovery-20261006.md) を参照する。
 - `autonomy`でsourceを編集し、上記Node 20 offline suiteを通してからown originへcommit/pushする。eval側はそのfull SHAをmanifestへpinし、read-only dependency treeを使って再検証した後に新bundleを準備する。
 
 ## 完了条件

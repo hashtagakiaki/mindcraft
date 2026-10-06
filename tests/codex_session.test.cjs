@@ -677,10 +677,12 @@ async function main() {
     const ruleAgent = makeAgent('Rules')
     let rule = 'first rule', base, turnCount = 0
     const inputs = []
+    const acceptedRequest = { role: 'user', content: 'Complete the original requested outcome.' }
+    ruleAgent.history.getHistory = () => [acceptedRequest]
     ruleAgent.prompter.withBotRules = async text => text + '\n' + rule
     const ruleRuntime = new CodexRuntime(ruleAgent, { makeSession: ({ execute }) => ({
       open: async instructions => { base = instructions },
-      runTurn: async input => { inputs.push(input); turnCount++; if (turnCount === 1) { rule = 'updated rule'; return { operation: execute('await Promise.resolve();'), messages: [] } } return { operation: null, messages: ['done'] } },
+      runTurn: async input => { inputs.push(input); turnCount++; if (turnCount === 1) { rule = 'updated rule'; ruleAgent.history.getHistory = () => [{ role: 'system', content: 'Later operation context.' }]; return { operation: execute('await Promise.resolve();'), messages: [] } } return { operation: null, messages: ['done'] } },
       close: async () => {}
     }) })
     ruleAgent.codexRuntime = ruleRuntime
@@ -689,6 +691,8 @@ async function main() {
     assert.ok(!base.includes('first rule'))
     assert.ok(inputs[0].endsWith('first rule'))
     assert.ok(inputs[1].endsWith('updated rule'))
+    const resumedRequest = inputs[1].split('CURRENT OPERATOR REQUEST (still active):\n')[1].split('\nCOMPLETED OPERATION RESULT:')[0]
+    assert.deepEqual(JSON.parse(resumedRequest), acceptedRequest, 'resumed decisions retain the accepted goal even when later history changes')
     // Stop/new intent/management/shutdown invalidate retained work; stale result cannot resume.
     for (const reason of ['user', 'superseded', 'management', 'shutdown']) {
       const testAgent = makeAgent('Cancel' + reason)

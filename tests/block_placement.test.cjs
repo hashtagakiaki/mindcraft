@@ -113,6 +113,7 @@ function makeBot({ initial = null, result = { name: 'furnace', properties: { fac
   state.publish = publish
   bot._placeBlockWithOptions = async (reference, face, options) => {
     state.pluginCalls++
+    state.placementPosture = { reference: reference.name, sneak: bot.getControlState('sneak') }
     state.activeMovements = bot.pathfinder.movements
     await bot._genericPlace(reference, face, options)
     const publishResult = () => {
@@ -261,12 +262,25 @@ async function main() {
       assert.equal(ownedResult.result.skillResults[0].status, 'returned_true')
       assert.ok(ownedResult.result.confirmedChanges.some(change => change.quantity === 1))
       assert.equal(bot.state.digs, 0)
+      assert.deepEqual(bot.state.placementPosture, { reference: 'stone', sneak: false }, 'ordinary support keeps normal placement semantics')
       assert.equal(bot.getControlState('sneak'), false, 'owned sneak state restored')
       assert.equal(bot.pathfinder.movements.fixtureOriginal, true, 'original movements restored')
       assert.equal(bot.state.activeMovements.canDig, false, 'navigation cannot dig')
       assert.equal(bot.state.activeMovements.allow1by1towers, false)
       assert.deepEqual(bot.state.activeMovements.scafoldingBlocks, [])
     }
+    bot = makeBot()
+    bot.state.world.set('0,64,0', block('furnace', new Vec3(0, 64, 0), { facing: 'north' }))
+    assert.equal(await invoke(bot), true)
+    assert.deepEqual(bot.state.placementPosture, { reference: 'furnace', sneak: true }, 'interactive support is bypassed by crouching')
+    assert.equal(bot.getControlState('sneak'), false, 'interactive support crouch is restored')
+
+    bot = makeBot()
+    bot.setControlState('sneak', true)
+    assert.equal(await invoke(bot), true)
+    assert.deepEqual(bot.state.placementPosture, { reference: 'stone', sneak: false }, 'ordinary support temporarily releases an existing crouch')
+    assert.equal(bot.getControlState('sneak'), true, 'the original crouch is restored after normal placement')
+
     bot = makeBot()
     bot.entity.position = new Vec3(50, 65, 50)
     bot.pathfinder.goto = async () => { throw new Error('injected unreachable path') }

@@ -29,9 +29,13 @@ log(bot, JSON.stringify(await vision.lookAtBlock(10, 64, -3)));
 
 Native tasks can read `diagnostics.lastTask()` to explain the previous task's exact error and code without replaying it. The bounded snapshot is saved in existing `memory.json`, scoped by Bot name and configured `place_world_id`; no scope, missing records, old format or mismatches return `available:false` with a reason. It retains the latest six operations plus the latest failure, bounded skill results and confirmed/unconfirmed changes with timestamps. Code/error/output limits are 6000/4000/3000 characters; structural entries and depth are also bounded. Raw Bot/plugin changes may be untracked. The initial model input lists availability and task identity; details are read only when requested. Bundle handoff can carry the existing memory file; old trace files are never automatically replayed. Save success is recorded separately in `diagnosticSaveSucceeded`.
 
+Native decision instructions require comparing the entire request with observed state, checking a cause before changing the failing conditions, and verifying again after the last mutation. Resumed turns repeat the accepted request alongside the completed operation result. A failed method or recovery-only inspection is not treated as sufficient evidence of an impossible task. These are model instructions, not an automatic goal validator; the existing task budgets still apply. [The isolated recovery verification](docs/native-goal-recovery-20261006.md) records actual chest repair and occluded harvesting with `gpt-6-luna` at medium effort.
+
 The Node20 `tests/targeted_sdk.test.cjs`, `tests/vision_sdk_validation.test.cjs` and `tests/codex_session.test.cjs` fixtures exercise the real Coder/SES/ActionManager boundary. They cover distinct targets, validation before side effects, unknown/occluded/unreachable targets, cancellation and close, compatibility, and diagnosis in a new task after a saved TypeError.
 
 ### Placement with a requested orientation
+
+Oriented placement uses the pathfinder's existing interactive-support classification to choose posture. It normally stands on ordinary supports, crouches to bypass support activation or when face geometry requires it, and restores the original crouch state while it still owns the operation. This preserves ordinary adjacent-chest merging when placing on a floor; the caller must still observe both chest halves to verify a double chest.
 
 Ask the bot to place a block with a world direction, for example “place a furnace facing north” or “place an upside-down stair facing west.” Generated code uses an options object as the sixth `placeBlock` argument:
 
