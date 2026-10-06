@@ -2,6 +2,8 @@
 
 source `c02dc0237f98de4d99a506578bc9226f7702feaf` の[前回修正](native-context-revision-20261006.md)に残ったグローバル開発AGENTSとmulti-agent指示を除いた。installed CLI 0.160.1の隔離app-serverで確認し、稼働playのpinやbotを変更していない。
 
+この文書はsource `b80e1771c70b2a29e1e6aafd11ea11621177d292` の記録。SDK method名一覧の追加と探索方法の変更は[後続のSDK比較](native-sdk-catalog-20261006.md)に記録する。
+
 ## 実装と配送範囲
 
 `CodexSession` が専用cwd内に0700の一時 `CODEX_HOME` を作る。元の `CODEX_HOME`（未指定なら `~/.codex`）から `auth.json`、`config.toml`、`sessions/` だけをsymlinkで参照する。グローバルAGENTS、AGENTS.override、skills、plugins directoryは共有しない。グローバル設定・AGENTSを編集せず、認証内容を読出し・複製しない。file認証をprocess限定の `cli_auth_credentials_store="file"` で利用する。keyringだけの認証はこの経路の対象外。

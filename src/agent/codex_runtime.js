@@ -16,7 +16,7 @@ const MAX_NATIVE_DEDUPE_IDS = 256;
 const MAX_BLOCK_EDITS_PER_CHECK = 8;
 const MAX_OPERATION_IMAGES = 4;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
-const NATIVE_CONTEXT_PROTOCOL = 4;
+const NATIVE_CONTEXT_PROTOCOL = 5;
 
 export function validateCodexRuntime(profile) {
     if (settings.agent_runtime !== 'codex-session') return null;

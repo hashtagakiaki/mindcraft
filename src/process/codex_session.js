@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { copyFile, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { readFile, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,10 +14,10 @@ const helperPath = fileURLToPath(new URL('./owned_cli.js', import.meta.url));
 
 // JSON-RPC transport only. The existing helper registers and reaps its owned CLI.
 export class CodexSession {
-    constructor({ model, effort = 'medium', record = () => {}, execute, tools = [], readDocumentation,
+    constructor({ model, effort = 'medium', record = () => {}, execute, tools = [], catalog = '', readDocumentation,
         prepareResult = async result => ({ contentItems: [{ type: 'inputText', text: JSON.stringify(result) }], success: result.success !== false }),
         onMessage = () => {}, threadId = null, persistent = false }) {
-        Object.assign(this, { model, effort, record, execute, tools, readDocumentation, prepareResult, onMessage, threadId, persistent });
+        Object.assign(this, { model, effort, record, execute, tools, catalog, readDocumentation, prepareResult, onMessage, threadId, persistent });
         this.pending = new Map();
         this.seq = 0;
         this.closed = false;
@@ -31,7 +31,8 @@ export class CodexSession {
         this.cwd = await mkdtemp(path.join(tmpdir(), 'mindcraft-codex-'));
         await writeFile(path.join(this.cwd, '.mindcraft-codex-owner'), this.requestId, { flag: 'wx', mode: 0o600 });
         // Let Codex discover fixed gameplay guidance through its standard workspace loader.
-        await copyFile(instructionsPath, path.join(this.cwd, 'AGENTS.md'));
+        const instructions = await readFile(instructionsPath, 'utf8');
+        await writeFile(path.join(this.cwd, 'AGENTS.md'), instructions + (this.catalog ? '\n' + this.catalog + '\n' : ''));
         if (signal?.aborted) throw new Error('Session cancelled');
         const args = ['app-server', '--strict-config', '--listen', 'stdio://', '--disable', 'shell_tool', '-c', 'web_search="disabled"',
             '-c', 'features.code_mode.direct_only_tool_namespaces=["functions"]',

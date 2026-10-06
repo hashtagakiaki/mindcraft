@@ -59,6 +59,17 @@ async function main() {
     const { ActionManager } = await load('src/agent/action_manager.js')
     const { Coder } = await load('src/agent/coder.js')
     const { CodexSession } = await load('src/process/codex_session.js')
+    const { createSdkDocumentation } = await load('src/process/codex_sdk.js')
+    const sdkFixtureDocs = [
+      'world.getPosition\nDOCUMENTATION_ONLY_MARKER: get the current position.',
+      'world.getNearestBlocksWhere\nDOCUMENTATION_ONLY_MARKER: search nearby matching blocks.'
+    ]
+    const sdkFixture = createSdkDocumentation(sdkFixtureDocs)
+    assert.deepEqual(sdkFixture.catalog.split('\n').slice(1), sdkFixtureDocs.map(doc => doc.split('\n')[0]))
+    assert.doesNotMatch(sdkFixture.catalog, /DOCUMENTATION_ONLY_MARKER/, 'only method names enter the always-visible catalog')
+    assert.ok(sdkFixture.tools[0].tools.every(tool => tool.deferLoading === true), 'full documentation remains deferred')
+    assert.equal(sdkFixture.readDocumentation('world_getNearestBlocksWhere'), sdkFixtureDocs[1])
+    assert.throws(() => sdkFixture.readDocumentation('world_findBlocks'), /Unknown SDK documentation/, 'invented methods are absent')
     const { History } = await load('src/agent/history.js')
     const { Agent } = await load('src/agent/agent.js')
     const { EventEmitter } = require('node:events')
@@ -346,7 +357,7 @@ async function main() {
     process.env.MINDCRAFT_CODEX_BIN = binary
     const events = [], gate = deferred()
     let calls = 0
-    const session = new CodexSession({ model: 'gpt-6-luna', record: (type, detail) => events.push({ type, detail }), execute: async () => { calls++; return gate.promise } })
+    const session = new CodexSession({ model: 'gpt-6-luna', ...sdkFixture, record: (type, detail) => events.push({ type, detail }), execute: async () => { calls++; return gate.promise } })
     const nativeRequest = session.request.bind(session)
     let threadParams
     session.request = (method, params) => { if (method === 'thread/start') threadParams = params; return nativeRequest(method, params) }
@@ -361,7 +372,11 @@ async function main() {
       }
       await assert.rejects(fs.access(path.join(session.codexHome, 'AGENTS.md')), { code: 'ENOENT' })
       assert.equal(await fs.readFile(path.join(sourceHome, 'auth.json'), 'utf8'), 'fixture refreshed auth', 'refresh writes through the existing auth backend')
-      assert.equal(await fs.readFile(path.join(session.cwd, 'AGENTS.md'), 'utf8'), await fs.readFile(path.join(root, 'src/process/codex/AGENTS.md'), 'utf8'))
+      const loadedInstructions = await fs.readFile(path.join(session.cwd, 'AGENTS.md'), 'utf8')
+      assert.equal(loadedInstructions, (await fs.readFile(path.join(root, 'src/process/codex/AGENTS.md'), 'utf8')) + '\n' + sdkFixture.catalog + '\n')
+      assert.equal(loadedInstructions.split('AVAILABLE MINECRAFT SDK METHODS (names only):').length - 1, 1)
+      assert.doesNotMatch(loadedInstructions, /DOCUMENTATION_ONLY_MARKER/)
+      assert.deepEqual(threadParams.dynamicTools[1], sdkFixture.tools[0])
       let finished = false
       const running = session.runTurn('do work').finally(() => { finished = true })
       await until(() => calls === 1)
@@ -380,11 +395,11 @@ async function main() {
     const originalInstructions = await fs.readFile(botInstructions, 'utf8')
     const refreshedInstructions = originalInstructions + '\nBOT_INSTRUCTIONS_UPDATED_ON_RESUME\n'
     await fs.writeFile(botInstructions, refreshedInstructions)
-    const resumedSession = new CodexSession({ model: 'gpt-6-luna', threadId: session.threadId, execute: async () => ({ success: true }) })
+    const resumedSession = new CodexSession({ model: 'gpt-6-luna', ...sdkFixture, threadId: session.threadId, execute: async () => ({ success: true }) })
     try {
       await resumedSession.open()
       assert.notEqual(resumedSession.codexHome, session.codexHome, 'resume has a fresh isolated home')
-      assert.equal(await fs.readFile(path.join(resumedSession.cwd, 'AGENTS.md'), 'utf8'), refreshedInstructions)
+      assert.equal(await fs.readFile(path.join(resumedSession.cwd, 'AGENTS.md'), 'utf8'), refreshedInstructions + '\n' + sdkFixture.catalog + '\n', 'catalog is restored on resume without embedding full documentation')
       assert.equal(resumedSession.resumed, true, 'saved thread survives removal of the earlier private home')
     } finally { await resumedSession.close(); await fs.writeFile(botInstructions, originalInstructions) }
     // A failed rule refresh must close admission before another queued operation can start.
