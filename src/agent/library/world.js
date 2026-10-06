@@ -12,7 +12,7 @@ export function inspectBlockAt(bot, x, y, z) {
      * @param {number} x - Absolute x, not a relative offset.
      * @param {number} y - Absolute y.
      * @param {number} z - Absolute z.
-     * @returns {object} Loaded state, actual position/name/properties, corner distance, visibility, canDig, observation time and dimension. Unavailable checks are null.
+     * @returns {object} Loaded state, actual position/name/properties, corner distance, eye-to-center interactionDistance, visibility, canDig, observation time and dimension. Unavailable checks are null.
      * @example
      * const target = world.inspectBlockAt(bot, 10, 64, -3);
      * log(bot, JSON.stringify(target));
@@ -27,6 +27,7 @@ export function inspectBlockAt(bot, x, y, z) {
         name: block?.name ?? null, stateId: block?.stateId ?? null,
         properties: block?.getProperties?.() ?? null,
         distance: block ? bot.entity.position.distanceTo(position) : null,
+        interactionDistance: block ? bot.entity.position.offset(0, bot.entity.eyeHeight ?? 1.62, 0).distanceTo(position.offset(0.5, 0.5, 0.5)) : null,
         visible: block && typeof bot.canSeeBlock === 'function' ? bot.canSeeBlock(block) : null,
         canDig: block && typeof bot.canDigBlock === 'function' ? bot.canDigBlock(block) : null,
         observedAt: new Date().toISOString(), dimension: bot.game?.dimension ?? null };

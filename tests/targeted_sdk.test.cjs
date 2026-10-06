@@ -66,6 +66,7 @@ function makeBot() {
   bot.modes = { isOn: () => false, pause() {}, unpause() {}, flushBehaviorLog: () => '' }
   bot.inventory = { slots: [], items: () => [] }
   bot.getControlState = () => false
+  bot.findBlocks = () => []
   bot.blockAt = p => state.unknown ? null : { name: 'chest', type: registry.blocksByName.chest.id,
     position: p.floored(), stateId: 22, getProperties: () => ({ facing: 'north', type: 'single' }) }
   bot.canSeeBlock = () => state.visible
@@ -112,7 +113,7 @@ async function main() {
     await mkdir(path.join(root,'bots/targetFixture/action-code'),{recursive:true})
     agent.prompter = { skill_libary: new SkillLibrary(agent,null) }; await agent.prompter.skill_libary.initSkillLibrary()
     agent.coder = coder; agent.actions = new ActionManager(agent)
-    const run = code => agent.actions.runAction('action:target-fixture', () => coder.executeCode(code), { timeout: 0, outputLimit:16000, taskId:'target-task' })
+    const run = code => { agent.actions.beginUserIntent(); return agent.actions.runAction('action:target-fixture', () => coder.executeCode(code), { timeout: 0, outputLimit:16000, taskId:'target-task' }) }
     const four = await run('for (const x of [0,1,2,3]) { log(bot, JSON.stringify(await skills.inspectChestAt(bot,x,64,0))); }')
     assert.equal(four.success, true)
     const results = four.message.trim().split('\n').filter(x => x.startsWith('{')).map(JSON.parse)
@@ -123,13 +124,26 @@ async function main() {
     assert.deepEqual(bot.state.opened,bot.state.closed)
     for (const code of ['await skills.goToPosition(0,64,0);','await skills.inspectChestAt(bot,NaN,64,0);',
       'await skills.breakBlockAt(bot,0,Infinity,0);','await skills.placeBlock(bot,"stone",0,64,"0");',
-      'await skills.goToPosition(bot,0,64,0,-1);']) {
+      'await skills.goToPosition(bot,0,64,0,-1);','await skills.collectBlock(bot,"oak_log",Infinity);','await skills.collectBlock(bot,"oak_log",1,[null]);']) {
       const before = { opens:bot.state.opened.length,moves:bot.state.moves.length,digs:bot.state.digs.length }
       const result = await run(code)
       assert.equal(result.success,false)
-      assert.match(result.message, /TypeError.*skills\.(goToPosition|inspectChestAt|breakBlockAt|placeBlock)/s)
+      assert.match(result.message, /TypeError.*skills\.(goToPosition|inspectChestAt|breakBlockAt|placeBlock|collectBlock)/s)
       assert.deepEqual({ opens:bot.state.opened.length,moves:bot.state.moves.length,digs:bot.state.digs.length },before)
     }
+    bot.entity.position = new Vec3(4.53,64,0)
+    assert.ok(world.inspectBlockAt(bot,0,64,0).distance>4.5)
+    assert.ok(world.inspectBlockAt(bot,0,64,0).interactionDistance<4.5)
+    const movesBeforeReach=bot.state.moves.length
+    assert.equal((await skills.approachBlock(bot,0,64,0)).status,'ready')
+    assert.equal(bot.state.moves.length,movesBeforeReach)
+    bot.entity.position = new Vec3(0.5,64,0.5)
+    bot.findBlocks = options => {
+      assert.equal(options.matching({name:'oak_log',position:null}),true,'palette prefilter has no position')
+      assert.equal(options.matching({name:'oak_log',position:new Vec3(0,64,0)}),false,'exclude only at positioned pass')
+      return []
+    }
+    assert.equal(await skills.collectBlock(bot,'oak_log',1,[new Vec3(0,64,0)]),false,'no matching blocks')
     bot.state.unknown = true
     const unknown = await skills.inspectChestAt(bot,0,64,0)
     assert.equal(unknown.status,'unknown'); assert.equal(unknown.target.loaded,false)
@@ -158,14 +172,14 @@ async function main() {
     let stopping
     bot.state.onOpen = () => { stopping = agent.actions.stop() }
     const cancelled = await run('await skills.inspectChestAt(bot,0,64,0);')
-    await stopping
+    assert.equal((await stopping).stopped,true)
     assert.equal(cancelled.success,false)
     assert.equal(bot.state.opened.length,opens+1)
     assert.equal(bot.state.closed.length,opens+1)
     bot.state.onOpen = null; bot.interrupt_code = false; bot.state.visible = false
     bot.state.onMove = async () => { stopping = agent.actions.stop() }
     const stop = await run('await skills.inspectChestAt(bot,0,64,0);')
-    await stopping
+    assert.equal((await stopping).stopped,true)
     assert.equal(stop.success,false)
     assert.equal(bot.state.opened.length,opens+1)
     assert.equal(bot.pathfinder.movements,original)

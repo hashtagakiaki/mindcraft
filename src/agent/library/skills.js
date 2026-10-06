@@ -943,6 +943,11 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
      * @example
      * await skills.collectBlock(bot, "oak_log");
      **/
+    if (!bot || typeof bot.blockAt !== 'function' || !bot.entity?.position ||
+        typeof blockType !== 'string' || !blockType.trim() || !Number.isFinite(num) ||
+        (exclude != null && (!Array.isArray(exclude) || exclude.some(p => !p || ![p.x, p.y, p.z].every(Number.isFinite))))) {
+        throw new TypeError('skills.collectBlock(bot, blockType, num = 1, exclude = null): pass bot first, a block name, finite count, and optional coordinate exclusions. Example: await skills.collectBlock(bot, "oak_log", 4); exclude skips positions; use breakBlockAt for an exact target.');
+    }
     if (num < 1) {
         log(bot, `Invalid number of blocks to collect: ${num}.`);
         return false;
@@ -972,6 +977,8 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             if (!blocktypes.includes(block.name)) {
                 return false;
             }
+            // Palette entries have no position; defer coordinate and terrain checks to the positioned pass.
+            if (!block.position) return true;
             if (exclude) {
                 for (let position of exclude) {
                     if (block.position.x === position.x && block.position.y === position.y && block.position.z === position.z) {
@@ -1652,7 +1659,7 @@ export async function approachBlock(bot, x, y, z) {
     validateTargetCall(bot, x, y, z, 'skills.approachBlock(bot, x, y, z)');
     requireActiveTarget(bot);
     let target = world.inspectBlockAt(bot, x, y, z);
-    const ready = t => t.loaded && t.distance <= 4.5 && t.visible === true;
+    const ready = t => t.loaded && t.interactionDistance <= 4.5 && t.visible === true;
     if (!target.loaded) return { status: 'unknown', target, reason: 'Target is not loaded; no navigation started.' };
     if (ready(target)) return { status: 'ready', target };
     const previousMovements = bot.pathfinder.movements;
@@ -1678,8 +1685,9 @@ export async function approachBlock(bot, x, y, z) {
     target = world.inspectBlockAt(bot, x, y, z);
     if (!target.loaded) return { status: 'unknown', target, reason: 'Target unloaded during navigation.' };
     if (ready(target)) return { status: 'ready', target };
-    return { status: 'blocked', target, reason: navigationError ||
-        'No standing position satisfies both reach and Mineflayer block-center visibility. A partial block face may be visible while its center is occluded.' };
+    return { status: 'blocked', target, reason: navigationError || (target.visible !== true
+        ? 'Block center remains occluded. A partial block face may be visible while its center is occluded.'
+        : `Target center is ${target.interactionDistance.toFixed(2)} blocks from the eye; required reach is 4.5.`) };
 }
 
 export async function inspectChestAt(bot, x, y, z) {
