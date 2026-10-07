@@ -3285,6 +3285,408 @@ export async function tendNearbyFarm(bot, options = {}) {
     return result;
 }
 
+const TREE_SEARCH_RADIUS = 24;
+const TREE_MAX_HEIGHT = 24;
+const TREE_MAX_RADIUS = 6;
+const TREE_MAX_LOGS = 192;
+const TREE_REACH = 4.5;
+const TREE_PHYSICS_TIMEOUT_MS = 5000;
+const TREE_JUMP_PLACE_HEIGHT = 1.1;
+const TREE_PILLAR_PACKET_DELAY_MS = 50;
+const TREE_PICKUP_TIMEOUT_MS = 30000;
+const TREE_SOILS = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'rooted_dirt', 'mud', 'moss_block']);
+const TREE_LOGS = ['oak_log', 'birch_log', 'spruce_log', 'jungle_log', 'acacia_log', 'dark_oak_log', 'cherry_log'];
+const TREE_SCAFFOLD_ITEMS = ['dirt', 'cobblestone'];
+const treePositionKey = p => `${p.x},${p.y},${p.z}`;
+const treeAir = b => b && ['air', 'cave_air', 'void_air'].includes(b.name);
+
+function inspectFellingTree(bot, root) {
+    const first = bot.blockAt(root);
+    if (!first || !TREE_LOGS.includes(first.name)) throw new Error('Select a loaded, unstripped overworld tree log.');
+    const logName = first.name;
+    // A supplied trunk block may be above its base.
+    while (bot.blockAt(root.offset(0, -1, 0))?.name === logName) {
+        root = root.offset(0, -1, 0);
+        if (first.position.y - root.y >= TREE_MAX_HEIGHT) throw new Error('Trunk exceeds the tree height limit.');
+    }
+    const soil = bot.blockAt(root.offset(0, -1, 0));
+    if (!soil || !TREE_SOILS.has(soil.name)) throw new Error('Tree base must be observed on natural soil.');
+    const logs = [root];
+    const seen = new Set([treePositionKey(root)]);
+    let naturalLeaves = false;
+    const leafName = logName.replace('_log', '_leaves');
+    for (let index = 0; index < logs.length; index++) {
+        const p = logs[index];
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+            if (dx === 0 && dy === 0 && dz === 0) continue;
+            const neighbor = p.offset(dx, dy, dz);
+            const block = bot.blockAt(neighbor);
+            if (!block) throw new Error('Tree boundary is not loaded; move closer and retry.');
+            if (block.name === leafName && [false, 'false'].includes(block.getProperties?.().persistent)) naturalLeaves = true;
+            if (block.name !== logName || seen.has(treePositionKey(neighbor))) continue;
+            if (Math.abs(neighbor.x - root.x) > TREE_MAX_RADIUS || Math.abs(neighbor.z - root.z) > TREE_MAX_RADIUS ||
+                neighbor.y < root.y || neighbor.y - root.y >= TREE_MAX_HEIGHT || logs.length >= TREE_MAX_LOGS) {
+                throw new Error('Connected logs exceed the single-tree limits.');
+            }
+            const below = bot.blockAt(neighbor.offset(0, -1, 0));
+            if (!below) throw new Error('Tree base boundary is not loaded.');
+            if ((neighbor.x !== root.x || neighbor.z !== root.z) && TREE_SOILS.has(below.name)) {
+                throw new Error('Connected logs have multiple grounded trunks; one tree cannot be distinguished.');
+            }
+            seen.add(treePositionKey(neighbor));
+            logs.push(neighbor);
+        }
+    }
+    if (!naturalLeaves || logs.length < 2) throw new Error('No natural tree canopy was confirmed.');
+    return { root, logName, leafName, logs };
+}
+
+export async function fellTree(bot, options = {}) {
+    /**
+     * Fell exactly one natural single-trunk tree, including tall branched oak, collect its logs, and remove/recover this call's temporary dirt/cobblestone pillars before returning to ground. 木一本の伐採と足場の片づけ。
+     * @param {MinecraftBot} bot - Pass bot first.
+     * @param {object} options - Optional settings; use an object, not positional coordinates.
+     * @param {{x:number,y:number,z:number}} options.startPosition - Any log in the selected trunk; otherwise finds the nearest natural tree within searchRadius.
+     * @param {number} options.searchRadius - Positive search radius, default 24, maximum 64.
+     * @returns {Promise<object>} status complete/partial/cancelled/blocked/not_found, tree, logsBroken/logsCollected, scaffoldPlaced/scaffoldRemoved/scaffoldRecovered, remainingLogs, leftoverScaffolds, grounded, cleanupRequired and reason. Complete requires server-observed removal, this bot's drop pickups and ground return. Bring an axe, free inventory space and enough dirt/cobblestone for the height. Rejects connected multiple trunks (including 2x2 trees), unloaded boundaries and logs without natural leaves. Clears only obstructing natural leaves; remaining leaves decay normally. Stop does not initiate cleanup mutations; use returned leftoverScaffolds to recover after cancellation.
+     * @example
+     * log(bot, JSON.stringify(await skills.fellTree(bot)));
+     * log(bot, JSON.stringify(await skills.fellTree(bot, { startPosition: { x: 10, y: 64, z: -4 } })));
+     **/
+    if (!bot?.entity?.position || typeof bot.blockAt !== 'function' || options == null ||
+        typeof options !== 'object' || Array.isArray(options)) throw new TypeError('skills.fellTree(bot, options = {}): pass bot first and an options object.');
+    const { startPosition = null, searchRadius = TREE_SEARCH_RADIUS } = options;
+    if (!Number.isFinite(searchRadius) || searchRadius <= 0 || searchRadius > 64 ||
+        (startPosition != null && ![startPosition.x, startPosition.y, startPosition.z].every(Number.isFinite))) {
+        throw new TypeError('fellTree needs finite startPosition coordinates and searchRadius in (0, 64].');
+    }
+    const context = getActionContext(bot);
+    const cancelled = () => isActionCancelled(bot, context);
+    const active = () => { if (cancelled()) throw new Error('Tree felling cancelled.'); };
+    const result = { status: 'blocked', tree: null, logsBroken: 0, logsCollected: 0,
+        scaffoldPlaced: 0, scaffoldRemoved: 0, scaffoldRecovered: 0,
+        remainingLogs: [], leftoverScaffolds: [], grounded: false, cleanupRequired: false, reason: null };
+    let tree;
+    try {
+        active();
+        if (startPosition) tree = inspectFellingTree(bot, new Vec3(startPosition.x, startPosition.y, startPosition.z).floored());
+        else {
+            const candidates = world.getNearestBlocksWhere(bot, b => TREE_LOGS.includes(b.name), searchRadius, 128);
+            let lastReason = null;
+            for (const candidate of candidates) {
+                try { tree = inspectFellingTree(bot, candidate.position); break; }
+                catch (error) { lastReason = String(error.message); }
+            }
+            if (!tree) { result.status = 'not_found'; result.reason = lastReason || 'No nearby natural tree logs.'; }
+        }
+    } catch (error) { result.reason = String(error.message); }
+    if (!tree) {
+        if (cancelled()) result.status = 'cancelled';
+        log(bot, JSON.stringify(result));
+        return result;
+    }
+    result.tree = { root: { ...tree.root }, logName: tree.logName, logCount: tree.logs.length };
+    const remaining = () => tree.logs.filter(p => {
+        const block = bot.blockAt(p);
+        return !treeAir(block) && !scaffolds.some(entry => !entry.removed &&
+            treePositionKey(entry.position) === treePositionKey(p) && block?.name === entry.name);
+    });
+    const originalMovements = bot.pathfinder.movements;
+    const movements = new pf.Movements(bot);
+    movements.canDig = false;
+    movements.canPlaceOn = false;
+    movements.scafoldingBlocks = []; // Pathfinder bridges also consume these items.
+    movements.allow1by1towers = false;
+    movements.allowParkour = false;
+    movements.allowFreeMotion = false;
+    const scaffolds = [];
+    const broken = [];
+    const drops = new Map();
+    let column = null;
+    let leavesCleared = 0;
+    const isNaturalLeaf = block => block?.name === tree.leafName && [false, 'false'].includes(block.getProperties?.().persistent);
+    const eye = () => bot.entity.position.offset(0, bot.entity.eyeHeight ?? 1.62, 0);
+    const reachable = p => eye().distanceTo(p.offset(0.5, 0.5, 0.5)) <= TREE_REACH;
+    const onDrop = entity => {
+        const item = entity.getDroppedItem?.();
+        if (!item || drops.has(entity.id)) return;
+        const source = broken.find(entry => entry.name === item.name && entity.position.distanceTo(entry.position.offset(0.5, 0.5, 0.5)) <= 1);
+        if (source) drops.set(entity.id, { entity, count: item.count, kind: source.kind, collected: false });
+    };
+    const pendingWork = () => [...remaining(), ...[...drops.values()]
+        .filter(drop => !drop.collected && bot.entities[drop.entity.id] && drop.entity.position.y > tree.root.y + 2)
+        .map(drop => drop.entity.position.floored())];
+    const onCollect = (collector, entity) => {
+        if (collector.id !== bot.entity.id) return;
+        const drop = drops.get(entity.id);
+        if (drop && !drop.collected) {
+            drop.collected = true;
+            // Item entities may merge after itemDrop; use their current server metadata.
+            const count = entity.getDroppedItem?.()?.count ?? drop.count;
+            if (drop.kind === 'log') result.logsCollected += count;
+            else result.scaffoldRecovered += count;
+        }
+    };
+    const waitState = async predicate => {
+        const deadline = Date.now() + TREE_PHYSICS_TIMEOUT_MS;
+        while (!predicate()) {
+            active();
+            if (Date.now() >= deadline) throw new Error('Tree movement/block confirmation timed out.');
+            await waitForActionOrTimeout(bot, context, 25);
+        }
+        active();
+    };
+    const navigate = async p => {
+        active();
+        const goal = new pf.goals.GoalBlock(p.x, p.y, p.z);
+        if (!await goToGoal(bot, goal, movements)) throw new Error(`Cannot reach tree work position ${p}.`);
+        active();
+    };
+    const dig = async (p, name, kind) => {
+        active();
+        let block = bot.blockAt(p);
+        if (treeAir(block)) return false;
+        if (block?.name !== name || !reachable(p) || !bot.canDigBlock(block) || !bot.canSeeBlock(block)) throw new Error(`Cannot safely dig expected ${name} at ${p}.`);
+        await bot.tool.equipForBlock(block);
+        active();
+        block = bot.blockAt(p);
+        if (block?.name !== name) throw new Error(`Tree target changed at ${p}.`);
+        const entry = { position: p, name, kind };
+        if (kind !== 'leaf') broken.push(entry);
+        try {
+            await bot.dig(block, true);
+            await waitState(() => treeAir(bot.blockAt(p)));
+        } finally {
+            // Cancellation can arrive after the server removed the block.
+            // Preserve that observation without starting another mutation.
+            if (treeAir(bot.blockAt(p))) {
+                if (kind === 'log') result.logsBroken++;
+                if (kind === 'scaffold') result.scaffoldRemoved++;
+                recordConfirmation({ phase: kind === 'scaffold' ? 'cleanup' : 'felling', quantity: 1, unit: 'block',
+                    target: { name, position: { ...p } }, evidence: 'loaded server block state became air' });
+            }
+        }
+        return true;
+    };
+    // A visible branch may have natural leaves between its center and the eye.
+    // Only remove the ray's first obstruction when it belongs to this tree.
+    const clearRay = async (p, seen = new Set()) => {
+        const key = treePositionKey(p);
+        if (seen.has(key) || seen.size >= TREE_MAX_HEIGHT) return false;
+        seen.add(key);
+        const center = p.offset(0.5, 0.5, 0.5);
+        const origin = eye();
+        const delta = center.minus(origin);
+        if (delta.norm() === 0) return false;
+        const hit = bot.world.raycast(origin, delta.scaled(1 / delta.norm()), delta.norm());
+        if (!hit || treePositionKey(hit.position) === key) return false;
+        const block = bot.blockAt(hit.position);
+        const ownLog = block?.name === tree.logName && tree.logs.some(log => treePositionKey(log) === treePositionKey(hit.position));
+        if (!ownLog && !isNaturalLeaf(block)) return false;
+        if (!reachable(hit.position)) return false;
+        // The first face intersecting the branch ray does not necessarily have
+        // a visible center. Resolve that block's own ray before trying to dig it.
+        if (!bot.canSeeBlock(block)) return await clearRay(hit.position, seen);
+        if (ownLog) return await dig(hit.position, tree.logName, 'log');
+        if (leavesCleared >= TREE_MAX_LOGS * 2) return false;
+        await dig(hit.position, block.name, 'leaf');
+        leavesCleared++;
+        return true;
+    };
+    const harvestReachable = async () => {
+        let progress;
+        do {
+            progress = false;
+            for (const p of remaining().sort((a, b) => a.y - b.y)) {
+                active();
+                if (bot.blockAt(p)?.name !== tree.logName) throw new Error(`Selected log changed at ${p}.`);
+                if (!reachable(p)) continue;
+                if (await clearRay(p)) { progress = true; break; }
+                if (!bot.canSeeBlock(bot.blockAt(p))) continue;
+                if (await dig(p, tree.logName, 'log')) progress = true;
+            }
+        } while (progress);
+    };
+    const clearColumnCell = async p => {
+        while (await clearRay(p)) { active(); }
+        const block = bot.blockAt(p);
+        if (treeAir(block)) return;
+        if (isNaturalLeaf(block) && leavesCleared < TREE_MAX_LOGS * 2) {
+            await dig(p, block.name, 'leaf'); leavesCleared++;
+        } else if (block?.name === tree.logName && tree.logs.some(log => treePositionKey(log) === treePositionKey(p))) {
+            await dig(p, tree.logName, 'log');
+        } else throw new Error(`Unowned obstruction in tree pillar at ${p}.`);
+    };
+    const settleDrop = async drop => {
+        let previous = drop.entity.position.clone();
+        let stableSince = Date.now();
+        const deadline = Date.now() + TREE_PHYSICS_TIMEOUT_MS;
+        while (!drop.collected && bot.entities[drop.entity.id]) {
+            active();
+            await waitForActionOrTimeout(bot, context, 100);
+            const current = drop.entity.position;
+            if (current.distanceTo(previous) > 0.05) stableSince = Date.now();
+            else if (Date.now() - stableSince >= 300) return;
+            if (Date.now() >= deadline) return;
+            previous = current.clone();
+        }
+    };
+    const releaseCanopyDrops = async () => {
+        // Branch drops can rest on leaves. Release them while we still have
+        // height access, rather than dismantling the pillar and losing reach.
+        for (const drop of drops.values()) {
+            if (drop.collected || !bot.entities[drop.entity.id]) continue;
+            await settleDrop(drop);
+            while (!drop.collected && bot.entities[drop.entity.id]) {
+                active();
+                const supportPosition = drop.entity.position.offset(0, -0.1, 0).floored();
+                const support = bot.blockAt(supportPosition);
+                if (!isNaturalLeaf(support) || !reachable(supportPosition) || leavesCleared >= TREE_MAX_LOGS * 2) break;
+                while (await clearRay(supportPosition)) { active(); }
+                if (!bot.canSeeBlock(bot.blockAt(supportPosition))) break;
+                await dig(supportPosition, tree.leafName, 'leaf');
+                leavesCleared++;
+                await settleDrop(drop);
+            }
+        }
+    };
+    const descend = async () => {
+        if (!column) return;
+        await withSkillPhase('cleanup', async () => {
+            for (const entry of [...scaffolds].reverse()) {
+                if (entry.removed) continue;
+                active();
+                if (Math.abs(bot.entity.position.x - entry.position.x - 0.5) > 0.4 ||
+                    Math.abs(bot.entity.position.z - entry.position.z - 0.5) > 0.4) throw new Error('Bot left its owned pillar; cleanup requires a new safe approach.');
+                if (await dig(entry.position, entry.name, 'scaffold')) entry.removed = true;
+                else entry.removed = treeAir(bot.blockAt(entry.position));
+                await waitState(() => bot.entity.onGround && bot.entity.position.y <= entry.position.y + 0.1);
+            }
+        });
+        column = null;
+    };
+    bot.on('itemDrop', onDrop);
+    bot.on('playerCollect', onCollect);
+    try {
+        const requiredHeight = Math.max(...tree.logs.map(p => p.y)) - tree.root.y;
+        const available = TREE_SCAFFOLD_ITEMS.reduce((sum, name) => sum + inventoryItemCount(bot, name), 0);
+        if (requiredHeight > 4 && available < requiredHeight) throw new Error(`Bring at least ${requiredHeight} dirt/cobblestone blocks for this tree (have ${available}).`);
+        if (bot.inventory.emptySlotCount() < 2) throw new Error('Need two free inventory slots for logs and recovered materials.');
+        await navigate(tree.root.offset(1, 0, 0));
+        await harvestReachable();
+        await releaseCanopyDrops();
+        const attemptedColumns = new Set();
+        while (pendingWork().length) {
+            const target = pendingWork().sort((a, b) => a.y - b.y)[0];
+            let base = tree.root;
+            if (attemptedColumns.has(`${base.x},${base.z}`)) base = new Vec3(target.x, tree.root.y, target.z);
+            if (attemptedColumns.has(`${base.x},${base.z}`)) throw new Error('Remaining branches or canopy drops are unreachable from the selected pillars.');
+            attemptedColumns.add(`${base.x},${base.z}`);
+            if (!TREE_SOILS.has(bot.blockAt(base.offset(0, -1, 0))?.name)) throw new Error('Branch pillar has no same-level natural ground.');
+            // The base must already be clear; approach from the ground without auto-digging.
+            await clearColumnCell(base);
+            await clearColumnCell(base.offset(0, 1, 0));
+            await navigate(base);
+            column = base;
+            const topY = Math.max(...pendingWork().map(p => p.y));
+            while (pendingWork().length && bot.entity.position.y < topY) {
+                await harvestReachable();
+                if (!remaining().length) await releaseCanopyDrops();
+                if (!pendingWork().length) break;
+                const feet = new Vec3(base.x, Math.round(bot.entity.position.y), base.z);
+                await clearColumnCell(feet.offset(0, 1, 0));
+                await clearColumnCell(feet.offset(0, 2, 0));
+                if (!treeAir(bot.blockAt(feet))) throw new Error('Pillar placement target is no longer air.');
+                const item = bot.inventory.items().find(stack => TREE_SCAFFOLD_ITEMS.includes(stack.name));
+                if (!item) throw new Error('Ran out of recoverable pillar material.');
+                const support = bot.blockAt(feet.offset(0, -1, 0));
+                if (support?.boundingBox !== 'block') throw new Error('Pillar support is not a full block.');
+                active();
+                await bot.equip(item, 'hand');
+                active();
+                // Finish turning before jumping: a gradual turn during placeBlock
+                // can otherwise consume the brief window above the target's hitbox.
+                await bot.lookAt(support.position.offset(0.5, 1, 0.5));
+                active();
+                const entry = { position: feet, name: item.name, removed: false };
+                // Track even ambiguous placement so an error cannot silently abandon a placed block.
+                scaffolds.push(entry);
+                bot.setControlState('jump', true);
+                try {
+                    await waitState(() => bot.entity.position.y >= feet.y + TREE_JUMP_PLACE_HEIGHT);
+                    await waitForActionOrTimeout(bot, context, TREE_PILLAR_PACKET_DELAY_MS);
+                    active();
+                    await bot.placeBlock(support, new Vec3(0, 1, 0));
+                    await waitState(() => bot.blockAt(feet)?.name === item.name);
+                } finally {
+                    bot.setControlState('jump', false);
+                    if (bot.blockAt(feet)?.name === item.name) {
+                        result.scaffoldPlaced++;
+                        recordConfirmation({ phase: 'pillar', quantity: 1, unit: 'block', target: { name: item.name, position: { ...feet } }, evidence: 'loaded server block state matches placed pillar' });
+                    } else if (treeAir(bot.blockAt(feet))) scaffolds.pop();
+                }
+                await waitState(() => bot.entity.onGround && Math.abs(bot.entity.position.y - feet.y - 1) < 0.1);
+            }
+            await harvestReachable();
+            await releaseCanopyDrops();
+            await descend();
+        }
+    } catch (error) {
+        result.reason = String(error.message);
+    } finally {
+        bot.setControlState('jump', false);
+        if (!cancelled()) {
+            try { await releaseCanopyDrops(); }
+            catch (error) { result.reason = [result.reason, `Canopy pickup: ${error.message}`].filter(Boolean).join('; '); }
+        }
+        if (!cancelled()) {
+            try { await descend(); }
+            catch (error) { result.reason = [result.reason, `Cleanup: ${error.message}`].filter(Boolean).join('; '); }
+        }
+        if (!cancelled() && !scaffolds.some(entry => !treeAir(bot.blockAt(entry.position)))) {
+            try {
+                // Collect only drops produced by our recorded digs; movement cannot make new terrain changes.
+                const deadline = Date.now() + TREE_PICKUP_TIMEOUT_MS;
+                await waitForActionOrTimeout(bot, context, 300);
+                const pickupOrder = [...drops.values()].sort((a, b) =>
+                    bot.entity.position.distanceTo(a.entity.position) - bot.entity.position.distanceTo(b.entity.position));
+                for (const drop of pickupOrder) {
+                    active();
+                    if (result.logsCollected >= result.logsBroken && result.scaffoldRecovered >= result.scaffoldPlaced) break;
+                    if (drop.collected || !bot.entities[drop.entity.id]) continue;
+                    if (Date.now() >= deadline) throw new Error('Owned drop pickup exceeded its time budget.');
+                    await settleDrop(drop);
+                    if (drop.collected || !bot.entities[drop.entity.id]) continue;
+                    // Follow the actual item, not the corner of its floored block:
+                    // reaching that corner can still leave the drop outside pickup reach.
+                    await goToGoal(bot, new pf.goals.GoalFollow(drop.entity, 1), movements);
+                    active();
+                    await waitForActionOrTimeout(bot, context, 300);
+                }
+            } catch (error) { result.reason ||= `Pickup: ${error.message}`; }
+        }
+        bot.removeListener('itemDrop', onDrop);
+        bot.removeListener('playerCollect', onCollect);
+        if (originalMovements && !cancelled()) bot.pathfinder.setMovements(originalMovements);
+    }
+    result.remainingLogs = remaining().map(p => ({ ...p }));
+    result.leftoverScaffolds = scaffolds.filter(entry => !treeAir(bot.blockAt(entry.position)))
+        .map(entry => ({ position: { ...entry.position }, name: entry.name }));
+    const underfoot = bot.blockAt(bot.entity.position.offset(0, -0.1, 0).floored());
+    result.grounded = !!bot.entity.onGround && !!underfoot && TREE_SOILS.has(underfoot.name);
+    result.cleanupRequired = result.leftoverScaffolds.length > 0;
+    result.status = cancelled() ? 'cancelled' : !result.remainingLogs.length && !result.cleanupRequired && result.grounded &&
+        result.logsCollected >= result.logsBroken && result.scaffoldRecovered >= result.scaffoldPlaced ? 'complete' : 'partial';
+    if (result.status === 'complete') result.reason = null;
+    if (result.status !== 'complete') {
+        result.reason ||= 'Logs, pillar pickup, or safe ground return remain unconfirmed.';
+        recordUncertainty({ phase: 'tree-felling', target: result.tree, reason: result.reason,
+            remainingLogs: result.remainingLogs, leftoverScaffolds: result.leftoverScaffolds });
+    }
+    log(bot, `Tree felling: ${JSON.stringify(result)}`);
+    return result;
+}
+
 // Replace exported bindings so internal delegation and direct command callers share ownership.
 craftRecipe = trackSkill("skills.craftRecipe", craftRecipe);
 wait = trackSkill("skills.wait", wait);
@@ -3327,3 +3729,5 @@ goToSurface = trackSkill("skills.goToSurface", goToSurface);
 useToolOn = trackSkill("skills.useToolOn", useToolOn);
 useToolOnBlock = trackSkill("skills.useToolOnBlock", useToolOnBlock);
 tendNearbyFarm = trackSkill("skills.tendNearbyFarm", tendNearbyFarm);
+
+fellTree = trackSkill("skills.fellTree", fellTree);

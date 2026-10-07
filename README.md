@@ -33,6 +33,25 @@ Native decision instructions require comparing the entire request with observed 
 
 The Node20 `tests/targeted_sdk.test.cjs`, `tests/vision_sdk_validation.test.cjs` and `tests/codex_session.test.cjs` fixtures exercise the real Coder/SES/ActionManager boundary. They cover distinct targets, validation before side effects, unknown/occluded/unreachable targets, cancellation and close, compatibility, and diagnosis in a new task after a saved TypeError.
 
+### Fell one tree and clean up its pillars
+
+Use `skills.fellTree(bot)` for a complete single-tree job rather than collecting a requested number of logs:
+
+```js
+const result = await skills.fellTree(bot, {
+    startPosition: { x: 10, y: 64, z: -4 }
+});
+log(bot, JSON.stringify(result));
+```
+
+`startPosition` selects a trunk log; omission searches within `searchRadius` (default 24, maximum 64). The skill follows touching same-species logs, including diagonal branches in tall oak, and verifies natural leaves and soil before cutting. It rejects unloaded boundaries, connected trees with different grounded trunks, and 2×2 trunks. Its limits are 24 blocks of height, 6 blocks of horizontal reach from the root, and 192 connected logs. Supported log families are oak, birch, spruce, jungle, acacia, dark oak and cherry; only single-trunk trees qualify.
+
+Bring an axe, two free inventory slots, and dirt/cobblestone. Taller trees require a reserve at least as large as the highest log's height above the root. The skill climbs temporary single-block pillars, clears obstructing natural leaves, and removes pillars from the top down to return to soil. A branch pillar needs natural ground at the root's height. Pathfinder digging, bridging and towers are disabled: only the selected logs, obstructing matching natural leaves, and this call's recorded pillar blocks may be dug. Leaves that do not obstruct work remain to decay naturally; planting a replacement sapling is a separate task.
+
+`status: "complete"` requires all selected logs and placed pillar blocks to be observed removed, this bot's log/pillar drop pickups to be confirmed, and the bot to be back on ground. Inspect `logsBroken`, `logsCollected`, `scaffoldPlaced`, `scaffoldRemoved`, `scaffoldRecovered`, `remainingLogs`, `leftoverScaffolds`, `grounded` and `reason`. Item merging uses the drop's current metadata at collection time. Failure attempts pillar cleanup while the operation is still active. Stop starts no further world changes; a cancelled result can contain pillar positions needing later recovery. Partial work is never reported as complete.
+
+The offline `tests/tree_felling.test.cjs` covers ordinary and leaf-obscured tall branched trees, scope/load/material checks, merged drops, failed-placement cleanup and cancellation. Live verification details are in [the tree-felling record](docs/tree-felling-20261007.md). Adding source does not activate a new skill in an already-running manual-play bundle.
+
 ### Placement with a requested orientation
 
 Oriented placement uses the pathfinder's existing interactive-support classification to choose posture. It normally stands on ordinary supports, crouches to bypass support activation or when face geometry requires it, and restores the original crouch state while it still owns the operation. This preserves ordinary adjacent-chest merging when placing on a floor; the caller must still observe both chest halves to verify a double chest.
