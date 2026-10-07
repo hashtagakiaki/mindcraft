@@ -38,6 +38,7 @@ import { createRequire } from 'node:module';
 const registry = createRequire(import.meta.url)('minecraft-data')('1.21.1');
 export function getBlockId(name) { return registry.blocksByName[name]?.id ?? null; }
 export function getItemId(name) { return registry.itemsByName[name]?.id ?? null; }
+export function getAllBlockIds(ignore) { return Object.values(registry.blocksByName).filter(b => !ignore.includes(b.name)).map(b => b.id); }
 export function mustCollectManually() { return false; }
 `)
   for (const relative of [
@@ -45,9 +46,9 @@ export function mustCollectManually() { return false; }
     'src/agent/library/crafting_sync.js', 'src/agent/library/mining_sync.js',
     'src/agent/library/operation_context.js', 'src/agent/library/world.js',
     'src/agent/library/index.js', 'src/agent/library/skill_library.js',
-    'src/agent/library/sdk_capabilities.js', 'src/agent/library/lockdown.js',
+    'src/agent/library/sdk_capabilities.js', 'src/agent/library/lockdown.js', 'src/agent/library/native_sdk.js',
     'src/agent/commands/actions.js', 'src/agent/commands/queries.js',
-    'src/agent/commands/index.js', 'src/agent/coder.js', 'src/agent/action_manager.js',
+    'src/agent/commands/index.js', 'src/agent/coder.js', 'src/agent/action_manager.js', 'src/agent/task_diagnostics.js',
     'bots/execTemplate.js', 'bots/lintTemplate.js', 'eslint.config.js'
   ]) await write(root, relative, await readFile(path.join(repo, relative)))
 }
@@ -185,6 +186,59 @@ async function main() {
     assert.equal(bot.pathfinder.movements,original)
     bot.state.onMove = null; bot.interrupt_code=false
     assert.equal(world.inspectBlockAt(bot,1.8,64.2,0.9).position.x,1)
+
+    // Replay the observed bot/argument mistakes through the real native boundary.
+    const settings = (await load('src/agent/settings.js')).default
+    const { getNativeSdkDocs } = await load('src/agent/library/native_sdk.js')
+    const { createTaskDiagnostics, appendOperationDiagnostic } = await load('src/agent/task_diagnostics.js')
+    const legacyNames = (await agent.prompter.skill_libary.getAllSkillDocs()).map(doc => doc.split('\n')[0])
+    Object.assign(settings, { agent_runtime:'codex-session', codex_session:{max_search_radius:16} })
+    const nativeDocs = getNativeSdkDocs(settings)
+    const nativeNames = new Set(nativeDocs.map(doc=>doc.split('\n')[0]))
+    for (const name of legacyNames) assert.ok(nativeNames.has(name), `native catalog preserves ${name}`)
+    assert.ok(nativeDocs.every(doc=>!doc.includes('(bot,')), 'native examples use the public argument contract')
+    let scans=0, rpcCalls=0, looks=0
+    bot.state.visible=true
+    bot.findBlocks = () => { scans++; return [new Vec3(0,64,0)] }
+    agent.places = {sdk:{async find(text, options) {
+      rpcCalls++; assert.equal(typeof text,'string'); return JSON.stringify({text,kind:options.kind})
+    }}}
+    agent.vision_interpreter = { async lookAtPosition() { looks++; return 'looked' } }
+    const goodNative = await run('await Promise.resolve(); log(bot,JSON.stringify(world.getPosition())); log(bot,await places.find({text:"chest",kind:"storage"})); log(bot,JSON.stringify(world.inspectBlockAt({position:{x:0,y:64,z:0}})));')
+    assert.equal(goodNative.success,true)
+    assert.match(goodNative.message,/"text":"chest"/)
+    assert.match(goodNative.message,/"loaded":true/)
+    assert.equal(rpcCalls,1, 'the main places argument uses the native facade too')
+    const counts=()=>({scans,rpcCalls,looks,opens:bot.state.opened.length,moves:bot.state.moves.length,digs:bot.state.digs.length})
+    for (const code of [
+      'await Promise.resolve(); world.getNearbyBlockTypes(12);',
+      'await skills.goToPosition(bot,0,64,0);',
+      'await skills.goToPosition({position:{x:"0",y:64,z:0}});',
+      'await skills.inspectChestAt({position:{x:0,y:NaN,z:0}});',
+      'await skills.breakBlockAt({position:{x:0,y:Infinity,z:0}});',
+      'await skills.placeBlock({blockType:"chest",position:{x:0,y:64}});',
+      'await skills.putInChest({itemName:"oak_log",quantity:0});',
+      'await places.find({text:"chest",unknown:true});',
+      'await vision.lookAtPosition({position:{x:0,y:NaN,z:0}});',
+      'await Promise.resolve(); world.getNearestBlocks({blockTypes:["chest"],radius:17});',
+    ]) {
+      const before=counts(); const failed=await run(code)
+      assert.equal(failed.success,false,code)
+      assert.equal(failed.argumentError.code,'INVALID_ARGUMENT')
+      assert.ok(failed.argumentError.method && failed.argumentError.field && failed.argumentError.example)
+      assert.doesNotMatch(failed.message,/bot\.findBlocks is not a function|reading 'entity'/)
+      assert.deepEqual(counts(),before,'invalid arguments fail before the underlying operation')
+      const snapshot=createTaskDiagnostics(agent,'argument-task')
+      appendOperationDiagnostic(snapshot,code,failed)
+      assert.equal(snapshot.lastFailure.argumentError.method,failed.argumentError.method)
+      assert.equal(snapshot.lastFailure.argumentError.example,failed.argumentError.example)
+    }
+    const corrected=await run('await Promise.resolve(); log(bot,JSON.stringify(world.getNearbyBlockTypes({radius:12}))); log(bot,JSON.stringify(world.getNearestBlocks({blockTypes:["chest"],radius:12,limit:1})));')
+    assert.equal(corrected.success,true,'corrected calls work in the same execution environment')
+    assert.equal(scans,2)
+    assert.equal(world.getPosition(bot).x,bot.entity.position.x,'internal bot-first API still works')
+    settings.agent_runtime='legacy'
+    assert.equal((await run('await Promise.resolve(); log(bot,JSON.stringify(world.getPosition(bot)));')).success,true,'legacy generated code retains its original contract')
     console.log('Targeted SDK real Coder/SES/ActionManager fixture passed')
   } finally { process.chdir(previous); await rm(root,{recursive:true,force:true}) }
 }

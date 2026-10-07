@@ -43,7 +43,7 @@ export class Coder {
         check();
         if (error) throw new Error(error);
         this.agent.actions.setPhase('executing', context?.actionId);
-        await trackSkill('generated_code', () => staged.func.main(this.agent.bot, guardSdk(this.agent.places?.sdk, check)))();
+        await trackSkill('generated_code', () => staged.func.main(this.agent.bot, staged.places))();
         check();
     }
 
@@ -157,7 +157,9 @@ export class Coder {
         while ((match = skillRegex.exec(codeNoComments)) !== null) {
             skills.push(match[1]);
         }
-        const allDocs = await this.agent.prompter.skill_libary.getAllSkillDocs();
+        const allDocs = settings.agent_runtime === 'codex-session'
+            ? (await import('./library/native_sdk.js')).getNativeSdkDocs(settings)
+            : await this.agent.prompter.skill_libary.getAllSkillDocs();
         const knownSkills = new Set(allDocs.map(doc => doc.split('\n')[0]));
         const missingSkills = skills.filter(skill => !knownSkills.has(skill));
         if (missingSkills.length > 0) {
@@ -223,26 +225,33 @@ export class Coder {
         // Note that the code may be able to modify the exposed objects.
         // Guard each SDK entry, including inline compound code after an await.
         const guarded = sdk => guardSdk(sdk, check);
-        const compartment = makeCompartment({
-            skills: guarded(configureGeneratedCodeFalseMode(skills, settings.generated_code_fail_on_false)),
-            log: skills.log,
-            world: guarded(world),
-            vision: guarded({
+        const bindings = {
+            skills: configureGeneratedCodeFalseMode(skills, settings.generated_code_fail_on_false),
+            world,
+            vision: {
                 lookAtPlayer: trackSkill('vision.lookAtPlayer', (playerName, direction) => this.agent.vision_interpreter.lookAtPlayer(playerName, direction)),
                 lookAtBlock: trackSkill('vision.lookAtBlock', (x, y, z) => this.agent.vision_interpreter.lookAtBlock(x, y, z)),
                 lookAtPosition: trackSkill('vision.lookAtPosition', (x, y, z) => this.agent.vision_interpreter.lookAtPosition(x, y, z)),
-            }),
-            communication: settings.agent_runtime === 'codex-session' ? guarded({
+            },
+            communication: settings.agent_runtime === 'codex-session' ? {
                 sendToBot: trackSkill('communication.sendToBot', (recipient, message) => {
                     if (!this.agent.codexRuntime) throw new Error('Native communication is unavailable outside an active Codex task');
                     return this.agent.codexRuntime.sendToBot(recipient, message);
                 }),
-            }) : undefined,
-            diagnostics: settings.agent_runtime === 'codex-session' ? guarded({
+            } : undefined,
+            diagnostics: settings.agent_runtime === 'codex-session' ? {
                 lastTask: () => this.agent.codexRuntime?.getLastTaskDiagnostics()
                     ?? { available: false, reason: 'native task diagnostic unavailable' },
-            }) : undefined,
-            places: guarded(this.agent.places?.sdk),
+            } : undefined,
+            places: this.agent.places?.sdk,
+        };
+        const api = settings.agent_runtime === 'codex-session'
+            ? (await import('./library/native_sdk.js')).createNativeSdk({ bot: this.agent.bot, ...bindings }, settings)
+            : bindings;
+        const endowments = Object.fromEntries(Object.entries(api).map(([namespace, sdk]) => [namespace, guarded(sdk)]));
+        const compartment = makeCompartment({
+            ...endowments,
+            log: skills.log,
             Vec3,
         });
         const mainFn = compartment.evaluate(src);
@@ -251,7 +260,7 @@ export class Coder {
             console.error('Error writing code execution file: ' + write_result);
             return null;
         }
-        return { func:{main: mainFn}, src_lint_copy: src_lint_copy };
+        return { func:{main: mainFn}, src_lint_copy: src_lint_copy, places: endowments.places };
     }
 
     _sanitizeCode(code) {

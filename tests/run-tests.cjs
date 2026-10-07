@@ -613,6 +613,7 @@ async function main() {
     return
   }
   execFileSync(node, [path.join(__dirname, 'tree_felling.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'native_sdk.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'codex_session.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'ollama_contract.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'state_poller.test.cjs')], { stdio: 'inherit' })

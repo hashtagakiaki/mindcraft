@@ -64,6 +64,7 @@ export function appendOperationDiagnostic(snapshot, code, result) {
         codeTruncated: String(code).length > 6000,
         executionStatus: result.executionStatus ?? null, success: result.success ?? null,
         error: text(failure, 4000),
+        ...(result.argumentError ? { argumentError: bounded(result.argumentError) } : {}),
         output: text(result.message, 3000), skillResults,
         confirmedChanges: bounded(result.confirmedChanges ?? []),
         unconfirmedChanges: bounded(result.unconfirmedChanges ?? []),

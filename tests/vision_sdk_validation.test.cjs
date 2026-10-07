@@ -26,7 +26,7 @@ async function main() {
     for (const relative of [
       'src/agent/coder.js', 'src/agent/action_manager.js',
       'src/agent/library/operation_context.js', 'src/agent/library/lockdown.js',
-      'src/agent/library/skill_library.js', 'src/agent/library/sdk_capabilities.js',
+      'src/agent/library/skill_library.js', 'src/agent/library/sdk_capabilities.js', 'src/agent/library/native_sdk.js',
       'src/agent/vision/vision_interpreter.js', 'src/agent/connection_handler.js',
       'src/agent/commands/actions.js', 'src/agent/commands/queries.js', 'src/agent/commands/index.js',
       'bots/execTemplate.js', 'bots/lintTemplate.js', 'eslint.config.js',
@@ -101,6 +101,10 @@ async function main() {
       'await vision.lookAtPlayer(bot,"Steve","at");',
       'await vision.lookAtPlayer("", "at");',
       'await vision.lookAtPlayer("Steve", "invalid");',
+      'await vision.lookAtPlayer({playerName:"Steve",direction:"invalid"});',
+      'await vision.lookAtBlock({position:{x:75,y:NaN,z:-292}});',
+      'await vision.lookAtPosition({position:{x:75,y:73}});',
+      'await vision.lookAtPosition({position:{x:"75",y:73,z:-292}});',
     ]) {
       // Each malformed variant is a fresh request; the corrected call below
       // continues the final request without resetting its owner.
@@ -110,16 +114,19 @@ async function main() {
       assert.equal(failed.executionStatus, 'error')
       assert.equal(failed.operationSettlement, 'settled')
       assert.equal(failed.taskId, 'same-task')
-      assert.match(JSON.stringify(failed), /TypeError: Use vision\.lookAt/)
+      assert.match(JSON.stringify(failed), /SdkArgumentError/)
+      assert.equal(failed.argumentError.code, 'INVALID_ARGUMENT')
+      assert.match(failed.argumentError.method, /^vision\./)
+      assert.ok(failed.argumentError.example)
       assert.equal(calls.length, 0, 'invalid call has no view/capture side effects')
     }
-    const good = await run('log(bot, await vision.lookAtPosition(75,73,-292));')
+    const good = await run('log(bot, await vision.lookAtPosition({position:{x:75,y:73,z:-292}}));')
     assert.equal(good.success, true)
     assert.equal(good.taskId, 'same-task')
     assert.equal(good.operationSettlement, 'settled')
     assert.deepEqual(calls.splice(0), [['lookAt', 75, 75, -292], ['capture']])
     agent.actions.beginUserIntent()
-    const blockResult = await run('log(bot, JSON.stringify(await vision.lookAtBlock(75.2,73.8,-291.8)));')
+    const blockResult = await run('log(bot, JSON.stringify(await vision.lookAtBlock({position:{x:75.2,y:73.8,z:-291.8}})));')
     assert.equal(blockResult.success, true)
     assert.equal(blockResult.operationSettlement, 'settled')
     assert.equal(blockResult.skillResults.find(call => call.skill === 'vision.lookAtBlock').status, 'returned')
@@ -136,7 +143,7 @@ async function main() {
     assert.deepEqual(calls.splice(0), [['lookAt', 75.5, 73.5, -291.5], ['capture']])
     assert.ok(captureSignal instanceof AbortSignal, 'block capture uses its ActionManager cancellation signal')
     agent.actions.beginUserIntent()
-    const unknownResult = await run('log(bot, JSON.stringify(await vision.lookAtBlock(1000,73,-292)));')
+    const unknownResult = await run('log(bot, JSON.stringify(await vision.lookAtBlock({position:{x:1000,y:73,z:-292}})));')
     assert.equal(unknownResult.success, true)
     assert.match(unknownResult.message, /"status":"unknown"/)
     assert.match(unknownResult.message, /Target block is not loaded/)
@@ -144,7 +151,7 @@ async function main() {
     agent.actions.beginUserIntent()
     let stopPromise
     afterLookAt = () => { stopPromise = agent.actions.stop('user') }
-    const cancelledResult = await run('log(bot, JSON.stringify(await vision.lookAtBlock(75,73,-292)));')
+    const cancelledResult = await run('log(bot, JSON.stringify(await vision.lookAtBlock({position:{x:75,y:73,z:-292}})));')
     afterLookAt = null
     assert.equal(cancelledResult.success, false)
     assert.equal(cancelledResult.operationSettlement, 'settled')
@@ -153,7 +160,7 @@ async function main() {
     assert.deepEqual(calls.splice(0), [['lookAt', 75.5, 73.5, -291.5]], 'Stop during aim prevents capture and analysis')
     for (const direction of [undefined, 'at', 'with']) {
       agent.actions.beginUserIntent()
-      const args = direction === undefined ? '"Steve"' : `"Steve","${direction}"`
+      const args = direction === undefined ? '{playerName:"Steve"}' : `{playerName:"Steve",direction:"${direction}"}`
       assert.equal((await run(`log(bot, await vision.lookAtPlayer(${args}));`)).success, true)
       const actual = calls.splice(0)
       assert.equal(actual[0][0], direction === 'with' ? 'look' : 'lookAt')

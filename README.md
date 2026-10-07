@@ -2,13 +2,31 @@
 
 ## Personal development fork
 
-The SDK documentation and code linter share one explicit `places`/`vision` method map. The opt-in native Codex runtime uses deferred SDK documentation and direct image results; see [Opt-in Codex task session](#opt-in-codex-task-session). The selection and helper-model description below applies to legacy tasks. Relevant place methods are selected by task relevance; vision methods remain in the always-shown docs. The vision SDK reuses the existing screenshot interpretation commands; await a method and log its returned analysis into action output. It requires `allow_vision` and a vision-capable model, and returns a disabled message when unavailable. The vision SDK exposes `lookAtPlayer`, `lookAtPosition`, and `lookAtBlock`; `lookAtPosition` retains the existing aim at `y + 2`, while `lookAtBlock` resolves a loaded block and aims at its center. When embeddings are unavailable, skill selection scores the documentation text directly.
+The native SDK uses one explicit method registry for execution, argument validation, deferred documentation and code linting. Legacy SDK documentation retains its `places`/`vision` method map. The opt-in native Codex runtime uses deferred SDK documentation and direct image results; see [Opt-in Codex task session](#opt-in-codex-task-session). The selection and helper-model description below applies to legacy tasks. Relevant place methods are selected by task relevance; vision methods remain in the always-shown docs. The vision SDK reuses the existing screenshot interpretation commands; await a method and log its returned analysis into action output. It requires `allow_vision` and a vision-capable model, and returns a disabled message when unavailable. The vision SDK exposes `lookAtPlayer`, `lookAtPosition`, and `lookAtBlock`; `lookAtPosition` retains the existing aim at `y + 2`, while `lookAtBlock` resolves a loaded block and aims at its center. When embeddings are unavailable, skill selection scores the documentation text directly.
 
-Generated vision calls use `await vision.lookAtPosition(x, y, z)` or `await vision.lookAtPlayer("Steve", "at")`, without a `bot` argument. Position coordinates must be finite numbers; player names must be nonempty strings and direction is `"at"` (default) or `"with"`. Invalid arguments fail before changing the view or capturing an image, so an owned operation can report the error and continue with a corrected call in the same task. Log the returned analysis, for example `log(bot, await vision.lookAtPosition(75, 73, -292));`.
+Legacy generated vision calls use `await vision.lookAtPosition(x, y, z)` or `await vision.lookAtPlayer("Steve", "at")`, without a `bot` argument. Position coordinates must be finite numbers; player names must be nonempty strings and direction is `"at"` (default) or `"with"`. Invalid arguments fail before changing the view or capturing an image, so an owned operation can report the error and continue with a corrected call in the same task. Log the returned analysis, for example `log(bot, await vision.lookAtPosition(75, 73, -292));`.
 
 Minecraft disconnect reasons are decoded with the version-specific chat component decoder, including modern NBT reasons. The offline `tests/vision_sdk_validation.test.cjs` fixture checks Coder/SES/ActionManager rejection and continuation, chat commands, disabled vision, and reason decoding. Isolated vanilla 1.21.1 verification records are in [the LoginGuard investigation](../mindcraft-tools/docs/login-guard-invalid-rotation-20261006.md); camera/image analysis is stubbed in these checks.
 
 `blocked_actions` disables named chat commands and removes those commands from command documentation. It does not prohibit equivalent operations through the SDK, raw bot access, or plugins.
+
+### Native SDK arguments
+
+With `agent_runtime: "codex-session"`, every SDK method binds the current bot on the host. Pass one named argument object, or omit it when all fields are optional. Internal functions, legacy generated code and chat commands retain their existing signatures; the bot-first examples in the following sections describe those paths.
+
+```js
+await Promise.resolve();
+const position = world.getPosition();
+const target = world.inspectBlockAt({ position: { x: 10, y: 64, z: -3 } });
+const chests = world.getNearestBlocks({ blockTypes: ['chest'], radius: 16, limit: 3 });
+const saved = await places.find({ text: 'storage', kind: 'storage' });
+const moved = await skills.goToPosition({ position, minDistance: 2 });
+log(bot, JSON.stringify({ target, chests, saved, moved }));
+```
+
+Absolute block coordinates use `position`; `world.getBlockAtPosition` takes a relative `offset`. Item transfers use a required positive `quantity` or explicit `'all'`; crafting uses `times` for recipe executions, and collection uses `count` for blocks. Unknown fields, missing fields and invalid values throw `SdkArgumentError` before calling the internal SDK. The settled result and previous-task diagnostic retain `argumentError` with the method, field, expectation, signature and corrected example. A prior valid mutation in compound code remains effective.
+
+Read each selected method's deferred documentation for its fields, defaults, result and availability. The canonical definitions are in [`native_sdk.js`](src/agent/library/native_sdk.js); native methods keep existing synchronous/async results, cancellation, ownership, server confirmation and configured false handling. `log(bot, message)` remains the separate output helper. A changed SDK scope starts a fresh native thread once, then matching tasks resume normally. See [the verification record](docs/native-sdk-arguments-20261007.md).
 
 ### Inspect an explicit target and continue after a failure
 

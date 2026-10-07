@@ -19,6 +19,7 @@
 | Vision SDK validation / disconnect reason fixture | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/vision_sdk_validation.test.cjs` |
 | Explicit block/chest target SDK fixture | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/targeted_sdk.test.cjs` |
 | Single-tree felling / pillar cleanup fixture | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/tree_felling.test.cjs` |
+| Native named-object SDK contract fixture | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/native_sdk.test.cjs` |
 | Codex native session fixture | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/codex_session.test.cjs` |
 | Syntax check | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node --check main.js` |
 | Whitespace check | `git diff --check` |
@@ -59,3 +60,5 @@
 - bot固定指示の正本は `src/process/codex/AGENTS.md`。起動時にSDK文書から自動生成したmethod名一覧を付けて専用一時cwdへ配置し、標準loaderで読む。repo rootの開発指示をbotへコピーしない。専用一時CODEX_HOMEでは既存homeのauth.json/config.toml/sessionsだけをsymlink共有し、global AGENTS/skillsを共有しない。file認証を使用し、認証内容を読出し・複製しない。multi-agentの説明文もagents.enabled=falseで止める。能力設定と更新可能なshared bot rulesはhostが判断ごとに渡す。標準読込に必要な既定workspace accessを残し、shell無効・read-only sandbox・Minecraft以外のtool拒否は維持する。
 
 - native botは常時見えるSDK method名一覧から選び、必要な説明だけをcode modeで読む。固定templateへmethod一覧や全説明を手書きしない。起動overrideは `features.code_mode.direct_only_tool_namespaces` が正しいキー。変更時はstrict-config・実rollout・新規/再開の説明と画像を隔離確認し、設定受理だけを効果の証拠にしない。context検証は [`docs/native-context-revision-20261006.md`](docs/native-context-revision-20261006.md) と[global/multi-agent分離記録](docs/native-context-isolation-20261006.md)、[SDK一覧の比較記録](docs/native-sdk-catalog-20261006.md)を参照。
+
+- native SDK引数の正本は `src/agent/library/native_sdk.js`。全namespaceをhost bot束縛・名前付きobject1つで公開し、同一定義からdeferred説明/名前一覧/lintを作る。内部/legacy/chatのbot-first署名は保つ。入力errorは副作用前に拒否し、公開field・修正例をoperationとtask diagnosticsへ残す。契約を変更したらscope/protocolと新規・再開の隔離確認も更新する。raw `log(bot, message)` は別の出力helper。

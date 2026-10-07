@@ -133,25 +133,25 @@ async function main() {
     assert.equal(result.success, true)
     assert.match(result.message, /first[\s\S]*second/)
     settings.generated_code_fail_on_false = []
-    const falseDefault = await agent.actions.runAction('generated-false-default', () => agent.coder.executeCode('await skills.goToPlayer(bot, "missing");\nlog(bot, "continued after false");'), { timeout: 0 })
+    const falseDefault = await agent.actions.runAction('generated-false-default', () => agent.coder.executeCode('await skills.goToPlayer({username: "missing"});\nlog(bot, "continued after false");'), { timeout: 0 })
     assert.equal(falseDefault.success, true, 'default SDK mode preserves boolean false')
     assert.match(falseDefault.message, /continued after false/)
     settings.generated_code_fail_on_false = ['goToPlayer']
     const { goToPlayer } = await load('src/agent/library/skills.js')
     assert.equal(await goToPlayer(agent.bot, 'missing'), false, 'direct SDK/skill callers retain the standard boolean API')
-    const falseConfigured = await agent.actions.runAction('generated-false-configured', () => agent.coder.executeCode('await skills.goToPlayer(bot, "missing");\nlog(bot, "must not run");'), { timeout: 0 })
+    const falseConfigured = await agent.actions.runAction('generated-false-configured', () => agent.coder.executeCode('await skills.goToPlayer({username: "missing"});\nlog(bot, "must not run");'), { timeout: 0 })
     assert.equal(falseConfigured.success, false, 'configured generated SDK false stops the generated action')
     assert.match(falseConfigured.message, /skills\.goToPlayer returned false/)
     assert.doesNotMatch(falseConfigured.message, /must not run/)
     assert.equal(falseConfigured.skillResults.some(call => call.skill === 'skills.goToPlayer' && call.status === 'returned_false'), true)
     const caughtFalse = await agent.actions.runAction('generated-caught-false', () => agent.coder.executeCode(
-      'try { await skills.goToPlayer(bot, "missing"); } catch (error) { log(bot, error.message); }\nlog(bot, "continued after catch");'), { timeout: 0 })
+      'try { await skills.goToPlayer({username: "missing"}); } catch (error) { log(bot, error.message); }\nlog(bot, "continued after catch");'), { timeout: 0 })
     assert.equal(caughtFalse.success, true, 'generated code can explicitly recover from configured false errors')
     assert.match(caughtFalse.message, /continued after catch/)
     const unhandledSdkRejections = []
     const onUnhandledSdkRejection = reason => unhandledSdkRejections.push(reason)
     process.on('unhandledRejection', onUnhandledSdkRejection)
-    const unawaitedFalse = await agent.actions.runAction('generated-unawaited-false', () => agent.coder.executeCode('skills.goToPlayer(bot, "missing");\nawait Promise.resolve();'), { timeout: 0 })
+    const unawaitedFalse = await agent.actions.runAction('generated-unawaited-false', () => agent.coder.executeCode('skills.goToPlayer({username: "missing"});\nawait Promise.resolve();'), { timeout: 0 })
     await delay(20)
     process.removeListener('unhandledRejection', onUnhandledSdkRejection)
     assert.equal(unawaitedFalse.success, true, 'unawaited domain false remains a completed generated action')
@@ -168,7 +168,7 @@ async function main() {
     const legacyError = operationFactsSummary({ success: false, executionStatus: 'error', skillResults: [{ skill: 'craft', status: 'error', error: 'recipe failed' }] })
     assert.match(legacyError, /executor=failure; execution=error; skill craft=error \(recipe failed\)/)
     const lateOutput = await agent.actions.runAction('unawaited-sdk-child', () => agent.coder.executeCode(
-      'skills.wait(bot, 80).then(() => log(bot, "late child completed")).catch(() => {});\nawait Promise.resolve();'), { timeout: 0 })
+      'skills.wait({milliseconds: 80}).then(() => log(bot, "late child completed")).catch(() => {});\nawait Promise.resolve();'), { timeout: 0 })
     assert.equal(lateOutput.success, true)
     assert.match(lateOutput.message, /late child completed/, 'ActionManager settlement includes the unawaited SDK child output')
     const settledOutput = agent.bot.output
@@ -261,7 +261,7 @@ async function main() {
     const nativeSendRuntime = new CodexRuntime(nativeSendAgent, { makeSession: ({ execute }) => {
       let turn = 0
       return { open: async () => {}, runTurn: async () => ++turn === 1
-        ? { operation: execute('await communication.sendToBot("PeerReceiver", "owned send");\nlog(bot, "ack retained");') }
+        ? { operation: execute('await communication.sendToBot({recipient:"PeerReceiver", message:"owned send"});\nlog(bot, "ack retained");') }
         : { operation: null, messages: ['sent'] }, close: async () => {} }
     } })
     nativeSendAgent.codexRuntime = nativeSendRuntime
@@ -290,7 +290,7 @@ async function main() {
     cancelRuntime = new CodexRuntime(cancelAgent, { makeSession: ({ execute }) => {
       let turn = 0
       return { open: async () => {}, runTurn: async () => ++turn === 1
-        ? { operation: execute('await communication.sendToBot("PeerReceiver", "cancel me");') }
+        ? { operation: execute('await communication.sendToBot({recipient:"PeerReceiver", message:"cancel me"});') }
         : { operation: null, messages: ['unexpected'] }, close: async () => {} }
     } })
     cancelAgent.codexRuntime = cancelRuntime
@@ -670,11 +670,11 @@ async function main() {
     const imageRuntime = new NativeCodexRuntime(imageAgent, { makeSession: ({ execute, prepareResult, tools, readDocumentation }) => ({
       open: async () => {
         assert.equal(tools[0].tools[0].deferLoading, true)
-        assert.match(readDocumentation('vision_lookAtPosition'), /Capture an image/)
+        assert.match(readDocumentation('vision_lookAtPosition'), /position/)
         assert.throws(() => readDocumentation('unknown'), /Unknown SDK/)
       },
       runTurn: async () => {
-        const result = await execute('log(bot, await vision.lookAtPosition(1,64,3));')
+        const result = await execute('log(bot, await vision.lookAtPosition({position:{x:1,y:64,z:3}}));')
         assert.equal(result.success, true)
         assert.match(result.message, /Screenshot attached/)
         imageResult = await prepareResult(result)
@@ -696,12 +696,12 @@ async function main() {
     const boundedRuntime = new NativeCodexRuntime(imageAgent, { makeSession: ({ execute, prepareResult }) => ({
       open: async () => {}, runTurn: async () => {
         await fs.writeFile('bots/NativeImage/screenshots/fixture.jpg', Buffer.alloc(2 * 1024 * 1024 + 1))
-        const tooLarge = await execute('await vision.lookAtPosition(1,64,3);')
+        const tooLarge = await execute('await vision.lookAtPosition({position:{x:1,y:64,z:3}});')
         assert.equal(tooLarge.success, false)
         assert.match(tooLarge.message, /Screenshot exceeds/)
         await prepareResult(tooLarge)
         await fs.writeFile('bots/NativeImage/screenshots/fixture.jpg', jpeg)
-        const tooMany = await execute('for (let i = 0; i < 5; i++) { await vision.lookAtPosition(1,64,3); }')
+        const tooMany = await execute('for (let i = 0; i < 5; i++) { await vision.lookAtPosition({position:{x:1,y:64,z:3}}); }')
         assert.equal(tooMany.success, false)
         assert.match(tooMany.message, /At most 4 screenshots/)
         boundedResult = await prepareResult(tooMany)
@@ -859,7 +859,7 @@ async function main() {
     operationWaitAgent.coder.executeCode = async () => { operationStarted.resolve(); await operationBody.promise; return 'drained' }
     operationWaitAgent.interrupt = () => {}
     const operationWaitRuntime = new CodexRuntime(operationWaitAgent, { makeSession: ({ execute }) => ({
-      open: async () => {}, runTurn: async () => ({ operation: execute('await skills.wait(bot, 80);'), messages: [] }), close: async () => {}
+      open: async () => {}, runTurn: async () => ({ operation: execute('await skills.wait({milliseconds: 80});'), messages: [] }), close: async () => {}
     }) })
     operationWaitAgent.codexRuntime = operationWaitRuntime
     let operationRunSettled = false

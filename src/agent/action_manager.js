@@ -371,6 +371,9 @@ export class ActionManager {
             const result = {
                 success: false,
                 message,
+                ...(error?.name === 'SdkArgumentError' && error.code === 'INVALID_ARGUMENT'
+                    ? { argumentError: Object.fromEntries(['code', 'method', 'field', 'expected', 'signature', 'example']
+                        .map(key => [key, typeof error[key] === 'string' ? error[key].slice(0, 2000) : null])) } : {}),
                 interrupted: !!action.reason || this.agent.bot.interrupt_code,
                 timedout: this.timedout,
                 reason: action.reason || 'error',

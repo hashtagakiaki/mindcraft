@@ -1,6 +1,6 @@
 # SDK引数契約の見直し
 
-2026-10-07。設計・実装計画。以下の新しい呼び出し例は未実装。
+2026-10-07。設計・実装計画。実装・隔離検証済み。稼働playへの反映と最終確認を進める。
 
 Goal: native Codexが操作対象のbotや位置引数の順序を覚えずにSDKを呼べる。入力の誤りは内部関数・RPCへ渡す前に、間違ったfieldと修正例を示して拒否する。
 
@@ -66,12 +66,15 @@ log(bot, JSON.stringify({blocks, target, below, moved, stored, placesFound, imag
 
 ## 次の作業
 
-- [ ] 全公開methodのfield・意味・default・変換を既存実装/呼出しと照合し、共通validatorと明示的registryを作る。数量・座標・省略の契約は上記を基準にする。
-- [ ] nativeのfacade、deferred docs、method lint、bot指示、scope、入力エラー診断を一緒に接続し、旧経路との混在を防ぐ。実境界で誤用→エラー→修正成功と副作用0を検証し、既存suiteを通す。
-- [ ] 同条件の隔離モデル比較で成果と引数エラーを確認し、README/AGENTS等の必要な記述と調査結果を更新する。task差分だけを `autonomy` のown originへcommit/pushする。
+- [x] 全公開methodのfield・意味・default・変換を既存実装/呼出しと照合し、共通validatorと明示的registryを作る。数量・座標・省略の契約は上記を基準にする。
+- [x] nativeのfacade、deferred docs、method lint、bot指示、scope、入力エラー診断を一緒に接続し、旧経路との混在を防ぐ。実境界で誤用→エラー→修正成功と副作用0を検証し、既存suiteを通す。
+- [x] 同条件の隔離モデル比較で成果と引数エラーを確認し、README/AGENTS等の必要な記述と調査結果を更新する。task差分だけを `autonomy` のown originへcommit/pushする。
 
 ## 制約と後続作業
 
-- この依頼では設計見直しまで。SDK実装、play pin更新、bot/UI切替、server/world/Ollama操作は行わない。既存未commit差分を保持する。
+- 2026-10-07の `$exec` と「反映までやっていいよ」により実装・検証・play pin更新・bot/UIだけの切替が承認された。既存未commit差分を保持し、server/world/Ollamaは切替で停止しない。
 - 実装時も共有dependencyをread-onlyで使い、新規依存や内部skillsの全面改造は不要。隔離live確認は既存CaseServer copy・許可されたloopback portだけを使い、ユーザーworld/templateを変更しない。
-- 稼働playへの反映は検証済みfull SHAを選ぶ別の明示的deployment依頼で行う。旧bundleとpin・memoryを保持する既存apply手順で復旧可能にする。新契約のthread scopeを旧版のものとして再利用しない。
+- 検証済みfull SHAのown origin push確認後、既存applyで稼働playへ反映する。旧bundleとpin・memoryを保持し、失敗時は既存applyのrollbackと4体readiness確認で復旧する。新契約のthread scopeを旧版のものとして再利用しない。
+- [ ] 反映後、4体named readiness、UI応答、source/export契約一致、server/Ollamaのprocess継続、memory/namespace/設定維持を確認してactivation記録を残す。
+
+実装検証: 83 method、実Coder/SESとNode20 offline suite、実CLI新規/再開・画像を確認。隔離比較は引数error 9→1、実測倉庫1/3→3/3。after overlayに既存viewChest差分が含まれる制約は結果文書へ記載。

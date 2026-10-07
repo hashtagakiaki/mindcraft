@@ -2,6 +2,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { randomUUID, createHash } from 'node:crypto';
 import { CodexSession } from '../process/codex_session.js';
 import { createSdkDocumentation } from '../process/codex_sdk.js';
+import { getNativeSdkDocs } from './library/native_sdk.js';
 import settings from './settings.js';
 import { readTaskDiagnostics, createTaskDiagnostics, appendOperationDiagnostic, finishTaskDiagnostics } from './task_diagnostics.js';
 import { createObservationScope } from './library/observation_scope.js';
@@ -16,7 +17,7 @@ const MAX_NATIVE_DEDUPE_IDS = 256;
 const MAX_BLOCK_EDITS_PER_CHECK = 8;
 const MAX_OPERATION_IMAGES = 4;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
-const NATIVE_CONTEXT_PROTOCOL = 5;
+const NATIVE_CONTEXT_PROTOCOL = 6;
 
 export function validateCodexRuntime(profile) {
     if (settings.agent_runtime !== 'codex-session') return null;
@@ -278,7 +279,7 @@ export class CodexRuntime {
         let failed = false;
         let terminalDetail = null;
         try {
-            const docs = await agent.prompter.skill_libary.getAllSkillDocs();
+            const docs = getNativeSdkDocs(settings);
             const sdk = createSdkDocumentation(docs);
             // Changed discovery/context contracts start fresh once; subsequent tasks resume normally.
             const scope = { bot: agent.name, worldId: settings.place_world_id, model, effort,
