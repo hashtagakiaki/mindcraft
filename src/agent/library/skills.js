@@ -1470,28 +1470,93 @@ export async function discard(bot, itemName, num=-1) {
     return true;
 }
 
-export async function putInChest(bot, itemName, num=-1) {
+function validateChestTransferOptions(options, signature) {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+        throw new TypeError(`${signature}: options must be an object. Example: ${signature.split('(')[0]}(bot, "oak_log", -1, { chestPosition: { x: 10, y: 64, z: -3 } });`);
+    }
+    if (options.chestPosition !== undefined) {
+        const position = options.chestPosition;
+        if (!position || typeof position !== 'object' || Array.isArray(position) ||
+            ![position.x, position.y, position.z].every(Number.isFinite)) {
+            throw new TypeError(`${signature}: options.chestPosition must contain finite x, y and z coordinates. Example: ${signature.split('(')[0]}(bot, "oak_log", -1, { chestPosition: { x: 10, y: 64, z: -3 } });`);
+        }
+    }
+    return options.chestPosition;
+}
+
+function validateChestTransferQuantity(num, signature) {
+    if (num !== -1 && (!Number.isSafeInteger(num) || num <= 0)) {
+        throw new TypeError(`${signature}: num must be a positive safe integer or -1 for all available items.`);
+    }
+}
+
+function chestTransferOutput(bot, direction, requestedQuantity, confirmedQuantity, chest) {
+    const chestPosition = chest?.position
+        ? { x: chest.position.x, y: chest.position.y, z: chest.position.z }
+        : null;
+    const remainingQuantity = confirmedQuantity == null
+        ? null
+        : Math.max(0, requestedQuantity - confirmedQuantity);
+    log(bot, `Chest ${direction}: ${JSON.stringify({ requestedQuantity, confirmedQuantity, remainingQuantity, chestPosition })}`);
+}
+
+async function resolveChestTransferTarget(bot, chestPosition) {
+    if (chestPosition === undefined) {
+        const chest = world.getNearestBlock(bot, 'chest', 32);
+        if (!chest) log(bot, `Could not find a chest nearby.`);
+        return chest;
+    }
+    const x = chestPosition.x, y = chestPosition.y, z = chestPosition.z;
+    let target = world.inspectBlockAt(bot, x, y, z);
+    if (!target.loaded) {
+        log(bot, `Chest target at ${target.position.x}, ${target.position.y}, ${target.position.z} is unknown because it is not loaded.`);
+        return null;
+    }
+    if (!['chest', 'trapped_chest'].includes(target.name)) {
+        log(bot, `Target at ${target.position.x}, ${target.position.y}, ${target.position.z} is ${target.name}, not a chest.`);
+        return null;
+    }
+    const approach = await approachBlock(bot, x, y, z);
+    if (approach.status !== 'ready') {
+        log(bot, `Could not reach chest at ${target.position.x}, ${target.position.y}, ${target.position.z}: ${approach.reason || approach.status}.`);
+        return null;
+    }
+    // Navigation can change what is loaded or present. Re-observe this exact
+    // coordinate and never replace it with a nearby chest.
+    target = world.inspectBlockAt(bot, x, y, z);
+    if (!target.loaded) {
+        log(bot, `Chest target at ${target.position.x}, ${target.position.y}, ${target.position.z} became unknown after approach.`);
+        return null;
+    }
+    if (!['chest', 'trapped_chest'].includes(target.name)) {
+        log(bot, `Target at ${target.position.x}, ${target.position.y}, ${target.position.z} changed to ${target.name} after approach; it is not a chest.`);
+        return null;
+    }
+    return bot.blockAt(new Vec3(x, y, z).floored());
+}
+
+export async function putInChest(bot, itemName, num=-1, options={}) {
     /**
-     * Put the given item in the nearest chest.
+     * Put an exact requested quantity of an item in a chest; -1 means all available matching stacks.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {string} itemName, the item or block name to put in the chest.
-     * @param {number} num, the number of items to put in the chest. Defaults to -1, which puts all items.
-     * @returns {Promise<boolean>} true if the item was put in the chest, false otherwise.
+     * @param {number} num, a positive safe integer quantity, or -1 to put all available matching stacks.
+     * @param {object} options, optional { chestPosition: { x, y, z } } to select one exact loaded chest; omitted uses the nearest chest.
+     * @returns {Promise<boolean>} true only when the full requested quantity is server-confirmed; false on a known shortage or incomplete transfer.
      * @example
-     * await skills.putInChest(bot, "oak_log");
+     * const stored = await skills.putInChest(bot, "oak_log", 262, { chestPosition: { x: 10, y: 64, z: -3 } });
+     * log(bot, `stored all requested items: ${stored}`);
      **/
-    let chest = world.getNearestBlock(bot, 'chest', 32);
+    const signature = 'skills.putInChest(bot, itemName, num, options)';
+    validateChestTransferQuantity(num, signature);
+    const chestPosition = validateChestTransferOptions(options, signature);
+    let chest = await resolveChestTransferTarget(bot, chestPosition);
     if (!chest) {
-        log(bot, `Could not find a chest nearby.`);
+        if (chestPosition === undefined) log(bot, `Could not find a chest nearby.`);
         return false;
     }
-    let item = bot.inventory.findInventoryItem(itemName);
-    if (!item) {
-        log(bot, `You do not have any ${itemName} to put in the chest.`);
-        return false;
-    }
-    let to_put = num === -1 ? item.count : Math.min(num, item.count);
-    if (!await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2)) return false;
+    const initialAvailable = inventoryItemCount(bot, itemName);
+    if (chestPosition === undefined && !await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2)) return false;
     const context = getActionContext(bot);
     if (isActionCancelled(bot, context)) return false;
     const chestContainer = await bot.openContainer(chest);
@@ -1500,14 +1565,24 @@ export async function putInChest(bot, itemName, num=-1) {
     let transferError = null;
     let snapshotError = null;
     let closeError = null;
+    let requestedQuantity = num === -1 ? initialAvailable : num;
+    let attemptedQuantity = 0;
     try {
         try { beforeSnapshot = await craftingSync.snapshotWindow(bot, chestContainer); }
         catch (error) { snapshotError = error; }
-        if (beforeSnapshot && !isActionCancelled(bot, context)) {
-            try { await chestContainer.deposit(item.type, null, to_put); }
+        const available = beforeSnapshot
+            ? countFencedWindowRegion(beforeSnapshot, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName)
+            : initialAvailable;
+        requestedQuantity = num === -1 ? available : num;
+        const toPut = Math.min(requestedQuantity, available);
+        if (beforeSnapshot && toPut > 0 && !isActionCancelled(bot, context)) {
+            attemptedQuantity = toPut;
+            try { await chestContainer.deposit(mc.getItemId(itemName), null, toPut); }
             catch (error) { transferError = error; }
             try { afterSnapshot = await craftingSync.snapshotWindow(bot, chestContainer); }
             catch (error) { snapshotError = error; }
+        } else if (beforeSnapshot) {
+            afterSnapshot = beforeSnapshot;
         }
     }
     finally {
@@ -1516,51 +1591,59 @@ export async function putInChest(bot, itemName, num=-1) {
     }
     let confirmed = null;
     let uncertaintyReason = 'server-fenced container snapshots unavailable';
-    if (beforeSnapshot && afterSnapshot) {
+    if (beforeSnapshot && afterSnapshot && attemptedQuantity === 0) {
+        confirmed = 0;
+    } else if (beforeSnapshot && afterSnapshot) {
         const containerDelta = countFencedWindowRegion(afterSnapshot, 0, chestContainer.inventoryStart, itemName) - countFencedWindowRegion(beforeSnapshot, 0, chestContainer.inventoryStart, itemName);
         const inventoryDelta = countFencedWindowRegion(beforeSnapshot, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName) - countFencedWindowRegion(afterSnapshot, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName);
         if (containerDelta === inventoryDelta && containerDelta >= 0) {
             confirmed = containerDelta;
-            if (confirmed > 0) recordConfirmation({ phase: 'chest-deposit', quantity: confirmed, unit: 'item', target: { itemName, chest: { x: chest.position.x, y: chest.position.y, z: chest.position.z } },
+            if (confirmed > 0) recordConfirmation({ phase: 'chest-deposit', quantity: confirmed, requestedQuantity, remainingQuantity: Math.max(0, requestedQuantity - confirmed), unit: 'item', target: { itemName, chest: { x: chest.position.x, y: chest.position.y, z: chest.position.z } },
                 evidence: 'matching slot deltas between two server window_items snapshots fenced by statistics' });
         } else {
             bot.inventoryUnconfirmed = true;
             uncertaintyReason = 'server-fenced container and player-inventory slot deltas disagree';
         }
     }
-    if (confirmed == null || confirmed < to_put) {
-        if (confirmed != null) recordUncertainty({ requestedQuantity: to_put, confirmedQuantity: confirmed, unit: 'item', target: itemName,
+    if (confirmed == null || confirmed !== attemptedQuantity || transferError) {
+        if (confirmed != null) recordUncertainty({ requestedQuantity: attemptedQuantity, confirmedQuantity: confirmed, unit: 'item', target: itemName,
             reason: 'server-fenced container transfer did not confirm the full requested slot delta' });
-        else recordUncertainty({ requestedQuantity: to_put, confirmedQuantity: null, unit: 'item', target: itemName, reason: `${uncertaintyReason}${snapshotError ? `: ${String(snapshotError)}` : ''}` });
+        else recordUncertainty({ requestedQuantity: attemptedQuantity || requestedQuantity, confirmedQuantity: null, unit: 'item', target: itemName, reason: `${uncertaintyReason}${snapshotError ? `: ${String(snapshotError)}` : ''}` });
         bot.inventoryUnconfirmed = true;
     }
+    chestTransferOutput(bot, 'deposit', requestedQuantity, confirmed, chest);
     if (transferError) throw transferError;
     if (closeError) throw closeError;
     if (isActionCancelled(bot, context)) return false;
-    if (confirmed !== to_put) {
-        log(bot, `Chest transfer was only partially confirmed: ${confirmed == null ? 'unknown' : `${confirmed}/${to_put}`} ${itemName}; inventory actions are gated until state is confirmed.`);
+    if (confirmed !== requestedQuantity) {
+        log(bot, `Chest transfer was incomplete: confirmed ${confirmed == null ? 'unknown' : confirmed} of ${requestedQuantity} ${itemName}${confirmed === attemptedQuantity && attemptedQuantity < requestedQuantity ? '; only the currently available inventory was transferred.' : '; inventory actions are gated until state is confirmed.'}`);
         return false;
     }
     log(bot, `Successfully put ${confirmed} ${itemName} in the chest.`);
     return true;
 }
 
-export async function takeFromChest(bot, itemName, num=-1) {
+export async function takeFromChest(bot, itemName, num=-1, options={}) {
     /**
-     * Take the given item from the nearest chest, potentially from multiple slots.
+     * Take an exact requested quantity of an item from a chest; -1 means all available matching stacks.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {string} itemName, the item or block name to take from the chest.
-     * @param {number} num, the number of items to take from the chest. Defaults to -1, which takes all items.
-     * @returns {Promise<boolean>} true if the item was taken from the chest, false otherwise.
+     * @param {number} num, a positive safe integer quantity, or -1 to take all available matching stacks.
+     * @param {object} options, optional { chestPosition: { x, y, z } } to select one exact loaded chest; omitted uses the nearest chest.
+     * @returns {Promise<boolean>} true only when the full requested quantity is server-confirmed; false on a known shortage or incomplete transfer.
      * @example
-     * await skills.takeFromChest(bot, "oak_log");
+     * const taken = await skills.takeFromChest(bot, "oak_log", -1, { chestPosition: { x: 10, y: 64, z: -3 } });
+     * log(bot, `took all available items: ${taken}`);
      * **/
-    let chest = world.getNearestBlock(bot, 'chest', 32);
+    const signature = 'skills.takeFromChest(bot, itemName, num, options)';
+    validateChestTransferQuantity(num, signature);
+    const chestPosition = validateChestTransferOptions(options, signature);
+    let chest = await resolveChestTransferTarget(bot, chestPosition);
     if (!chest) {
-        log(bot, `Could not find a chest nearby.`);
+        if (chestPosition === undefined) log(bot, `Could not find a chest nearby.`);
         return false;
     }
-    if (!await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2)) return false;
+    if (chestPosition === undefined && !await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2)) return false;
     const context = getActionContext(bot);
     if (isActionCancelled(bot, context)) return false;
     const chestContainer = await bot.openContainer(chest);
@@ -1571,74 +1654,66 @@ export async function takeFromChest(bot, itemName, num=-1) {
         bot.inventoryUnconfirmed = true;
         recordUncertainty({ requestedQuantity: num === -1 ? null : num, confirmedQuantity: null, unit: 'item', target: itemName,
             reason: `server-fenced chest snapshot unavailable: ${String(error)}` });
+        chestTransferOutput(bot, 'withdraw', num === -1 ? null : num, null, chest);
         throw error;
     }
     
     // Find all matching items in the chest
-    let matchingItems = chestContainer.containerItems().filter(item => item.name === itemName);
-    if (matchingItems.length === 0) {
+    const totalAvailable = countFencedWindowRegion(serverSnapshot, 0, chestContainer.inventoryStart, itemName);
+    const requestedQuantity = num === -1 ? totalAvailable : num;
+    const toTake = Math.min(requestedQuantity, totalAvailable);
+    if (totalAvailable === 0) {
         log(bot, `Could not find any ${itemName} in the chest.`);
         try { await chestContainer.close(); }
         catch (error) { bot.inventoryUnconfirmed = true; throw error; }
+        chestTransferOutput(bot, 'withdraw', requestedQuantity, 0, chest);
         return false;
     }
-    
-    let totalAvailable = matchingItems.reduce((sum, item) => sum + item.count, 0);
-    let remaining = num === -1 ? totalAvailable : Math.min(num, totalAvailable);
-    let totalTaken = 0;
+    let afterSnapshot = null;
     let transferError = null;
-    
-    // Take items from each slot until we've taken enough or run out
-    for (const item of matchingItems) {
-        if (remaining <= 0) break;
-        if (isActionCancelled(bot, context)) break;
-        
-        let toTakeFromSlot = Math.min(remaining, item.count);
-        const beforeSnapshot = serverSnapshot;
-        let afterSnapshot = null;
-        let slotError = null;
-        try { await chestContainer.withdraw(item.type, null, toTakeFromSlot); }
-        catch (error) { slotError = error; }
+    const attemptedQuantity = isActionCancelled(bot, context) ? 0 : toTake;
+    if (attemptedQuantity > 0) {
+        try { await chestContainer.withdraw(mc.getItemId(itemName), null, attemptedQuantity); }
+        catch (error) { transferError = error; }
         try { afterSnapshot = await craftingSync.snapshotWindow(bot, chestContainer); }
-        catch (error) { slotError ||= error; }
-        if (!afterSnapshot) {
-            bot.inventoryUnconfirmed = true;
-            recordUncertainty({ requestedQuantity: toTakeFromSlot, confirmedQuantity: null, unit: 'item', target: itemName,
-                reason: `server-fenced chest snapshot unavailable${slotError ? `: ${String(slotError)}` : ''}` });
-            transferError ||= slotError;
-            break;
-        }
-        const containerDelta = countFencedWindowRegion(beforeSnapshot, 0, chestContainer.inventoryStart, itemName) - countFencedWindowRegion(afterSnapshot, 0, chestContainer.inventoryStart, itemName);
-        const inventoryDelta = countFencedWindowRegion(afterSnapshot, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName) - countFencedWindowRegion(beforeSnapshot, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName);
-        if (containerDelta !== inventoryDelta || containerDelta < 0) {
-            bot.inventoryUnconfirmed = true;
-            recordUncertainty({ requestedQuantity: toTakeFromSlot, confirmedQuantity: null, unit: 'item', target: itemName,
-                reason: 'server-fenced container and player-inventory slot deltas disagree' });
-            break;
-        }
-        const confirmed = containerDelta;
-        if (confirmed > 0) recordConfirmation({ phase: 'chest-withdraw', quantity: confirmed, unit: 'item', target: { itemName, chest: { x: chest.position.x, y: chest.position.y, z: chest.position.z } },
-            evidence: 'matching slot deltas between two server window_items snapshots fenced by statistics' });
-        if (confirmed < toTakeFromSlot) {
-            recordUncertainty({ requestedQuantity: toTakeFromSlot, confirmedQuantity: confirmed, unit: 'item', target: itemName,
-                reason: 'server-fenced chest transfer did not confirm the full requested slot delta' });
-            bot.inventoryUnconfirmed = true;
-        }
-        totalTaken += confirmed;
-        remaining -= confirmed;
-        serverSnapshot = afterSnapshot;
-        if (slotError || confirmed < toTakeFromSlot) {
-            transferError ||= slotError;
-            break;
-        }
+        catch (error) { transferError ||= error; }
+    } else {
+        afterSnapshot = serverSnapshot;
     }
-    
+    let confirmed = null;
+    if (afterSnapshot) {
+        const containerDelta = countFencedWindowRegion(serverSnapshot, 0, chestContainer.inventoryStart, itemName) - countFencedWindowRegion(afterSnapshot, 0, chestContainer.inventoryStart, itemName);
+        const inventoryDelta = countFencedWindowRegion(afterSnapshot, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName) - countFencedWindowRegion(serverSnapshot, chestContainer.inventoryStart, chestContainer.inventoryEnd, itemName);
+        if (containerDelta === inventoryDelta && containerDelta >= 0) {
+            confirmed = containerDelta;
+            if (confirmed > 0) recordConfirmation({ phase: 'chest-withdraw', quantity: confirmed, unit: 'item', requestedQuantity, remainingQuantity: Math.max(0, requestedQuantity - confirmed), target: { itemName, chest: { x: chest.position.x, y: chest.position.y, z: chest.position.z } },
+                evidence: 'matching slot deltas between two server window_items snapshots fenced by statistics' });
+        } else {
+            bot.inventoryUnconfirmed = true;
+            recordUncertainty({ requestedQuantity: toTake, confirmedQuantity: null, unit: 'item', target: itemName,
+                reason: 'server-fenced container and player-inventory slot deltas disagree' });
+        }
+    } else {
+        bot.inventoryUnconfirmed = true;
+        recordUncertainty({ requestedQuantity: toTake, confirmedQuantity: null, unit: 'item', target: itemName,
+            reason: `server-fenced chest snapshot unavailable${transferError ? `: ${String(transferError)}` : ''}` });
+    }
+    if (confirmed == null || confirmed !== attemptedQuantity || transferError) {
+        bot.inventoryUnconfirmed = true;
+        if (confirmed != null) recordUncertainty({ requestedQuantity: attemptedQuantity, confirmedQuantity: confirmed, unit: 'item', target: itemName,
+            reason: 'server-fenced chest transfer did not confirm the full attempted quantity' });
+    }
     try { await chestContainer.close(); }
     catch (error) { bot.inventoryUnconfirmed = true; throw error; }
+    chestTransferOutput(bot, 'withdraw', requestedQuantity, confirmed, chest);
     if (transferError) throw transferError;
-    if (isActionCancelled(bot, context)) return totalTaken > 0;
-    log(bot, `Successfully took ${totalTaken} ${itemName} from the chest.`);
-    return totalTaken > 0;
+    if (isActionCancelled(bot, context)) return confirmed > 0 && confirmed === requestedQuantity;
+    if (confirmed !== requestedQuantity) {
+        log(bot, `Chest transfer was incomplete: confirmed ${confirmed == null ? 'unknown' : confirmed} of ${requestedQuantity} ${itemName}${confirmed === toTake && toTake < requestedQuantity ? '; the chest contained fewer items than requested.' : '; inventory actions are gated until state is confirmed.'}`);
+        return false;
+    }
+    log(bot, `Successfully took ${confirmed} ${itemName} from the chest.`);
+    return true;
 }
 
 export async function approachBlock(bot, x, y, z) {

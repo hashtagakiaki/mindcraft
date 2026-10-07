@@ -52,6 +52,12 @@ export function createPlacesFacade(agent, client) {
 	const actions = createPlaceActions(agent, client);
 	const methods = {
 		find: async (text, options = {}) => {
+			if (typeof text !== 'string' || !text.trim()) {
+				throw new TypeError('places.find(text, options?) requires a nonempty string as its first argument. Example: await places.find("倉庫", { kind: "storage", purpose: "food" });');
+			}
+			if (options == null || typeof options !== 'object' || Array.isArray(options)) {
+				throw new TypeError('places.find options must be an object. Example: await places.find("倉庫", { kind: "storage", purpose: "food" });');
+			}
 			requireEnabled();
 			const bot = agent.bot;
 			const dimension = options.dimension ?? normalizedDimension(bot);

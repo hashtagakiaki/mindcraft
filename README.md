@@ -23,6 +23,20 @@ log(bot, JSON.stringify(await vision.lookAtBlock(10, 64, -3)));
 
 `inspectBlockAt` returns loaded state, position/name/properties, corner distance, eye-to-center interaction distance, Mineflayer visibility/canDig checks, dimension and observation time. Unloaded targets remain unknown. `inspectChestAt` returns the actual selected position, contents and time; it never substitutes a nearest chest. Double chest contents are combined. The existing nearest `viewChest(bot)` keeps its boolean contract. An opened container is closed on success, failure or cancellation. Container observations are historical reads, not inventory transfers.
 
+Use `skills.putInChest(bot, itemName, num = -1, options = {})` and `skills.takeFromChest(bot, itemName, num = -1, options = {})` to transfer items. `num: -1` means all matching items available for that transfer; a positive safe integer is the exact requested quantity. A larger request moves only the available amount and returns `false` so callers do not mistake a partial transfer for completion. Pass `{ chestPosition: { x, y, z } }` to select one explicit chest; without it, the legacy nearest chest is used. Both methods retain boolean results and log a compact JSON record with `requestedQuantity`, `confirmedQuantity`, `remainingQuantity`, and the actual `chestPosition`; `confirmedQuantity` and `remainingQuantity` are `null` when server snapshots cannot confirm the transfer. For example:
+
+```js
+const deposited = await skills.putInChest(bot, 'wheat_seeds', 262, {
+  chestPosition: { x: 10, y: 64, z: -3 }
+});
+log(bot, `deposit complete: ${deposited}`);
+
+const withdrawn = await skills.takeFromChest(bot, 'wheat_seeds', -1, {
+  chestPosition: { x: 10, y: 64, z: -3 }
+});
+log(bot, `withdraw complete: ${withdrawn}`);
+```
+
 `skills.approachBlock(bot, x, y, z)` uses the existing owned pathfinder and `GoalLookAtBlock`, without digging or scaffolding, then rechecks reach and block-center visibility. It returns `ready`, `unknown` or `blocked` with a fresh target observation and reason. Movement alone is not successful interaction. A visible face of a partial block may still have an occluded center; this is reported as blocked rather than bypassing the dig guard. `breakBlockAt` uses this approach when out of reach or occluded. `goToPosition`, `breakBlockAt` and legacy placement reject invalid Bot/finite coordinates before side effects, with a corrected example; strict orientation placement keeps its existing `false` validation contract. `collectBlock(bot, blockType, num, exclude)` validates its Bot/name/count/exclusions; `exclude` means positions to skip, not positions to collect. Mineflayer palette entries have `position:null`, so coordinate and terrain checks run only on the subsequent positioned match.
 
 `vision.lookAtBlock(x,y,z)` takes no Bot argument. It returns `{status, target, aim, observedAt, analysis}`; unknown targets cause no view change or capture. Existing position commands/SDK retain the `y+2` aim. Offline fixtures stub image interpretation; live image quality and chest/build correctness require dedicated trusted templates and observers.

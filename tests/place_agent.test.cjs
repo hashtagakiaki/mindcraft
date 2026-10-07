@@ -184,6 +184,16 @@ async function main() {
     assert.equal((agent.places.getPromptContext().match(/forest \d+ \[/g) || []).length, 5, 'coding context carries at most five candidate IDs')
 
     const chestResponse = await clientA.rememberPlace({ name: 'field chest', kind: 'storage', purposes: ['food'], dimension: 'minecraft:overworld', position: { x: 5, y: 63, z: 2 }, source: 'observed', existence: 'observed', observedAt: new Date().toISOString() })
+    let queryCalls = 0
+    const queryPlaces = clientA.queryPlaces.bind(clientA)
+    clientA.queryPlaces = async (...args) => { queryCalls++; return queryPlaces(...args) }
+    await assert.rejects(agent.places.sdk.find({ query: 'field chest' }), /places\.find\(text, options\?\).*nonempty string.*Example: await places\.find\("倉庫"/)
+    await assert.rejects(agent.places.sdk.find({ text: 'field chest' }), /places\.find\(text, options\?\)/)
+    await assert.rejects(agent.places.sdk.find('   '), /nonempty string/)
+    assert.equal(queryCalls, 0, 'invalid find input is rejected before the place query RPC')
+    const filteredChest = await agent.places.sdk.find('field chest', { kind: 'storage', purpose: 'food' })
+    assert.match(filteredChest, /field chest \[place-/)
+    assert.equal(queryCalls, 1, 'a valid text argument retains the supported filters and reaches the place query')
     const relation = await agent.places.sdk.setOutputStorage(farm.id, chestResponse.value.id)
     assert.equal(relation.ok, true)
     const inspectText = await agent.places.sdk.inspect(farm.id)
@@ -240,7 +250,19 @@ async function main() {
     agent.history = { getHistory() { return [] } }
     const coder = new Coder(agent)
     await waitFor(() => coder.code_template.includes('async (bot, places)') && coder.code_lint_template.includes('main(bot, places, vision)'), 3000, 'coder templates did not load')
-    const generated = await coder._stageCode("const result = await places.find('forest'); log(bot, result);")
+    const capabilityDocs = await agent.prompter.skill_libary.getAllSkillDocs()
+    const placeCapabilityDocs = capabilityDocs.filter((doc) => doc.startsWith('places.'))
+    assert.equal(placeCapabilityDocs.length, 13, 'the existing SDK documentation path exposes each public places method')
+    const findDoc = placeCapabilityDocs.find((doc) => doc.startsWith('places.find\n'))
+    assert.match(findDoc, /places\.find\(text, options\?\) -> Promise<string>/)
+    assert.match(findDoc, /nonempty string/)
+    assert.match(findDoc, /await places\.find\("倉庫", \{ kind: "storage", purpose: "food" \}\)/)
+    const observedStorageDoc = placeCapabilityDocs.find((doc) => doc.startsWith('places.rememberObservedAt\n'))
+    assert.match(observedStorageDoc, /chest or trapped chest/)
+    assert.match(observedStorageDoc, /await places\.rememberObservedAt/)
+    const rememberHereDoc = placeCapabilityDocs.find((doc) => doc.startsWith('places.rememberHere\n'))
+    assert.match(rememberHereDoc, /only be "other" \(default\) or "base"/)
+    const generated = await coder._stageCode("const result = await places.find('forest', { kind: 'forest' }); log(bot, result);")
     assert.equal(await coder._lintCode(generated.src_lint_copy), null, 'place SDK use passes the actual Coder lint/template path')
     bot.output = ''
     await generated.func.main(bot, agent.places.sdk)

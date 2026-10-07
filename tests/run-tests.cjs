@@ -627,6 +627,7 @@ async function main() {
   execFileSync(node, [path.join(__dirname, 'place_rpc.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'block_placement.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'targeted_sdk.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'chest_transfer.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'place_actions.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'place_agent.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'action_manager.test.cjs')], { stdio: 'inherit' })
