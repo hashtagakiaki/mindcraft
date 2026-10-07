@@ -380,8 +380,3 @@ export function getMiningState (bot) {
     serverConfirmed: operation.serverConfirmed
   }
 }
-
-export function isMiningProtected (bot, now = Date.now()) {
-  const operation = installedBots.get(bot)?.activeDig
-  return Boolean(operation && !operation.serverConfirmed && now < operation.deadline)
-}

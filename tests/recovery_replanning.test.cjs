@@ -27,7 +27,6 @@ async function makeModeFixture() {
   await writeFile(path.join(agentDir, 'settings.js'), 'export default { narrate_behavior: false }\n')
   await writeFile(path.join(agentDir, 'library/skills.js'), 'export async function moveAway(bot, distance) { bot.fixtureMoves.push(distance); if (bot.fixtureMoveError) throw bot.fixtureMoveError }\n')
   await writeFile(path.join(agentDir, 'library/world.js'), 'export function getNearestBlock() { return null }\n')
-  await writeFile(path.join(agentDir, 'library/mining_sync.js'), 'export function isMiningProtected() { return false }\n')
   await writeFile(path.join(root, 'src/utils/mcdata.js'), 'export function isHostile() { return false }; export function isHuntable() { return false }\n')
   const { initModes } = await import(pathToFileURL(path.join(agentDir, 'modes.js')))
   const position = vector()
@@ -44,7 +43,7 @@ async function makeModeFixture() {
     async stop(reason) {
       calls.stop.push({ reason, actionId: this.currentAction?.id ?? null })
       if (this.stopGate) return this.stopGate
-      const result = this.stopResult || { stopped: true, reason, actionId: this.currentAction?.id ?? null, phase: 'stopped:stuck' }
+      const result = this.stopResult || { stopped: true, reason, actionId: this.currentAction?.id ?? null, phase: `stopped:${reason}` }
       if (result.stopped) {
         this.currentAction = null
         this.currentActionLabel = ''
@@ -93,8 +92,7 @@ async function makeModeFixture() {
     openChat() {}
   }
   initModes(agent)
-  const allModesOff = Object.fromEntries(['self_preservation', 'unstuck', 'cowardice', 'hunting', 'item_collecting', 'torch_placing', 'elbow_room', 'self_defense', 'follow_player', 'cheat'].map(name => [name, false]))
-  allModesOff.unstuck = true
+  const allModesOff = Object.fromEntries(['self_preservation', 'cowardice', 'hunting', 'item_collecting', 'torch_placing', 'elbow_room', 'self_defense', 'follow_player', 'cheat'].map(name => [name, false]))
   agent.bot.modes.loadJson(allModesOff)
   return { root, agent, calls, recoveryResults, automaticMessages, cleanKills }
 }
@@ -107,129 +105,30 @@ async function updateUntil(check) {
   throw new Error('fixture condition did not become true')
 }
 
-async function testNonMovementPhases() {
-  for (const phase of [
-    'generating', 'staging', 'linting', 'inspecting-chest', 'waiting-for-smelting', 'opening-furnace',
-    'furnace-transfer-input', 'collecting-furnace-output', 'collecting-furnace-input',
-    'collecting-furnace-fuel', 'confirming-furnace-snapshot', 'confirming-player-inventory-after-stop',
-  ]) {
-    const fixture = await makeModeFixture()
-    try {
-      fixture.agent.actions.currentAction.phase = phase
-      const oldNow = Date.now
-      let now = 100000
-      Date.now = () => now
-      try {
-        await fixture.agent.bot.modes.update()
-        now += 30000
-        await fixture.agent.bot.modes.update()
-      } finally { Date.now = oldNow }
-      assert.deepEqual(fixture.calls.stop, [], `${phase} must not be diagnosed as movement stuck`)
-      assert.deepEqual(fixture.calls.run, [])
-      assert.deepEqual(fixture.agent.bot.fixtureMoves, [])
-    } finally { await rm(fixture.root, { recursive: true, force: true }) }
-  }
-}
-
-async function testSuccessfulRecovery() {
+async function testStationaryActionIsNotInterrupted() {
   const fixture = await makeModeFixture()
   try {
+    const { modes } = fixture.agent.bot
+    assert.equal(modes.exists('unstuck'), false)
+    modes.loadJson({ unstuck: true }) // old profiles and saved memory remain readable
+    assert.equal(Object.hasOwn(modes.getJson(), 'unstuck'), false)
+    assert.doesNotMatch(modes.getDocs(), /unstuck/)
+    assert.doesNotMatch(modes.getMiniDocs(), /unstuck/)
     const oldNow = Date.now
-    let now = 200000
+    let now = oldNow()
     Date.now = () => now
     try {
-      await fixture.agent.bot.modes.update() // establish the location baseline
-      now += 21001
-      await fixture.agent.bot.modes.update() // exceeds the named 20-second stuck bound
-      await updateUntil(() => fixture.recoveryResults.length > 0)
+      await modes.update()
+      now += 60000
+      await modes.update()
     } finally { Date.now = oldNow }
-    assert.deepEqual(fixture.calls.stop, [{ reason: 'stuck', actionId: 41 }])
-    assert.equal(fixture.calls.run.length, 1)
-    assert.equal(fixture.calls.run[0].timeout, 0.25)
-    assert.deepEqual(fixture.agent.bot.fixtureMoves, [5])
-    assert.equal(fixture.recoveryResults.length, 1)
-    assert.equal(fixture.recoveryResults[0].interruptedActionId, 41)
-    assert.equal(fixture.recoveryResults[0].recoveryResult.success, true)
-    assert.equal(fixture.automaticMessages.length, 0, 'unstuck delegates its single replanning prompt to the recovery coordinator')
-    assert.deepEqual(fixture.cleanKills, [])
+    assert.deepEqual(fixture.calls.stop, [])
+    assert.deepEqual(fixture.calls.run, [])
+    assert.deepEqual(fixture.agent.bot.fixtureMoves, [])
+    assert.deepEqual(fixture.recoveryResults, [])
+    assert.deepEqual(fixture.automaticMessages, [])
+    assert.equal(fixture.agent.actions.currentAction.id, 41)
   } finally { await rm(fixture.root, { recursive: true, force: true }) }
-}
-
-async function testRecoveryFailureAndStopFailure() {
-  const failure = await makeModeFixture()
-  try {
-    failure.agent.actions.recoveryResult = { success: false, interrupted: true, timedout: true, reason: 'timeout', phase: 'stopped:timeout' }
-    const oldNow = Date.now
-    let now = 300000
-    Date.now = () => now
-    try {
-      await failure.agent.bot.modes.update()
-      now += 21001
-      await failure.agent.bot.modes.update()
-      await updateUntil(() => failure.recoveryResults.length > 0)
-    } finally { Date.now = oldNow }
-    assert.equal(failure.recoveryResults.length, 1, 'timeout produces one result for the replanner')
-    assert.equal(failure.recoveryResults[0].recoveryResult.reason, 'timeout')
-    assert.equal(failure.automaticMessages.length, 0, 'failed recovery does not automatically ask the LLM to retry')
-    assert.deepEqual(failure.cleanKills, [])
-  } finally { await rm(failure.root, { recursive: true, force: true }) }
-
-  const stopped = await makeModeFixture()
-  try {
-    stopped.agent.actions.stopResult = { stopped: false, reason: 'stuck', actionId: 41, phase: 'stop-failed:stuck' }
-    const oldNow = Date.now
-    let now = 400000
-    Date.now = () => now
-    try {
-      await stopped.agent.bot.modes.update()
-      now += 21001
-      await stopped.agent.bot.modes.update()
-      await updateUntil(() => stopped.recoveryResults.length > 0)
-    } finally { Date.now = oldNow }
-    assert.equal(stopped.calls.run.length, 0, 'unstuck never starts while the old action failed to stop')
-    assert.equal(stopped.recoveryResults[0].stopResult.stopped, false)
-    assert.equal(stopped.recoveryResults[0].recoveryResult, null)
-  } finally { await rm(stopped.root, { recursive: true, force: true }) }
-
-  const userStopped = await makeModeFixture()
-  try {
-    let finishStop
-    userStopped.agent.actions.stopGate = new Promise(resolve => { finishStop = resolve })
-    const oldNow = Date.now
-    let now = 500000
-    Date.now = () => now
-    try {
-      await userStopped.agent.bot.modes.update()
-      now += 21001
-      await userStopped.agent.bot.modes.update()
-      await updateUntil(() => userStopped.calls.stop.length > 0)
-      userStopped.agent.actions.userStopped = true
-      userStopped.agent.actions.intentEpoch++
-      finishStop({ stopped: true, reason: 'user', actionId: 41, phase: 'stopped:user' })
-      await updateUntil(() => userStopped.recoveryResults.length > 0)
-    } finally { Date.now = oldNow }
-    assert.equal(userStopped.calls.run.length, 0, 'a human stop during recovery suppresses the unstuck body')
-    assert.equal(userStopped.recoveryResults[0].stopResult.reason, 'user')
-    assert.equal(userStopped.automaticMessages.length, 0)
-  } finally { await rm(userStopped.root, { recursive: true, force: true }) }
-
-  const threw = await makeModeFixture()
-  try {
-    threw.agent.bot.fixtureMoveError = new Error('fixture recovery failure')
-    const oldNow = Date.now
-    let now = 600000
-    Date.now = () => now
-    try {
-      await threw.agent.bot.modes.update()
-      now += 21001
-      await threw.agent.bot.modes.update()
-      await updateUntil(() => threw.recoveryResults.length > 0)
-    } finally { Date.now = oldNow }
-    assert.equal(threw.recoveryResults.length, 1, 'an exception still produces one result for the recovery hook')
-    assert.equal(threw.recoveryResults[0].recoveryResult.reason, 'error')
-    assert.equal(threw.automaticMessages.length, 0)
-    assert.deepEqual(threw.cleanKills, [])
-  } finally { await rm(threw.root, { recursive: true, force: true }) }
 }
 
 async function makeAgentFixture() {
@@ -422,7 +321,7 @@ async function testRecoveryDedupAndUserStopRace() {
   } finally { await rm(stopped.root, { recursive: true, force: true }) }
 }
 
-async function testUnstuckTimeoutHasSingleRecoveryOwner() {
+async function testActionTimeoutHasSingleRecoveryOwner() {
   const fixture = await makeAgentFixture()
   try {
     const { agent } = fixture
@@ -436,11 +335,6 @@ async function testUnstuckTimeoutHasSingleRecoveryOwner() {
       const { signal } = agent.actions.getCancellationContext()
       await new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(new Error('cooperatively stopped')), { once: true }))
     }
-
-    const unstuckResult = await agent.actions.runAction('mode:unstuck', waitForAbort, { timeout: 1 })
-    await new Promise(resolve => setImmediate(resolve))
-    assert.equal(unstuckResult.reason, 'timeout')
-    assert.equal(results.length, 0, 'mode:unstuck timeout is left to the mode outcome callback')
 
     const normalResult = await agent.actions.runAction('action:ordinary', waitForAbort, { timeout: 1 })
     await updateUntil(() => results.length === 1)
@@ -498,15 +392,13 @@ async function testModelCannotRestartButHumanCommandCan() {
 
 async function main() {
   const source = await readFile(path.join(__dirname, '../src/agent/modes.js'), 'utf8')
-  assert.doesNotMatch(source, /agent\.cleanKill\(/, 'unstuck no longer kills the bot from a detached timer')
+  assert.doesNotMatch(source, /agent\.cleanKill\(/, 'modes do not kill the bot from a detached timer')
   assert.match(source, /finally \{\s*mode\.active = false;/, 'all recovery outcomes clear mode.active')
   assert.match(source, /agent\.handleMessage\('system'/, 'mode-generated replanning stays an internal message')
-  await testNonMovementPhases()
-  await testSuccessfulRecovery()
-  await testRecoveryFailureAndStopFailure()
+  await testStationaryActionIsNotInterrupted()
   await testAgentIntentAndRecoveryAdmission()
   await testRecoveryDedupAndUserStopRace()
-  await testUnstuckTimeoutHasSingleRecoveryOwner()
+  await testActionTimeoutHasSingleRecoveryOwner()
   await testRapidRepeatRunsOneBoundedPlan()
   await testRecoveryBudgetExhaustionStaysConnected()
   await testModelCannotRestartButHumanCommandCan()

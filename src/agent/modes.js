@@ -2,20 +2,6 @@ import * as skills from './library/skills.js';
 import * as world from './library/world.js';
 import * as mc from '../utils/mcdata.js';
 import settings from './settings.js'
-import { isMiningProtected } from './library/mining_sync.js';
-
-const UNSTUCK_RECOVERY_TIMEOUT_MINUTES = 0.25;
-const NON_MOVEMENT_ACTION_PHASES = new Set([
-    'generating',
-    'staging',
-    'linting',
-    'inspecting-chest',
-    'waiting-for-smelting',
-    'furnace-inventory-baseline',
-    'confirming-furnace-snapshot',
-    'confirming-player-inventory',
-    'confirming-player-inventory-after-stop',
-]);
 
 async function say(agent, message) {
     agent.bot.modes.behavior_log += message + '\n';
@@ -98,70 +84,6 @@ const modes_list = [
             else if (agent.isIdle()) {
                 bot.clearControlStates(); // clear jump if not in danger or doing anything else
             }
-        }
-    },
-    {
-        name: 'unstuck',
-        description: 'Attempt to get unstuck when in the same place for a while. Interrupts some actions.',
-        interrupts: ['all'],
-        on: true,
-        active: false,
-        prev_location: null,
-        distance: 2,
-        stuck_time: 0,
-        last_time: Date.now(),
-        max_stuck_time: 20,
-        prev_dig_block: null,
-        update: async function (agent) {
-            if (agent.isIdle()) { 
-                this.prev_location = null;
-                this.stuck_time = 0;
-                return; // don't get stuck when idle
-            }
-            const bot = agent.bot;
-            const phase = agent.actions.currentAction?.phase;
-            if (NON_MOVEMENT_ACTION_PHASES.has(phase) || phase?.startsWith('furnace-') ||
-                phase === 'opening-furnace' || phase?.startsWith('collecting-furnace-')) {
-                this.prev_location = bot.entity.position.clone();
-                this.stuck_time = 0;
-                this.prev_dig_block = bot.targetDigBlock;
-                this.last_time = Date.now();
-                return;
-            }
-            const cur_dig_block = bot.targetDigBlock;
-            if (isMiningProtected(bot)) {
-                this.stuck_time = 0;
-                this.prev_location = bot.entity.position.clone();
-                this.prev_dig_block = cur_dig_block;
-                this.last_time = Date.now();
-                return;
-            }
-            if (cur_dig_block && !this.prev_dig_block) {
-                this.prev_dig_block = cur_dig_block;
-            }
-            if (this.prev_location && this.prev_location.distanceTo(bot.entity.position) < this.distance && cur_dig_block == this.prev_dig_block) {
-                this.stuck_time += (Date.now() - this.last_time) / 1000;
-            }
-            else {
-                this.prev_location = bot.entity.position.clone();
-                this.stuck_time = 0;
-                this.prev_dig_block = null;
-            }
-            const max_stuck_time = cur_dig_block?.name === 'obsidian' ? this.max_stuck_time * 2 : this.max_stuck_time;
-            if (this.stuck_time > max_stuck_time) {
-                say(agent, 'I\'m stuck!');
-                this.stuck_time = 0;
-                execute(this, agent, async () => {
-                    await skills.moveAway(bot, 5);
-                    if (!bot.interrupt_code) say(agent, 'I\'m free.');
-                }, UNSTUCK_RECOVERY_TIMEOUT_MINUTES, 'stuck');
-            }
-            this.last_time = Date.now();
-        },
-        unpause: function () {
-            this.prev_location = null;
-            this.stuck_time = 0;
-            this.prev_dig_block = null;
         }
     },
     {
@@ -330,62 +252,24 @@ const modes_list = [
     }
 ];
 
-async function execute(mode, agent, func, timeout=-1, stopReason=null) {
+async function execute(mode, agent, func, timeout=-1) {
     if (agent.self_prompter.isActive())
         agent.self_prompter.stopLoop();
     let interrupted_action = agent.actions.currentActionLabel;
-    const interruptedActionId = agent.actions.currentAction?.id ?? null;
-    const intentEpoch = agent.actions.intentEpoch;
-    let stopResult = null;
     let code_return = null;
     mode.active = true;
     try {
-        if (stopReason && interruptedActionId != null) {
-            stopResult = await agent.actions.stop(stopReason);
-            if (!stopResult.stopped || agent.actions.userStopped || agent.actions.intentEpoch !== intentEpoch) {
-                if (mode.name === 'unstuck') {
-                    try {
-                        agent.onRecoveryResult?.({
-                            eventId: agent.actions.nextRecoveryEventId?.(),
-                            kind: 'unstuck', interruptedAction: interrupted_action, interruptedActionId,
-                            reason: stopResult.reason || 'stuck',
-                            recoveryActionId: null, stopResult, recoveryResult: null
-                        });
-                    } catch (error) { console.warn('Unstuck result hook failed:', error); }
-                }
-                return null;
-            }
-        }
-        try {
-            code_return = await agent.actions.runAction(`mode:${mode.name}`, async () => {
-                const context = agent.actions.getCancellationContext();
-                if (context) agent.actions.setPhase(`recovering:${mode.name}`, context.actionId);
-                await func();
-            }, { timeout });
-        } catch (error) {
-            if (mode.name !== 'unstuck') throw error;
-            code_return = {
-                success: false, message: error?.stack || String(error),
-                interrupted: false, timedout: false, reason: 'error', actionId: null,
-            };
-        }
+        code_return = await agent.actions.runAction(`mode:${mode.name}`, async () => {
+            const context = agent.actions.getCancellationContext();
+            if (context) agent.actions.setPhase(`recovering:${mode.name}`, context.actionId);
+            await func();
+        }, { timeout });
         console.log(`Mode ${mode.name} finished executing, code_return: ${code_return.message}`);
-        if (mode.name === 'unstuck') {
-            try {
-                agent.onRecoveryResult?.({
-                    eventId: agent.actions.nextRecoveryEventId?.(),
-                    kind: 'unstuck', interruptedAction: interrupted_action, interruptedActionId,
-                    reason: stopResult?.reason || code_return.reason || 'stuck',
-                    recoveryActionId: code_return.actionId, stopResult, recoveryResult: code_return
-                });
-            } catch (error) { console.warn('Unstuck result hook failed:', error); }
-        }
     } finally {
         mode.active = false;
     }
 
     let should_reprompt = 
-        mode.name !== 'unstuck' && // unstuck reports through the bounded recovery coordinator
         interrupted_action && // it interrupted a previous action
         !agent.actions.resume_func && // there is no resume function
         !agent.self_prompter.isActive() && // self prompting is not on

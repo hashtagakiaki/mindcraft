@@ -195,54 +195,6 @@ async function main() {
     assert.match(bot.output, /Collected 1 iron_ore/)
   }
 
-  // The normal unstuck mode discards stationary time while a finite mining operation is protected.
-  {
-    const { initModes } = await import(pathToFileURL(path.join(root, 'src/agent/modes.js')))
-    const position = {
-      x: 0, y: 0, z: 0,
-      clone() { return { ...this, clone: this.clone, distanceTo: () => 0 } },
-      distanceTo: () => 0
-    }
-    const bot = new EventEmitter()
-    bot.entity = { id: 1, position }
-    bot.targetDigBlock = ore()
-    bot.stopDigging = () => {}
-    const { installMiningSync } = await import(pathToFileURL(path.join(root, 'src/agent/library/mining_sync.js')))
-    const miningState = installMiningSync(bot)
-    let runActionCount = 0
-    const agent = {
-      bot,
-      task: null,
-      prompter: { getInitModes: () => Object.fromEntries([
-        'self_preservation', 'unstuck', 'cowardice', 'self_defense', 'hunting',
-        'item_collecting', 'torch_placing', 'elbow_room', 'idle_staring', 'cheat'
-      ].map(name => [name, name === 'unstuck'])) },
-      actions: {
-        currentActionLabel: 'mining',
-        async runAction() { runActionCount++; return { message: 'captured', interrupted: true } }
-      },
-      self_prompter: { isActive: () => false },
-      isIdle: () => false,
-      cleanKill() { throw new Error('unexpected cleanKill') }
-    }
-    initModes(agent)
-    const originalNow = Date.now
-    let now = originalNow()
-    Date.now = () => now
-    try {
-      await bot.modes.update()
-      miningState.activeDig = { startedAt: now, deadline: now + 60_000, serverConfirmed: false }
-      now += 30_000
-      await bot.modes.update()
-      assert.equal(runActionCount, 0, 'protected digging time does not trigger unstuck')
-      miningState.activeDig = null
-      now += 30_000
-      await bot.modes.update()
-      assert.equal(runActionCount, 1, 'stationary time after digging is counted again')
-    } finally {
-      Date.now = originalNow
-    }
-  }
   console.log('mining integration tests passed')
 }
 

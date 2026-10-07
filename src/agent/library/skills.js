@@ -488,8 +488,6 @@ export async function smeltItem(bot, itemName, num=1, actionContext=null) {
     if (bot.entity.position.distanceTo(furnaceBlock.position) > 4)
         await goToNearestBlock(bot, 'furnace', 4, furnaceRange);
     if (isActionCancelled(bot, context)) return false;
-
-    bot.modes.pause('unstuck');
     let furnace = null;
     let clickGuard = null;
     let cancelled = false;
@@ -628,8 +626,6 @@ export async function smeltItem(bot, itemName, num=1, actionContext=null) {
             } catch (error) {
                 cleanupError ||= error;
             } finally {
-                try { bot.modes.unpause('unstuck'); }
-                catch (error) { cleanupError ||= error; }
                 if (furnace) {
                     try {
                         setActionPhase(context, cancelled || isActionCancelled(bot, context)
@@ -2273,14 +2269,12 @@ export async function followPlayer(bot, username, distance=4) {
         if (distance_from_player <= nearby_distance) {
             clearInterval(doorCheckInterval);
             doorCheckInterval = null;
-            bot.modes.pause('unstuck');
             bot.modes.pause('elbow_room');
         }
         else {
             if (!doorCheckInterval) {
                 doorCheckInterval = startDoorInterval(bot);
             }
-            bot.modes.unpause('unstuck');
             bot.modes.unpause('elbow_room');
         }
     }
@@ -2377,7 +2371,6 @@ export async function stay(bot, seconds=30) {
      * await skills.stay(bot);
      **/
     bot.modes.pause('self_preservation');
-    bot.modes.pause('unstuck');
     bot.modes.pause('cowardice');
     bot.modes.pause('self_defense');
     bot.modes.pause('hunting');
@@ -2485,7 +2478,6 @@ export async function goToBed(bot) {
     const bed = bot.blockAt(loc);
     await bot.sleep(bed);
     log(bot, `You are in bed.`);
-    bot.modes.pause('unstuck');
     while (bot.isSleeping) {
         await new Promise(resolve => setTimeout(resolve, 500));
     }
@@ -2662,7 +2654,6 @@ async function findAndGoToVillager(bot, id) {
     if (distance > 4) {
         log(bot, `Villager is ${distance.toFixed(1)} blocks away, moving closer...`);
         try {
-            bot.modes.pause('unstuck');
             const goal = new pf.goals.GoalFollow(entity, 2);
             await goToGoal(bot, goal);
             
@@ -2672,8 +2663,6 @@ async function findAndGoToVillager(bot, id) {
             log(bot, 'Failed to reach villager - pathfinding error or villager moved');
             console.log(err);
             return null;
-        } finally {
-            bot.modes.unpause('unstuck');
         }
     }
     

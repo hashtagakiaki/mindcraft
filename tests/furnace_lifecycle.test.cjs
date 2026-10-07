@@ -95,7 +95,7 @@ function makeBot({ ore = 3, coal = 2, furnaceSeed = {}, autoSmelt = true, smeltD
   bot.supportFeature = name => name === 'stateIdUsed'
   bot.swingArm = () => {}
   bot.lookAt = async () => {}
-  bot.modes = { pause() {}, unpause() { bot.unpauseCount = (bot.unpauseCount || 0) + 1 } }
+  bot.modes = { pause() { assert.fail('smelting must not pause modes') }, unpause() { assert.fail('smelting must not unpause modes') } }
   bot._client.writes = client.writes
   inventoryPlugin(bot, { hideErrors: true })
   furnacePlugin(bot)
@@ -416,9 +416,8 @@ async function main() {
 
   const closeFailure = makeBot({ closeError: true })
   await assert.rejects(skills.smeltItem(closeFailure, 'raw_iron', 1), /fixture close exception/)
-  assert.equal(closeFailure.unpauseCount, 1, 'mode cleanup runs even when owned-window close fails')
   assert.equal(closeFailure.inventoryUnconfirmed, true, 'open/ambiguous furnace after close failure gates later actions')
-  cases.closeFailure = { propagated: true, inventoryUnconfirmed: true, modesUnpaused: true }
+  cases.closeFailure = { propagated: true, inventoryUnconfirmed: true }
 
   const unknownFurnace = makeBot({ suppressFurnaceFenceSnapshot: true })
   await assert.rejects(skills.smeltItem(unknownFurnace, 'raw_iron', 1), /no full inventory snapshot/, 'furnace state without a full snapshot is not successful')

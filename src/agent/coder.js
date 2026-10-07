@@ -32,22 +32,19 @@ export class Coder {
         const check = () => {
             if (context?.signal.aborted || this.agent.bot.interrupt_code) throw new Error('Action cancelled');
         };
-        this.agent.bot.modes.pause('unstuck');
-        try {
-            lockdown();
-            check();
-            this.agent.actions.setPhase('staging', context?.actionId);
-            const staged = await this._stageCode(code, check);
-            check();
-            this.agent.actions.setPhase('linting', context?.actionId);
-            if (!staged) throw new Error('Could not stage code');
-            const error = await this._lintCode(staged.src_lint_copy);
-            check();
-            if (error) throw new Error(error);
-            this.agent.actions.setPhase('executing', context?.actionId);
-            await trackSkill('generated_code', () => staged.func.main(this.agent.bot, guardSdk(this.agent.places?.sdk, check)))();
-            check();
-        } finally { this.agent.bot.modes.unpause('unstuck'); }
+        lockdown();
+        check();
+        this.agent.actions.setPhase('staging', context?.actionId);
+        const staged = await this._stageCode(code, check);
+        check();
+        this.agent.actions.setPhase('linting', context?.actionId);
+        if (!staged) throw new Error('Could not stage code');
+        const error = await this._lintCode(staged.src_lint_copy);
+        check();
+        if (error) throw new Error(error);
+        this.agent.actions.setPhase('executing', context?.actionId);
+        await trackSkill('generated_code', () => staged.func.main(this.agent.bot, guardSdk(this.agent.places?.sdk, check)))();
+        check();
     }
 
     async generateCode(agent_history) {
@@ -57,106 +54,98 @@ export class Coder {
         const setPhase = phase => {
             if (context) this.agent.actions.setPhase(phase, actionId);
         };
-        let pausedUnstuck = false;
+        lockdown();
+        // this message history is transient and only maintained in this function
+        let messages = agent_history.getHistory();
+        messages.push({role: 'system', content: 'Code generation started. Write code in codeblock in your response:'});
 
-        try {
-            this.agent.bot.modes.pause('unstuck');
-            pausedUnstuck = true;
-            lockdown();
-            // this message history is transient and only maintained in this function
-            let messages = agent_history.getHistory();
-            messages.push({role: 'system', content: 'Code generation started. Write code in codeblock in your response:'});
+        const MAX_ATTEMPTS = 5;
+        const MAX_NO_CODE = 3;
 
-            const MAX_ATTEMPTS = 5;
-            const MAX_NO_CODE = 3;
-
-            let code = null;
-            let no_code_failures = 0;
-            for (let i=0; i<MAX_ATTEMPTS; i++) {
-                if (isCancelled()) return null;
-                setPhase('generating');
-                const messages_copy = JSON.parse(JSON.stringify(messages));
-                let res = await this.agent.prompter.promptCoding(messages_copy, context);
-                if (isCancelled()) return null;
-                if (typeof res !== 'string') return null;
-                let contains_code = res.indexOf('```') !== -1;
-                if (!contains_code) {
-                    if (res.indexOf('!newAction') !== -1) {
-                        messages.push({
-                            role: 'assistant',
-                            content: res.substring(0, res.indexOf('!newAction'))
-                        });
-                        continue; // using newaction will continue the loop
-                    }
-
-                    if (no_code_failures >= MAX_NO_CODE) {
-                        console.warn("Action failed, agent would not write code.");
-                        return 'Action failed, agent would not write code.';
-                    }
-                    messages.push({
-                        role: 'system',
-                        content: 'Error: no code provided. Write code in codeblock in your response. ``` // example ```'}
-                    );
-                    console.warn("No code block generated. Trying again.");
-                    no_code_failures++;
-                    continue;
-                }
-                code = res.substring(res.indexOf('```')+3, res.lastIndexOf('```'));
-                if (isCancelled()) return null;
-                setPhase('staging');
-                const result = await this._stageCode(code);
-                if (isCancelled()) return null;
-                if (!result) {
-                    console.warn("Failed to stage code, something is wrong.");
-                    return 'Failed to stage code, something is wrong.';
-                }
-                const executionModule = result.func;
-                setPhase('linting');
-                const lintResult = await this._lintCode(result.src_lint_copy);
-                if (isCancelled()) return null;
-                if (lintResult) {
-                    const message = 'Error: Code lint error:'+'\n'+lintResult+'\nPlease try again.';
-                    console.warn("Linting error:"+'\n'+lintResult+'\n');
-                    messages.push({ role: 'system', content: message });
-                    continue;
-                }
-                if (!executionModule) {
-                    console.warn("Failed to stage code, something is wrong.");
-                    return 'Failed to stage code, something is wrong.';
-                }
-
-                try {
-                    setPhase('executing');
-                    if (isCancelled()) return null;
-                    console.log('Executing code...');
-                    await trackSkill('generated_code', () => executionModule.main(this.agent.bot, this.agent.places?.sdk))();
-
-                    const code_output = this.agent.actions.getBotOutputSummary();
-                    const summary = "Agent wrote this code: \n```" + this._sanitizeCode(code) + "```\nCode Output:\n" + code_output;
-                    return summary;
-                } catch (e) {
-                    if (isCancelled())
-                        return null;
-
-                    console.warn('Generated code threw error: ' + e.toString());
-                    console.warn('trying again...');
-
-                    const code_output = this.agent.actions.getBotOutputSummary();
-
+        let code = null;
+        let no_code_failures = 0;
+        for (let i=0; i<MAX_ATTEMPTS; i++) {
+            if (isCancelled()) return null;
+            setPhase('generating');
+            const messages_copy = JSON.parse(JSON.stringify(messages));
+            let res = await this.agent.prompter.promptCoding(messages_copy, context);
+            if (isCancelled()) return null;
+            if (typeof res !== 'string') return null;
+            let contains_code = res.indexOf('```') !== -1;
+            if (!contains_code) {
+                if (res.indexOf('!newAction') !== -1) {
                     messages.push({
                         role: 'assistant',
-                        content: res
+                        content: res.substring(0, res.indexOf('!newAction'))
                     });
-                    messages.push({
-                        role: 'system',
-                        content: `Code Output:\n${code_output}\nCODE EXECUTION THREW ERROR: ${e.toString()}\n Please try again:`
-                    });
+                    continue; // using newaction will continue the loop
                 }
+
+                if (no_code_failures >= MAX_NO_CODE) {
+                    console.warn("Action failed, agent would not write code.");
+                    return 'Action failed, agent would not write code.';
+                }
+                messages.push({
+                    role: 'system',
+                    content: 'Error: no code provided. Write code in codeblock in your response. ``` // example ```'}
+                );
+                console.warn("No code block generated. Trying again.");
+                no_code_failures++;
+                continue;
             }
-            return `Code generation failed after ${MAX_ATTEMPTS} attempts.`;
-        } finally {
-            if (pausedUnstuck) this.agent.bot.modes.unpause('unstuck');
+            code = res.substring(res.indexOf('```')+3, res.lastIndexOf('```'));
+            if (isCancelled()) return null;
+            setPhase('staging');
+            const result = await this._stageCode(code);
+            if (isCancelled()) return null;
+            if (!result) {
+                console.warn("Failed to stage code, something is wrong.");
+                return 'Failed to stage code, something is wrong.';
+            }
+            const executionModule = result.func;
+            setPhase('linting');
+            const lintResult = await this._lintCode(result.src_lint_copy);
+            if (isCancelled()) return null;
+            if (lintResult) {
+                const message = 'Error: Code lint error:'+'\n'+lintResult+'\nPlease try again.';
+                console.warn("Linting error:"+'\n'+lintResult+'\n');
+                messages.push({ role: 'system', content: message });
+                continue;
+            }
+            if (!executionModule) {
+                console.warn("Failed to stage code, something is wrong.");
+                return 'Failed to stage code, something is wrong.';
+            }
+
+            try {
+                setPhase('executing');
+                if (isCancelled()) return null;
+                console.log('Executing code...');
+                await trackSkill('generated_code', () => executionModule.main(this.agent.bot, this.agent.places?.sdk))();
+
+                const code_output = this.agent.actions.getBotOutputSummary();
+                const summary = "Agent wrote this code: \n```" + this._sanitizeCode(code) + "```\nCode Output:\n" + code_output;
+                return summary;
+            } catch (e) {
+                if (isCancelled())
+                    return null;
+
+                console.warn('Generated code threw error: ' + e.toString());
+                console.warn('trying again...');
+
+                const code_output = this.agent.actions.getBotOutputSummary();
+
+                messages.push({
+                    role: 'assistant',
+                    content: res
+                });
+                messages.push({
+                    role: 'system',
+                    content: `Code Output:\n${code_output}\nCODE EXECUTION THREW ERROR: ${e.toString()}\n Please try again:`
+                });
+            }
         }
+        return `Code generation failed after ${MAX_ATTEMPTS} attempts.`;
     }
     
     async  _lintCode(code) {

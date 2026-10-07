@@ -121,7 +121,7 @@ async function main() {
     const digging = bot.dig(block, 'ignore')
     await sleep(0)
     bot._updateBlockState(block.position, 0)
-    assert.equal(mining.isMiningProtected(bot), true)
+    assert.equal(mining.getMiningState(bot).serverConfirmed, false)
     await sleep(25)
     assert.equal(mining.getMiningState(bot).inferredAir, true)
     assert.equal(bot.targetDigBlock, null)
@@ -167,19 +167,18 @@ async function main() {
     assert.equal(bot.listenerCount(`blockUpdate:${block.position}`), 0)
     assert.equal(bot.targetDigBlock, null)
   }
-  // A normal long dig stays protected beyond the historical 20-second unstuck threshold.
+  // A long dig records its expected duration and finite server-confirmation deadline.
   {
     const { bot, block } = fixture({ digMs: 30_000, confirmationGraceMs: 2_000 })
     const digging = bot.dig(block, 'ignore')
     await sleep(0)
-    assert.equal(mining.isMiningProtected(bot), true)
+    assert.equal(mining.getMiningState(bot).serverConfirmed, false)
     const state = mining.getMiningState(bot)
     assert.equal(state.expectedDigMs, 30_000)
-    assert.equal(mining.isMiningProtected(bot, state.startedAt + 25_000), true)
-    assert.equal(mining.isMiningProtected(bot, state.deadline), false)
+    assert.equal(state.deadline - state.startedAt, 32_000)
     serverAir(bot, block)
     await digging
-    assert.equal(mining.isMiningProtected(bot), false)
+    assert.equal(mining.getMiningState(bot), null)
   }
   // Finish has nulled target/face, so external stop must restore them before delegating.
   {

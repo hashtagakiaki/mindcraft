@@ -394,9 +394,6 @@ export class ActionManager {
     notifyRecoverySettled(action, result) {
         if (!action.reason || action.recoveryAdmissionId || this.notifiedRecoveryActions.has(action.id)) return;
         if (!['timeout'].includes(action.reason)) return;
-        // Modes own their full recovery outcome, including a timeout in the
-        // mode action itself. Notifying here as well would spend two plans.
-        if (action.label === 'mode:unstuck') return;
         this.notifiedRecoveryActions.add(action.id);
         if (this.notifiedRecoveryActions.size > MAX_RECOVERY_DEDUPE) this.notifiedRecoveryActions.delete(this.notifiedRecoveryActions.values().next().value);
         this.agent.onRecoveryResult?.({

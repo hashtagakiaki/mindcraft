@@ -474,7 +474,7 @@ async function runCoderPrompterFixtures(sandbox) {
     failed.code_model.sendRequest = async () => 'valid response'
     assert.equal(await failed.promptCoding([]), 'valid response', 'next valid generation must proceed after an error')
 
-    const modes = { paused: false, pause() { this.paused = true }, unpause() { this.paused = false } }
+    const modes = { pause() { assert.fail('code generation must not pause modes') }, unpause() { assert.fail('code generation must not unpause modes') } }
     const phases = []
     let promptImpl
     const makeAgent = contextForAction => ({
@@ -506,7 +506,6 @@ async function runCoderPrompterFixtures(sandbox) {
     assert.equal(await duringGeneration, null)
     assert.equal(stageCalls, 0, 'cancelled generation must not stage late code')
     assert.equal(executionCalls, 0, 'cancelled generation must not execute late code')
-    assert.equal(modes.paused, false, 'unstuck must be unpaused after cancellation')
 
     const stageController = new AbortController()
     coder.agent.actions.getCancellationContext = () => ({ actionId: 3, signal: stageController.signal })
@@ -520,7 +519,6 @@ async function runCoderPrompterFixtures(sandbox) {
     assert.equal(await duringStage, null)
     assert.equal(lintCalls, 0, 'cancellation after staging must skip lint and execution')
     assert.equal(executionCalls, 0)
-    assert.equal(modes.paused, false)
 
     const lintController = new AbortController()
     coder.agent.actions.getCancellationContext = () => ({ actionId: 4, signal: lintController.signal })
@@ -533,7 +531,6 @@ async function runCoderPrompterFixtures(sandbox) {
     lintGate.resolve(null)
     assert.equal(await duringLint, null)
     assert.equal(executionCalls, 0, 'cancellation after lint must skip execution')
-    assert.equal(modes.paused, false)
     assert.deepEqual(phases.map(entry => entry.phase), ['generating', 'generating', 'staging', 'generating', 'staging', 'linting'])
 
     const validController = new AbortController()
@@ -543,7 +540,6 @@ async function runCoderPrompterFixtures(sandbox) {
     const validResult = await coder.generateCode(history)
     assert.match(validResult, /Agent wrote this code/)
     assert.equal(executionCalls, 1, 'next valid generation must execute once after cancellation')
-    assert.equal(modes.paused, false)
     assert.ok(phases.some(entry => entry.phase === 'executing' && entry.id === 5))
     return { lateResponseCannotStageOrExecute: true, cancellationAtStageAndLintStopsExecution: true, nextGenerationSucceeds: true }
   } finally {

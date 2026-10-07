@@ -134,6 +134,8 @@ An eval-owned isolated CaseServer smoke on 2026-10-02, using source pin `d549e73
 
 ### Action cancellation and reconnect behavior
 
+The `unstuck` mode has been removed. Staying at the same position no longer interrupts an action or starts an automatic escape movement. Mode listings and default profiles omit it; existing saved `unstuck` settings are ignored. Navigation progress checks and action deadlines still apply.
+
 Normal successful work, including smelting and furnace clearing, keeps the current Minecraft connection. A cooperative stop also keeps that connection. `!stop` suppresses automatic resume and goal retries; a later explicit user instruction may start new work after the old action settles. A replacement instruction waits for the prior action to settle before its body can mutate the world.
 
 Timeouts, movement stalls, and rapid repeated failures request a bounded stop and recovery. When the old action settles safely, the bot checks confirmed state and tries one recovery/replan; unchanged repeated failures do not loop indefinitely. At the recovery limit, it pauses and reports the blocker while staying connected. A management-socket disconnect also pauses work; after Socket.IO reconnect, settings and place namespace are checked before registration and login resume, and autonomous/action execution stays gated until a fresh explicit human instruction arrives. Old commands and uncertain RPC mutations are not replayed.

@@ -1,7 +1,6 @@
 {
     "modes": {
         "self_preservation": true,
-        "unstuck": true,
         "cowardice": false,
         "self_defense": true,
         "hunting": false,
