@@ -470,7 +470,13 @@ world scope（root `place_world_id`）がある場合、同じbot/world/model/ef
 
 native taskのvisionはJPEGをtool resultの `inputImage` として判断中のCodexへ直接返す。`allow_vision` と画像対応のnative modelが必要で、別の `vision_model` は不要。既存vision SDKの戻り値・`analysis` は画像添付markerと観測metadataになり、画像はモデルが解釈する。上限は1操作4枚、各2 MiB。失敗前に取得できた画像は部分結果として保持し、取消後の画像は次taskへ渡さない。Mindcraft JSONL/diagnosticsにはmetadataだけを残しbase64を入れない。legacyの画像解釈・自然言語memory要約は従来どおり。
 
-`codex_session` の既定値は、`stall_timeout_ms: 30000`、`action_timeout_ms: 120000`、`output_limit: 16000`、`max_search_radius: 64`、`task_budget_ms: 300000`、`max_operations: 32`、`max_turns: 40`。task budgetの経過時間はmodel待ち・再試行・operation待ちを含み、operation数は受理した実行要求、旧名 `max_turns` はhostの判断再開数（turn開始と各SDK tool resultによる再開）を数え、Codex内部の検索・圧縮回数は含めない。先に達した上限は停止を要求し、実operationのsettlementを代替しない。通常actionでは位置の0.5 block以上の変化か在庫の変化で停滞timerを更新する。navigation phase中はnative monitorも生の位置変化でなくowned callの未訪問route node到達を進捗として使うため、無応答は既定30秒でstopする。`goToGoal` はさらに既定90秒の有限stall期限を保ち、同じnodeの再到達やpath再計算だけでは時計を更新しない。120秒のaction hard timeoutはそのまま働く。同期のblock検索はこのruntimeに限り指定半径を超えるとerrorを返す。任意の同期codeや協調停止しない操作をtimerで強制停止できる保証はない。既存10秒stop watchdogと親process回収が最終境界となる。
+`codex_session` の既定値は、`stall_timeout_ms: 30000`、`action_timeout_ms: 600000`、`output_limit: 16000`、`max_search_radius: 64`、`task_budget_ms: null`、`max_operations: null`、`max_turns: null`。この3つだけは`null`で上限を無効化でき、既定では長時間taskを時間・操作・判断回数で打ち切らない。有限の上限を使う場合は正の数（操作・判断回数は整数）を設定する。各判断の残りbudgetも無制限は`null`を返す。
+
+task budgetの経過時間はmodel待ち・再試行・operation待ちを含み、operation数は受理した実行要求、旧名 `max_turns` はhostの判断再開数（turn開始と各SDK tool resultによる再開）を数え、Codex内部の検索・圧縮回数は含めない。先に達した上限は停止を要求し、実operationのsettlementを代替しない。
+
+通常actionでは位置の0.5 block以上の変化か在庫の変化で停滞timerを更新する。navigation phase中はnative monitorも生の位置変化でなくowned callの未訪問route node到達を進捗として使うため、無応答は既定30秒でstopする。`goToGoal` はさらに既定90秒の有限stall期限を保ち、同じnodeの再到達やpath再計算だけでは時計を更新しない。1操作のhard timeoutは既定10分で、task全体の制限と独立して働く。settleしたtimeout/stallの結果は同じtaskへ返し、状態確認と修正を続けられる。
+
+失敗した同じcode・error・観測状態が進捗なしで3回繰り返された場合は、次の実行を拒否してtask errorとして報告する。途中の読み取り成功だけではこの回数を消さず、異なる失敗条件・観測状態、確認済み変更、または観測された操作進捗で更新する。同期のblock検索はこのruntimeに限り指定半径を超えるとerrorを返す。任意の同期codeや協調停止しない操作をtimerで強制停止できる保証はない。既存10秒stop watchdogと親process回収が最終境界となる。
 
 Codex app-serverから受信した確定済み `agentMessage` は、Codex turnが終わるのを待たず、MindServer operator UIのBot output logへ時刻・bot名・本文付きで追記する。ページ接続時は保存済み `bots/<bot>/histories/codex-*.jsonl` から確定済み回答を読み込み、旧bundleに残る履歴も含めて直近200件を表示する。履歴APIは回答本文とtask失敗だけを返し、内部推論や実行traceは返さない。ログ本体はサーバーに残るCodex task traceを使い、ブラウザーlocalStorageには保存しない。保護モードのobserver接続には配信しない。
 

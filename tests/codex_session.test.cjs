@@ -80,6 +80,21 @@ async function main() {
     settings.codex_session.stall_timeout_ms = 0
     assert.throws(() => validateCodexRuntime({ model: 'codex/gpt-6-luna' }), /Invalid/)
     settings.codex_session.stall_timeout_ms = 60
+    const defaultConfig = { ...settings.codex_session }
+    delete settings.codex_session.action_timeout_ms
+    const longDefaults = validateCodexRuntime({ model: 'codex/gpt-6-luna' }).config
+    assert.equal(longDefaults.action_timeout_ms, 600000)
+    for (const key of ['task_budget_ms', 'max_operations', 'max_turns']) {
+      assert.equal(longDefaults[key], null)
+      for (const value of [0, -1, false, '32', NaN, Infinity]) {
+        settings.codex_session[key] = value
+        assert.throws(() => validateCodexRuntime({ model: 'codex/gpt-6-luna' }), new RegExp(`Invalid codex_session.${key}`))
+      }
+      settings.codex_session[key] = null
+    }
+    settings.codex_session.max_operations = 1.5
+    assert.throws(() => validateCodexRuntime({ model: 'codex/gpt-6-luna' }), /max_operations/)
+    settings.codex_session = defaultConfig
     const rules = [], routed = [], rows = []
     const makeAgent = name => {
       const agent = Object.create(Agent.prototype)
@@ -830,6 +845,114 @@ async function main() {
       const files = await fs.readdir(path.join(root, `bots/${name}/histories`))
       return (await fs.readFile(path.join(root, `bots/${name}/histories`, files[0]), 'utf8')).trim().split('\n').map(line => JSON.parse(line))
     }
+    // Default tasks survive the previous elapsed/operation/decision caps. Advance only
+    // the elapsed clock after a settled operation; real action timers remain exercised below.
+    const unlimitedSettings = { ...settings.codex_session }
+    settings.codex_session = { stall_timeout_ms: 60 }
+    const longAgent = makeAgent('LongTask')
+    longAgent.coder.executeCode = async () => { longAgent.bot.entity.position.x++; return true }
+    const originalNow = Date.now
+    let clockOffset = 0
+    const longInputs = []
+    const longRuntime = new NativeCodexRuntime(longAgent, { makeSession: ({ execute, prepareResult }) => ({
+      open: async () => {}, close: async () => {}, runTurn: async input => {
+        longInputs.push(input)
+        for (let index = 0; index < 48; index++) {
+          const result = await execute('observe and advance')
+          assert.equal(result.success, true)
+          clockOffset = 301000
+          const resumed = await prepareResult(result)
+          longInputs.push(resumed.contentItems[0].text)
+          await prepareResult({ documentation: 'fixture SDK documentation' })
+        }
+        return { messages: ['long task completed'] }
+      }
+    }) })
+    longAgent.codexRuntime = longRuntime
+    try {
+      Date.now = () => originalNow() + clockOffset
+      assert.equal(await longRuntime.run('operator', () => true, 'long-task'), true)
+    } finally { Date.now = originalNow }
+    const longTerminal = (await eventsFor('LongTask')).find(event => event.type === 'finished')
+    assert.equal(longTerminal.terminationReason, 'reported')
+    assert.ok(longTerminal.taskBudget.elapsedMs > 300000)
+    assert.equal(longTerminal.taskBudget.acceptedOperations, 48)
+    assert.equal(longTerminal.taskBudget.threadTurns, 97)
+    for (const input of longInputs) {
+      const budget = JSON.parse(input.split('CURRENT TASK:\n')[1].split('\n')[0]).budget
+      assert.equal(budget.remainingMs, null)
+      assert.equal(budget.remainingOperations, null)
+      assert.equal(budget.remainingHostDecisions, null)
+    }
+    // A settled operation timeout permits a corrected operation in the same task.
+    settings.codex_session = { ...unlimitedSettings, action_timeout_ms: 30, stall_timeout_ms: 1000 }
+    const timeoutAgent = makeAgent('TimeoutRepair')
+    const timeoutBody = deferred()
+    timeoutAgent.interrupt = () => timeoutBody.resolve()
+    timeoutAgent.coder.executeCode = async code => {
+      if (code === 'first slow operation') await timeoutBody.promise
+      else timeoutAgent.bot.entity.position.x++
+      return true
+    }
+    const timeoutRuntime = new NativeCodexRuntime(timeoutAgent, { makeSession: ({ execute, prepareResult }) => ({
+      open: async () => {}, close: async () => {}, runTurn: async () => {
+        const first = await execute('first slow operation')
+        assert.equal(first.reason, 'timeout')
+        assert.equal(timeoutAgent.actions.executing, false)
+        await prepareResult(first)
+        const repaired = await execute('corrected operation')
+        assert.equal(repaired.success, true)
+        await prepareResult(repaired)
+        return { messages: ['repaired in the same task'] }
+      }
+    }) })
+    timeoutAgent.codexRuntime = timeoutRuntime
+    assert.equal(await timeoutRuntime.run('operator', () => true, 'timeout-repair'), true)
+    assert.equal((await eventsFor('TimeoutRepair')).filter(event => event.type === 'operation_result').length, 2)
+    // Unchanged failures are blocked even when read-only inspections separate attempts.
+    settings.codex_session = unlimitedSettings
+    for (const kind of ['error', 'false']) {
+      const failureAgent = makeAgent('RepeatedFailure' + kind)
+      let attempts = 0
+      failureAgent.coder.executeCode = async code => {
+        await delay(25) // Keep this distinct from the existing 20 ms rapid-action guard.
+        if (code === 'inspect') return true
+        attempts++
+        if (kind === 'error') throw new Error('unchanged prerequisite')
+        return false
+      }
+      const failureRuntime = new NativeCodexRuntime(failureAgent, { makeSession: ({ execute, prepareResult }) => ({
+        open: async () => {}, close: async () => {}, runTurn: async () => {
+          for (let index = 0; index < 4; index++) {
+            await prepareResult(await execute('same failing operation'))
+            if (index < 2) await prepareResult(await execute('inspect'))
+          }
+          return { messages: ['must not reach'] }
+        }
+      }) })
+      failureAgent.codexRuntime = failureRuntime
+      assert.equal(await failureRuntime.run('operator', () => true, 'repeated-failure-' + kind), false)
+      assert.equal(attempts, 3)
+      assert.match(failureRuntime.terminalOutcome.error, /Repeated unchanged operation failure/)
+      assert.equal(failureAgent.actions.executing, false)
+    }
+    // Distinct repairs and observed progress do not exhaust the unchanged-failure guard.
+    const repairAgent = makeAgent('DistinctRepairs')
+    repairAgent.coder.executeCode = async code => {
+      await delay(25)
+      if (code === 'make progress') { repairAgent.bot.entity.position.x++; return true }
+      throw new Error('prerequisite missing')
+    }
+    const repairRuntime = new NativeCodexRuntime(repairAgent, { makeSession: ({ execute, prepareResult }) => ({
+      open: async () => {}, close: async () => {}, runTurn: async () => {
+        for (const code of ['attempt A', 'attempt A', 'attempt B', 'attempt B', 'make progress', 'attempt B', 'attempt B']) {
+          await prepareResult(await execute(code))
+        }
+        return { messages: ['different repairs remain possible'] }
+      }
+    }) })
+    repairAgent.codexRuntime = repairRuntime
+    assert.equal(await repairRuntime.run('operator', () => true, 'distinct-repairs'), true)
     const taskBudgets = { ...settings.codex_session, task_budget_ms: 30, max_operations: 24, max_turns: 30 }
     settings.codex_session = taskBudgets
     // Elapsed limits cancel model waits and produce exactly one terminal.

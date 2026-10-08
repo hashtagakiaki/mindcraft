@@ -10,8 +10,10 @@ import { operationContext, registerOwnedPromise } from './library/operation_cont
 import convoManager from './conversation.js';
 import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
 
-const DEFAULTS = { stall_timeout_ms: 30000, action_timeout_ms: 120000, output_limit: 16000, max_search_radius: 64,
-    task_budget_ms: 300000, max_operations: 32, max_turns: 40 };
+const DEFAULTS = { stall_timeout_ms: 30000, action_timeout_ms: 600000, output_limit: 16000, max_search_radius: 64,
+    task_budget_ms: null, max_operations: null, max_turns: null };
+const OPTIONAL_TASK_LIMITS = new Set(['task_budget_ms', 'max_operations', 'max_turns']);
+const MAX_UNCHANGED_OPERATION_FAILURES = 3;
 const MAX_NATIVE_INBOX_MESSAGES = 32;
 const MAX_NATIVE_DEDUPE_IDS = 256;
 const MAX_BLOCK_EDITS_PER_CHECK = 8;
@@ -26,8 +28,11 @@ export function validateCodexRuntime(profile) {
     selected.model = selected.model?.replace(/^codex\//, '');
     if (selected.api !== 'codex' || !selected.model) throw new Error('codex-session requires an explicit codex/model profile');
     const config = { ...DEFAULTS, ...settings.codex_session };
-    for (const [key, value] of Object.entries(config)) if (!Number.isFinite(value) || value <= 0) throw new Error(`Invalid codex_session.${key}`);
-    for (const key of ['max_operations', 'max_turns']) if (!Number.isInteger(config[key])) throw new Error(`Invalid codex_session.${key}`);
+    for (const [key, value] of Object.entries(config)) {
+        if (value === null && OPTIONAL_TASK_LIMITS.has(key)) continue;
+        if (!Number.isFinite(value) || value <= 0) throw new Error(`Invalid codex_session.${key}`);
+    }
+    for (const key of ['max_operations', 'max_turns']) if (config[key] !== null && !Number.isInteger(config[key])) throw new Error(`Invalid codex_session.${key}`);
     return { model: selected.model, effort: selected.params?.reasoning_effort ?? 'medium', config };
 }
 
@@ -185,6 +190,8 @@ export class CodexRuntime {
         let operationCount = 0;
         let turnCount = 0;
         let budgetReason = null;
+        let lastFailureKey = null;
+        let unchangedFailures = 0;
         let completion = 'unknown';
         let saveSucceeded = null;
         let reportedResponse;
@@ -254,10 +261,15 @@ export class CodexRuntime {
             this.abort.abort(`task-budget:${reason}`);
             if (agent.actions.currentAction) void agent.actions.stop(`task-budget:${reason}`);
         };
-        const elapsedBudget = setTimeout(() => reachBudget('elapsed-time'), config.task_budget_ms);
+        const elapsedBudget = config.task_budget_ms === null ? null
+            : setTimeout(() => reachBudget('elapsed-time'), config.task_budget_ms);
         const execute = async code => {
             if (!current()) throw new Error('Stale task');
-            if (operationCount >= config.max_operations) {
+            if (unchangedFailures >= MAX_UNCHANGED_OPERATION_FAILURES) {
+                record('operation_retry_blocked', { unchangedFailures });
+                throw new Error('Repeated unchanged operation failure; inspect the blocker and provide a new instruction.');
+            }
+            if (config.max_operations !== null && operationCount >= config.max_operations) {
                 reachBudget('accepted-operations');
                 throw new Error('Task operation budget reached');
             }
@@ -274,6 +286,19 @@ export class CodexRuntime {
             record('operation_result', { result: observed });
             appendOperationDiagnostic(diagnostics, code, observed);
             await persistDiagnostics();
+            const failures = (result.skillResults ?? []).filter(call => ['error', 'returned_false'].includes(call.status))
+                .map(call => ({ skill: call.skill, status: call.status, error: call.error }));
+            if (result.progressObserved || result.confirmedChanges?.length) {
+                lastFailureKey = null;
+                unchangedFailures = 0;
+            } else if (result.success === false || result.domainReturn === false || failures.length) {
+                const { position, dimension, items, equipment, inventoryUnconfirmed } = observed.observed;
+                const error = result.error ?? result.message?.split('!!Code threw exception!!\n')[1]?.split('\n')[0];
+                const key = createHash('sha256').update(JSON.stringify({ code: code.trim(), error,
+                    reason: result.reason, failures, position, dimension, items, equipment, inventoryUnconfirmed })).digest('hex');
+                unchangedFailures = key === lastFailureKey ? unchangedFailures + 1 : 1;
+                lastFailureKey = key;
+            }
             return observed;
         };
         let failed = false;
@@ -294,9 +319,9 @@ export class CodexRuntime {
             };
             const decisionContext = () => '\nCURRENT CAPABILITIES:\n' + JSON.stringify(currentCapabilities())
                 + '\nCURRENT TASK:\n' + JSON.stringify({ self: { name: agent.name }, taskId,
-                    budget: { remainingMs: Math.max(0, config.task_budget_ms - (Date.now() - acceptedAt)),
-                        remainingOperations: Math.max(0, config.max_operations - operationCount),
-                        hostDecisionsUsed: turnCount, remainingHostDecisions: Math.max(0, config.max_turns - turnCount) } });
+                    budget: { remainingMs: config.task_budget_ms === null ? null : Math.max(0, config.task_budget_ms - (Date.now() - acceptedAt)),
+                        remainingOperations: config.max_operations === null ? null : Math.max(0, config.max_operations - operationCount),
+                        hostDecisionsUsed: turnCount, remainingHostDecisions: config.max_turns === null ? null : Math.max(0, config.max_turns - turnCount) } });
             // Fail closed on unreadable shared rules, before creating a model request.
             await agent.prompter.withBotRules('');
             if (!current()) return false;
@@ -304,7 +329,7 @@ export class CodexRuntime {
             const operatorRequest = JSON.stringify(turns.at(-1));
             const prepareResult = async result => {
                 if (!current()) throw new Error('Stale task tool result');
-                if (turnCount >= config.max_turns) {
+                if (config.max_turns !== null && turnCount >= config.max_turns) {
                     reachBudget('thread-turns');
                     throw new Error('Task model decision budget reached');
                 }
@@ -335,7 +360,7 @@ export class CodexRuntime {
                 observed: modelObservation(observedState(agent.bot, agent.getObservationScope?.())) });
             record('task_start', { instructionsFile: 'src/process/codex/AGENTS.md', capabilities: currentCapabilities(), input });
             while (current()) {
-                if (turnCount >= config.max_turns) {
+                if (config.max_turns !== null && turnCount >= config.max_turns) {
                     reachBudget('thread-turns');
                     break;
                 }
