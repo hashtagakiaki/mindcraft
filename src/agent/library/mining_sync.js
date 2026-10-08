@@ -1,4 +1,17 @@
+import { resolveBlockInteraction, interactionFaceVector, currentViewDirection, interactionEye } from './block_interaction.js'
+
 const installedBots = new WeakMap()
+// Keep native canDigBlock's existing range admission for plugin/legacy callers.
+const NATIVE_DIG_REACH = 5.1
+
+function digInteraction (bot, block, ignoreLook, aim = null) {
+  let direction = ignoreLook ? currentViewDirection(bot) : null
+  if (ignoreLook && !direction) throw new Error('Current digging view is unknown')
+  if (aim && !ignoreLook) direction = aim.minus(interactionEye(bot))
+  const hit = resolveBlockInteraction(bot, block, { reach: NATIVE_DIG_REACH, direction })
+  if (hit.status !== 'ready') throw new Error(`Block is not visible: ${hit.reason} ${block.position}`)
+  return hit
+}
 
 export const DIG_GROUND_TIMEOUT_MS = 15_000
 export const DIG_LOOK_TIMEOUT_MS = 5_000
@@ -141,7 +154,8 @@ function waitForGround (bot, timeoutMs, state) {
 
 function freshTargetBlock (bot, block) {
   const current = bot.blockAt(block.position)
-  if (!current || current.type !== block.type || current.type === 0) {
+  if (!current || current.type !== block.type || current.type === 0 ||
+      (block.stateId != null && current.stateId !== block.stateId)) {
     throw new Error(`Target block changed before digging at ${block.position}`)
   }
   return current
@@ -237,6 +251,13 @@ function installDigContract (bot, state, options) {
       const active = state.activeDig
       if (name === 'block_dig' && packet?.status === 0 && active && samePosition(packet.location, active.position)) {
         if (active.cancelled) throw new Error('Digging aborted before start packet')
+        if (bot.interrupt_code) throw new Error('Digging aborted by interrupt')
+        const current = freshTargetBlock(bot, active.block)
+        if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(current)) throw new Error(`Block out of digging range: ${current.position}`)
+        const hit = digInteraction(bot, current, active.ignoreLook, active.interaction.aim)
+        active.interaction = hit
+        packet = { ...packet, face: hit.face }
+        bot.targetDigFace = hit.face
         if (active.timer) clearTimeout(active.timer)
         active.startedAt = Date.now()
         active.deadline = active.startedAt + active.expectedDigMs + options.confirmationGraceMs
@@ -263,12 +284,15 @@ function installDigContract (bot, state, options) {
     block = decorateBlock(freshTargetBlock(bot, block))
     if (bot.interrupt_code) throw new Error('Digging aborted by interrupt')
     if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(block)) throw new Error(`Block out of digging range: ${block.position}`)
-    if (typeof bot.canSeeBlock === 'function' && !bot.canSeeBlock(block)) throw new Error(`Block is not visible: ${block.position}`)
+    const ignoreLook = forceLook === 'ignore'
+    const interaction = digInteraction(bot, block, ignoreLook)
 
     const expectedDigMs = bot.digTime(block)
     if (!Number.isFinite(expectedDigMs)) throw new Error(`Cannot dig ${block.name} with the current tool`)
     const operation = {
       block,
+      ignoreLook,
+      interaction,
       position: { x: block.position.x, y: block.position.y, z: block.position.z },
       startedAt: null,
       expectedDigMs,
@@ -306,13 +330,19 @@ function installDigContract (bot, state, options) {
       const originalLookAt = bot.lookAt
       if (typeof originalLookAt === 'function') {
         bot.lookAt = function (...args) {
+          args[0] = operation.interaction.aim
           operation.waitingForLookAt = true
           const lookTimer = setTimeout(() => {
             operation.cancelled = true
             operation.cancelLookAt(new Error('Timed out turning to the block'))
           }, options.lookTimeoutMs)
           return Promise.race([
-            Promise.resolve(originalLookAt.apply(this, args)),
+            Promise.resolve(originalLookAt.apply(this, args)).then(value => {
+              if (operation.cancelled || bot.interrupt_code) throw new Error('Digging aborted while turning to the block')
+              const current = freshTargetBlock(bot, block)
+              operation.interaction = digInteraction(bot, current, false, operation.interaction.aim)
+              return value
+            }),
             operation.lookCancelPromise
           ]).finally(() => {
             clearTimeout(lookTimer)
@@ -323,7 +353,7 @@ function installDigContract (bot, state, options) {
       }
       let digPromise
       try {
-        digPromise = originalDig.call(bot, block, forceLook, digFace)
+        digPromise = originalDig.call(bot, block, forceLook, interactionFaceVector(interaction.face))
       } finally {
         if (typeof originalLookAt === 'function') bot.lookAt = originalLookAt
       }

@@ -11,7 +11,12 @@ const repo = path.resolve(__dirname, '..')
 const deps = moduleRoot()
 const req = createRequire(path.join(deps, 'package.json'))
 const Vec3 = req('vec3').Vec3
-const registry = req('minecraft-data')('1.21.1')
+const registry = req('prismarine-registry')('1.21.1')
+const Block = req('prismarine-block')(registry)
+const WorldSync = req('prismarine-world/src/worldsync')
+const { goals, Movements } = req('mineflayer-pathfinder')
+const AStar = req('mineflayer-pathfinder/lib/astar')
+const Move = req('mineflayer-pathfinder/lib/move')
 const key = p => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`
 async function write(root, file, content) {
   const target = path.join(root, file)
@@ -22,7 +27,7 @@ async function setup(root) {
   await write(root, 'package.json', '{"type":"module"}')
   await symlink(deps, path.join(root, 'node_modules'))
   await write(root, 'settings.js', 'export default { navigation_stall_timeout_ms: 500, navigation_check_interval_ms: 50 };')
-  for (const name of ['skills', 'block_placement', 'operation_context', 'crafting_sync', 'index']) {
+  for (const name of ['skills', 'block_placement', 'block_interaction', 'operation_context', 'crafting_sync', 'index']) {
     await write(root, `src/agent/library/${name}.js`, await readFile(path.join(repo, `src/agent/library/${name}.js`)))
   }
   await write(root, 'src/utils/mcdata.js', 'export const getBlockId = () => 1;')
@@ -31,13 +36,19 @@ async function setup(root) {
 function makeBot(height = 5, branched = false) {
   const bot = new EventEmitter()
   bot.registry = registry; bot.version = '1.21.1'; bot.output = ''; bot.interrupt_code = false
-  bot.entity = { id: 1, position: new Vec3(1.5, 64, 0.5), onGround: true }
-  bot.entities = {}; bot.blocks = new Map(); bot.mutations = []
+  bot.entity = { id: 1, position: new Vec3(1.5, 64, 0.5), eyeHeight: 1.62, effects: {}, onGround: true }
+  bot.entities = {}; bot.blocks = new Map(); bot.mutations = []; bot.game = { minY: 60 }
   bot.put = (x,y,z,name) => {
     const p = new Vec3(x,y,z)
-    bot.blocks.set(key(p), { name, type: registry.blocksByName[name].id, position:p, boundingBox:name.endsWith('air') ? 'empty':'block', getProperties:()=>({persistent:false}) })
+    const block = Block.fromStateId(registry.blocksByName[name].defaultState, 0); block.position = p
+    bot.blocks.set(key(p), block)
   }
-  bot.blockAt = p => bot.blocks.get(key(p)) || { name: Math.floor(p.y) < 64 ? 'grass_block':'air', type:Math.floor(p.y)<64 ? 9:0, position:p.floored(), boundingBox: Math.floor(p.y)<64 ? 'block':'empty' }
+  bot.blockAt = p => {
+    if (bot.realPaths && (Math.abs(p.x) > 10 || Math.abs(p.z) > 10 || p.y < 60 || p.y > 90)) return null
+    if (bot.blocks.has(key(p))) return bot.blocks.get(key(p))
+    const block = Block.fromStateId(registry.blocksByName[Math.floor(p.y) < 64 ? 'grass_block' : 'air'].defaultState, 0)
+    block.position = p.floored(); return block
+  }
   for (let y=64; y<64+height; y++) bot.put(0,y,0,'oak_log')
   bot.put(0,64+height,0,'oak_leaves')
   if (branched) {
@@ -49,19 +60,13 @@ function makeBot(height = 5, branched = false) {
   }
   const counts = { dirt:64 }
   bot.inventory = { slots:[], emptySlotCount:()=>30, items:()=>Object.entries(counts).filter(([,count])=>count>0).map(([name,count])=>({name,count,type:registry.itemsByName[name].id})) }
-  bot.world = { raycast(origin,direction,distance) {
-    for (let d=0;d<=distance;d+=0.05) {
-      const block=bot.blockAt(origin.plus(direction.scaled(d)))
-      if(block.name!=='air') return block
-    }
-    return null
-  } }
+  bot.world = { getBlock:p=>bot.blockAt(p), raycast:WorldSync.prototype.raycast }
   bot.canSeeBlock = block => {
     const eye=bot.entity.position.offset(0,1.62,0), delta=block.position.offset(.5,.5,.5).minus(eye)
     const hit=bot.world.raycast(eye,delta.scaled(1/delta.norm()),delta.norm())
     return !hit || key(hit.position)===key(block.position)
   }
-  bot.canDigBlock = block => bot.entity.position.offset(0,1.62,0).distanceTo(block.position.offset(.5,.5,.5))<=4.5
+  bot.canDigBlock = block => bot.entity.position.offset(0,1.62,0).distanceTo(block.position.offset(.5,.5,.5))<=5.1
   bot.lookAt=async()=>{}
   bot.tool = { equipForBlock:async()=>{} }; bot.equip = async item => { bot.heldItem=item }
   bot.setControlState = (state,value) => {
@@ -110,13 +115,31 @@ function makeBot(height = 5, branched = false) {
     counts[bot.heldItem.name]--
     bot.afterPlace?.(p)
   }
-  bot.pathfinder = { movements:{original:true},setMovements(m){this.movements=m},getPathTo:()=>({status:'success'}),async goto(goal){
+  const route = (movements, goal) => {
+    movements.allowEntityDetection = false
+    const start = bot.entity.position.floored()
+    const search = new AStar(new Move(start.x,start.y,start.z,0,0), movements, goal, 1000, 1000, 18)
+    let result = search.compute(); while (result.status === 'partial') result = search.compute()
+    return result
+  }
+  bot.routes = []
+  bot.pathfinder = { movements:{original:true},bestHarvestTool:()=>null,setMovements(m){this.movements=m},
+    getPathTo(m,goal){ return bot.realPaths ? route(m,goal) : {status:'success'} },async goto(goal){
     assert.equal(this.movements.canDig,false); assert.equal(this.movements.canPlaceOn,false); assert.equal(this.movements.allow1by1towers,false); assert.deepEqual(this.movements.scafoldingBlocks,[])
     if(goal.entity) {
       assert.equal(goal.constructor.name,'GoalFollow','pickup follows the item position, not a block corner')
       bot.entity.position=goal.entity.position.clone(); counts.oak_log=(counts.oak_log||0)+goal.entity.getDroppedItem().count
       bot.emit('playerCollect',bot.entity,goal.entity); delete bot.entities[goal.entity.id]
-    } else bot.entity.position=new Vec3(goal.x+.5,goal.y,goal.z+.5)
+    } else if (bot.realPaths) {
+      const result = route(this.movements, goal)
+      bot.routes.push({ goal, status: result.status, path: result.path })
+      if (result.status !== 'success') throw new Error(`No path to the goal (${result.status})`)
+      const end = result.path.at(-1)
+      if (end) bot.entity.position = new Vec3(end.x+.5,end.y,end.z+.5)
+    } else if (!goal.isEnd(bot.entity.position.floored())) {
+      // Existing tall-tree physics mock; exact pillar standing remains explicit.
+      bot.entity.position=new Vec3(goal.x+.5,goal.y,goal.z+.5)
+    }
     bot.entity.onGround=true
   },stop(){},setGoal(){} }
   return bot
@@ -140,6 +163,56 @@ async function main() {
       assert.deepEqual(result.remainingLogs,[]); assert.deepEqual(result.leftoverScaffolds,[])
       if(branched) assert.ok(result.scaffoldPlaced>0)
       assert.equal(bot.listenerCount('itemDrop'),0); assert.equal(bot.listenerCount('playerCollect'),0)
+    }
+    // Real shapes, world raycast and restricted AStar: the east work position
+    // is blocked, but the interaction goal can use the west side in one call.
+    let geometryBot=makeBot(9,false)
+    geometryBot.realPaths=true; geometryBot.entity.position=new Vec3(-7.5,64,.5)
+    geometryBot.put(1,64,0,'stone'); geometryBot.put(1,65,0,'stone')
+    const eastBefore=geometryBot.blockAt(new Vec3(1,64,0))
+    const restricted=new Movements(geometryBot)
+    Object.assign(restricted,{canDig:false,canPlaceOn:false,scafoldingBlocks:[],allow1by1towers:false,allowParkour:false,allowFreeMotion:false})
+    assert.equal(geometryBot.pathfinder.getPathTo(restricted,new goals.GoalBlock(1,64,0)).status,'noPath','the former fixed east goal is unreachable')
+    const eastResult=await fellTree(geometryBot,{startPosition:{x:0,y:64,z:0}})
+    assert.equal(eastResult.status,'complete',JSON.stringify(eastResult))
+    assert.equal(eastResult.logsBroken,9); assert.equal(eastResult.logsCollected,9)
+    assert.ok(eastResult.scaffoldPlaced>0,'tall tree uses owned pillars')
+    assert.equal(eastResult.scaffoldPlaced,eastResult.scaffoldRemoved)
+    assert.equal(eastResult.scaffoldPlaced,eastResult.scaffoldRecovered)
+    assert.equal(eastResult.grounded,true); assert.deepEqual(eastResult.leftoverScaffolds,[])
+    assert.ok(geometryBot.routes.some(r=>r.status==='success'),'real AStar finds a work position')
+    assert.equal(geometryBot.blockAt(new Vec3(1,64,0)),eastBefore,'unowned stone stays unchanged')
+    assert.ok(geometryBot.mutations.every(([,name])=>['oak_log','dirt'].includes(name)),'only selected logs and owned pillars changed')
+
+    // Surface visibility wins over a center-only obstruction: do not clear
+    // the unrelated leaf just to make the block center visible.
+    geometryBot=makeBot(3,false)
+    geometryBot.entity.position=new Vec3(-2.9,64,-2.1)
+    geometryBot.put(-2,65,-1,'oak_leaves')
+    assert.equal(geometryBot.canSeeBlock(geometryBot.blockAt(new Vec3(0,65,0))),false)
+    const surfaceResult=await fellTree(geometryBot,{startPosition:{x:0,y:64,z:0}})
+    assert.equal(surfaceResult.status,'complete',JSON.stringify(surfaceResult))
+    assert.equal(geometryBot.blockAt(new Vec3(-2,65,-1)).name,'oak_leaves')
+
+    // A matching natural leaf shell may be approached and opened. A stone
+    // shell must report the observed obstruction and make no world changes.
+    for(const shellName of ['oak_leaves','stone']) {
+      geometryBot=makeBot(3,false); geometryBot.realPaths=true
+      geometryBot.entity.position=new Vec3(-7.5,64,.5)
+      for(let x=-1;x<=1;x++) for(let z=-1;z<=1;z++) for(let y=64;y<=68;y++) {
+        if(Math.abs(x)===1 || Math.abs(z)===1 || y===68) geometryBot.put(x,y,z,shellName)
+      }
+      const shellResult=await fellTree(geometryBot,{startPosition:{x:0,y:64,z:0}})
+      if(shellName==='oak_leaves') {
+        assert.equal(shellResult.status,'complete',JSON.stringify(shellResult))
+        assert.equal(shellResult.logsCollected,3)
+        assert.ok(geometryBot.mutations.some(([,name])=>name==='oak_leaves'),'approach and clear an owned natural leaf')
+      } else {
+        assert.equal(shellResult.status,'partial',JSON.stringify(shellResult))
+        assert.match(shellResult.reason,/observed ray obstruction/)
+        assert.equal(geometryBot.mutations.length,0,'no digging unowned terrain or placing scaffolds')
+        assert.ok(geometryBot.routes.length<=2,'bounded failed approaches')
+      }
     }
     let bot=makeBot(14,true)
     bot.hangLastDrop=true
@@ -182,7 +255,7 @@ async function main() {
     const partial=await fellTree(bot,{startPosition:{x:0,y:64,z:0}})
     assert.equal(partial.status,'partial'); assert.equal(partial.cleanupRequired,false,JSON.stringify(partial))
     assert.equal(partial.scaffoldPlaced,partial.scaffoldRemoved); assert.equal(partial.grounded,true)
-    console.log('tree felling: normal/tall branched oak, scope, confirmations, cleanup and cancellation passed')
+    console.log('tree felling: real shape/AStar approach, surface targeting, owned leaf access, normal/tall branched oak, cleanup and cancellation passed')
   } finally { await rm(root,{recursive:true,force:true}) }
 }
 main().catch(error=>{console.error(error);process.exitCode=1})

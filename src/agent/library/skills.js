@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import settings from "../../../settings.js";
 import craftingSync from "./crafting_sync.js";
 import { placeBlockOriented } from './block_placement.js';
+import { resolveBlockInteraction, makeBlockInteractionGoal, interactionFaceVector, interactionEye } from './block_interaction.js';
 import { trackSkill, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, withSkillPhase, registerOwnedPromise } from './operation_context.js';
 
 const require = createRequire(import.meta.url);
@@ -1135,16 +1136,9 @@ export async function breakBlockAt(bot, x, y, z) {
             return true;
         }
 
-        if (typeof bot.canSeeBlock !== 'function' && bot.entity.position.distanceTo(block.position) > 4.5) {
-            let pos = block.position;
-            let movements = new pf.Movements(bot);
-            movements.canPlaceOn = false;
-            movements.allow1by1towers = false;
-            bot.pathfinder.setMovements(movements);
-            await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
-        }
-        if (typeof bot.canSeeBlock === 'function' &&
-            (bot.entity.position.distanceTo(block.position) > 4.5 || !bot.canSeeBlock(block))) {
+        const expectedType = block.type;
+        const expectedState = block.stateId;
+        if (resolveBlockInteraction(bot, block).status !== 'ready') {
             const approach = await approachBlock(bot, x, y, z);
             if (approach.status !== 'ready') {
                 log(bot, `Cannot break target: ${approach.reason ?? approach.status}.`);
@@ -1161,6 +1155,13 @@ export async function breakBlockAt(bot, x, y, z) {
                 log(bot, `Don't have right tools to break ${block.name}.`);
                 return false;
             }
+        }
+        requireActiveTarget(bot);
+        block = bot.blockAt(new Vec3(x, y, z).floored());
+        if (!block || block.type !== expectedType || block.stateId !== expectedState ||
+            resolveBlockInteraction(bot, block).status !== 'ready') {
+            log(bot, 'Target changed or has no reachable surface aim point before digging.');
+            return false;
         }
         await bot.dig(block, true);
         log(bot, `Broke ${block.name} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
@@ -1535,6 +1536,66 @@ async function resolveChestTransferTarget(bot, chestPosition) {
     return bot.blockAt(new Vec3(x, y, z).floored());
 }
 
+// Native activateBlock accepts face/cursor but still looks at the center. Keep
+// its inventory/window implementation and redirect just this activation's aim.
+async function openContainerAtSurface(bot, block) {
+    requireActiveTarget(bot);
+    let hit = resolveBlockInteraction(bot, block);
+    if (hit.status !== 'ready') throw new Error(hit.reason);
+    const check = () => {
+        requireActiveTarget(bot);
+        const fresh = bot.blockAt(block.position);
+        if (!fresh || fresh.type !== block.type || fresh.stateId !== block.stateId) throw new Error('Chest target changed before activation.');
+        const current = resolveBlockInteraction(bot, fresh, { direction: hit.aim.minus(interactionEye(bot)) });
+        if (current.status !== 'ready') throw new Error(current.reason);
+        hit = current;
+    };
+    const direction = interactionFaceVector(hit.face);
+    const cursor = hit.aim.minus(block.position);
+    const originalLookAt = bot.lookAt;
+    const originalActivate = bot.activateBlock;
+    const originalWrite = bot._client?.write;
+    let fail;
+    const failure = new Promise((_, reject) => { fail = reject; });
+    failure.catch(() => {});
+    const signal = getActionContext(bot)?.signal;
+    const abort = () => fail(new Error('Chest opening cancelled.'));
+    signal?.addEventListener('abort', abort, { once: true });
+    if (typeof originalLookAt === 'function') bot.lookAt = async function (_point, force) {
+        check();
+        await originalLookAt.call(this, hit.aim, force);
+        check();
+    };
+    // openBlock does not await activateBlock; catch its errors here so they
+    // reject the owned operation rather than becoming an unhandled rejection.
+    if (typeof originalActivate === 'function') bot.activateBlock = function (...args) {
+        return Promise.resolve(originalActivate.apply(this, args)).catch(fail);
+    };
+    const guardedWrite = function (name, packet, ...args) {
+        if (name === 'block_place' && packet.location?.equals?.(block.position)) {
+            try { check(); }
+            catch (error) { fail(error); return; }
+        }
+        return originalWrite.call(this, name, packet, ...args);
+    };
+    if (typeof originalWrite === 'function') bot._client.write = guardedWrite;
+    let pending, completed = false;
+    try {
+        pending = bot.openContainer(block, direction, cursor);
+        const container = await Promise.race([pending, failure]);
+        completed = true;
+        return container;
+    } finally {
+        if (typeof originalLookAt === 'function') bot.lookAt = originalLookAt;
+        if (typeof originalActivate === 'function') bot.activateBlock = originalActivate;
+        if (bot._client?.write === guardedWrite) bot._client.write = originalWrite;
+        signal?.removeEventListener('abort', abort);
+        // Native window waiting is bounded. If a cancelled activation opens
+        // late, close that operation's window instead of leaving it open.
+        if (!completed && pending) pending.then(container => container.close()).catch(() => {});
+    }
+}
+
 export async function putInChest(bot, itemName, num=-1, options={}) {
     /**
      * Put an exact requested quantity of an item in a chest; -1 means all available matching stacks.
@@ -1559,7 +1620,7 @@ export async function putInChest(bot, itemName, num=-1, options={}) {
     if (chestPosition === undefined && !await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2)) return false;
     const context = getActionContext(bot);
     if (isActionCancelled(bot, context)) return false;
-    const chestContainer = await bot.openContainer(chest);
+    const chestContainer = await (chestPosition === undefined ? bot.openContainer(chest) : openContainerAtSurface(bot, chest));
     let beforeSnapshot = null;
     let afterSnapshot = null;
     let transferError = null;
@@ -1646,7 +1707,7 @@ export async function takeFromChest(bot, itemName, num=-1, options={}) {
     if (chestPosition === undefined && !await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2)) return false;
     const context = getActionContext(bot);
     if (isActionCancelled(bot, context)) return false;
-    const chestContainer = await bot.openContainer(chest);
+    const chestContainer = await (chestPosition === undefined ? bot.openContainer(chest) : openContainerAtSurface(bot, chest));
     let serverSnapshot;
     try { serverSnapshot = await craftingSync.snapshotWindow(bot, chestContainer); }
     catch (error) {
@@ -1718,31 +1779,31 @@ export async function takeFromChest(bot, itemName, num=-1, options={}) {
 
 export async function approachBlock(bot, x, y, z) {
     /**
-     * Move to a visible, reachable standing position for one absolute block, without digging or placing.
+     * Move to a standing position with a reachable surface aim point for one absolute block, without digging or placing. Center visibility is not required.
      * @param {MinecraftBot} bot - Pass bot first.
      * @param {number} x - Absolute block x.
      * @param {number} y - Absolute block y.
      * @param {number} z - Absolute block z.
-     * @returns {Promise<object>} status ready/unknown/blocked and fresh target observation; movement is not interaction success.
+     * @returns {Promise<object>} status ready/unknown/blocked and fresh target with interaction aim/face/distance; movement is not interaction success. No sampled aim is not proof that every surface point is occluded.
      * @example
      * log(bot, JSON.stringify(await skills.approachBlock(bot, 10, 64, -3)));
      **/
     validateTargetCall(bot, x, y, z, 'skills.approachBlock(bot, x, y, z)');
     requireActiveTarget(bot);
     let target = world.inspectBlockAt(bot, x, y, z);
-    const ready = t => t.loaded && t.interactionDistance <= 4.5 && t.visible === true;
+    const ready = t => t.loaded && t.interaction.status === 'ready';
     if (!target.loaded) return { status: 'unknown', target, reason: 'Target is not loaded; no navigation started.' };
     if (ready(target)) return { status: 'ready', target };
+    if (target.interaction.status === 'unknown') return { status: 'unknown', target, reason: target.interaction.reason };
     const previousMovements = bot.pathfinder.movements;
     const movements = new pf.Movements(bot);
     movements.canDig = false;
     movements.canPlaceOn = false;
     movements.allow1by1towers = false;
     movements.allowFreeMotion = false;
+    movements.scafoldingBlocks = [];
     const block = bot.blockAt(new Vec3(x, y, z).floored());
-    const goal = new pf.goals.GoalLookAtBlock(block.position, bot.world, {
-        reach: 4.5, entityHeight: bot.getControlState?.('sneak') ? 1.27 : 1.62,
-    });
+    const goal = makeBlockInteractionGoal(bot, block.position);
     let navigationError = null;
     try {
         await goToGoal(bot, goal, movements);
@@ -1756,9 +1817,8 @@ export async function approachBlock(bot, x, y, z) {
     target = world.inspectBlockAt(bot, x, y, z);
     if (!target.loaded) return { status: 'unknown', target, reason: 'Target unloaded during navigation.' };
     if (ready(target)) return { status: 'ready', target };
-    return { status: 'blocked', target, reason: navigationError || (target.visible !== true
-        ? 'Block center remains occluded. A partial block face may be visible while its center is occluded.'
-        : `Target center is ${target.interactionDistance.toFixed(2)} blocks from the eye; required reach is 4.5.`) };
+    return { status: target.interaction.status === 'unknown' ? 'unknown' : 'blocked', target,
+        reason: navigationError || target.interaction.reason };
 }
 
 export async function inspectChestAt(bot, x, y, z) {
@@ -1789,7 +1849,7 @@ export async function inspectChestAt(bot, x, y, z) {
     setActionPhase(cancellation, 'inspecting-chest');
     let chest;
     try {
-        chest = await bot.openContainer(bot.blockAt(new Vec3(x, y, z).floored()));
+        chest = await openContainerAtSurface(bot, bot.blockAt(new Vec3(x, y, z).floored()));
         requireActiveTarget(bot);
         const result = { status: 'observed', position: target.position, target,
             observedAt: new Date().toISOString(),
@@ -3468,9 +3528,21 @@ export async function fellTree(bot, options = {}) {
     const drops = new Map();
     let column = null;
     let leavesCleared = 0;
-    const isNaturalLeaf = block => block?.name === tree.leafName && [false, 'false'].includes(block.getProperties?.().persistent);
+    const isNaturalLeaf = block => block?.name === tree.leafName &&
+        [false, 'false'].includes(block.getProperties?.().persistent) &&
+        Math.abs(block.position.x - tree.root.x) <= TREE_MAX_RADIUS &&
+        Math.abs(block.position.z - tree.root.z) <= TREE_MAX_RADIUS &&
+        block.position.y >= tree.root.y && block.position.y <= tree.root.y + TREE_MAX_HEIGHT;
     const eye = () => bot.entity.position.offset(0, bot.entity.eyeHeight ?? 1.62, 0);
-    const reachable = p => eye().distanceTo(p.offset(0.5, 0.5, 0.5)) <= TREE_REACH;
+    const interaction = p => resolveBlockInteraction(bot, bot.blockAt(p), { reach: TREE_REACH });
+    const reachable = p => interaction(p).status === 'ready';
+    const nearby = p => {
+        // Logs and leaves occupy a full cube. Use its nearest surface for the
+        // range prefilter, so distant work does not trigger needless leaf digs.
+        const origin = eye();
+        const nearest = new Vec3(...['x', 'y', 'z'].map(axis => Math.max(p[axis], Math.min(origin[axis], p[axis] + 1))));
+        return origin.distanceTo(nearest) <= TREE_REACH;
+    };
     const onDrop = entity => {
         const item = entity.getDroppedItem?.();
         if (!item || drops.has(entity.id)) return;
@@ -3510,7 +3582,7 @@ export async function fellTree(bot, options = {}) {
         active();
         let block = bot.blockAt(p);
         if (treeAir(block)) return false;
-        if (block?.name !== name || !reachable(p) || !bot.canDigBlock(block) || !bot.canSeeBlock(block)) throw new Error(`Cannot safely dig expected ${name} at ${p}.`);
+        if (block?.name !== name || !reachable(p) || !bot.canDigBlock(block)) throw new Error(`Cannot safely dig expected ${name} at ${p}.`);
         await bot.tool.equipForBlock(block);
         active();
         block = bot.blockAt(p);
@@ -3532,9 +3604,10 @@ export async function fellTree(bot, options = {}) {
         }
         return true;
     };
-    // A visible branch may have natural leaves between its center and the eye.
-    // Only remove the ray's first obstruction when it belongs to this tree.
+    // Only discover an obstruction after surface targeting failed. The center ray
+    // is a discovery hint, never a visibility requirement for digging.
     const clearRay = async (p, seen = new Set()) => {
+        if (reachable(p) || !nearby(p)) return false;
         const key = treePositionKey(p);
         if (seen.has(key) || seen.size >= TREE_MAX_HEIGHT) return false;
         seen.add(key);
@@ -3547,10 +3620,7 @@ export async function fellTree(bot, options = {}) {
         const block = bot.blockAt(hit.position);
         const ownLog = block?.name === tree.logName && tree.logs.some(log => treePositionKey(log) === treePositionKey(hit.position));
         if (!ownLog && !isNaturalLeaf(block)) return false;
-        if (!reachable(hit.position)) return false;
-        // The first face intersecting the branch ray does not necessarily have
-        // a visible center. Resolve that block's own ray before trying to dig it.
-        if (!bot.canSeeBlock(block)) return await clearRay(hit.position, seen);
+        if (!reachable(hit.position)) return await clearRay(hit.position, seen);
         if (ownLog) return await dig(hit.position, tree.logName, 'log');
         if (leavesCleared >= TREE_MAX_LOGS * 2) return false;
         await dig(hit.position, block.name, 'leaf');
@@ -3564,12 +3634,62 @@ export async function fellTree(bot, options = {}) {
             for (const p of remaining().sort((a, b) => a.y - b.y)) {
                 active();
                 if (bot.blockAt(p)?.name !== tree.logName) throw new Error(`Selected log changed at ${p}.`);
-                if (!reachable(p)) continue;
-                if (await clearRay(p)) { progress = true; break; }
-                if (!bot.canSeeBlock(bot.blockAt(p))) continue;
+                if (!reachable(p)) {
+                    if (await clearRay(p)) { progress = true; break; }
+                    continue;
+                }
                 if (await dig(p, tree.logName, 'log')) progress = true;
             }
         } while (progress);
+    };
+    const approachInitialWork = async () => {
+        // Try actual work first. Navigation is only needed while the ground-level
+        // trunk remains; higher logs are reached later with recorded pillars.
+        const attempts = new Set();
+        const failures = [];
+        const approach = async (p, depth = 0) => {
+            active();
+            const block = bot.blockAt(p);
+            const ownLog = block?.name === tree.logName && tree.logs.some(log => treePositionKey(log) === treePositionKey(p));
+            if (!ownLog && !isNaturalLeaf(block)) return false;
+            const key = `${block.name}:${treePositionKey(p)}`;
+            if (attempts.has(key) || attempts.size >= TREE_MAX_HEIGHT || depth >= TREE_MAX_HEIGHT) return false;
+            attempts.add(key);
+            if (!reachable(p)) {
+                try {
+                    await goToGoal(bot, makeBlockInteractionGoal(bot, p, { reach: TREE_REACH }), movements);
+                    active();
+                } catch (error) {
+                    active();
+                    failures.push(`interaction ${p}: ${error.message}`);
+                }
+            }
+            if (reachable(p)) {
+                if (ownLog) return await dig(p, tree.logName, 'log');
+                if (leavesCleared >= TREE_MAX_LOGS * 2) return false;
+                await dig(p, tree.leafName, 'leaf');
+                leavesCleared++;
+                return true;
+            }
+            const delta = p.offset(0.5, 0.5, 0.5).minus(eye());
+            const hit = delta.norm() && bot.world.raycast(eye(), delta.scaled(1 / delta.norm()), delta.norm());
+            const obstruction = hit && treePositionKey(hit.position) !== treePositionKey(p) ? hit.position : null;
+            failures.push(`target ${p}: ${interaction(p).reason || 'No sampled surface aim'}${obstruction ? `; observed ray obstruction ${obstruction}` : ''}`);
+            // A failed route does not prove which block blocked the route. Only
+            // the observed ray may nominate an owned log or in-scope natural leaf.
+            return obstruction ? await approach(obstruction, depth + 1) : false;
+        };
+        while (remaining().some(p => p.y <= tree.root.y + 1)) {
+            let progress = false;
+            for (const p of remaining().filter(p => p.y <= tree.root.y + 1).sort((a, b) => a.y - b.y)) {
+                if (await approach(p)) { progress = true; break; }
+            }
+            if (!progress) throw new Error(`Cannot approach selected tree work; ${failures.join('; ') || 'No permitted interaction candidate remains.'}`);
+            // Every retry follows a confirmed owned removal; never retry an
+            // identical route against the same world state.
+            attempts.clear();
+            await harvestReachable();
+        }
     };
     const clearColumnCell = async p => {
         while (await clearRay(p)) { active(); }
@@ -3605,9 +3725,9 @@ export async function fellTree(bot, options = {}) {
                 active();
                 const supportPosition = drop.entity.position.offset(0, -0.1, 0).floored();
                 const support = bot.blockAt(supportPosition);
-                if (!isNaturalLeaf(support) || !reachable(supportPosition) || leavesCleared >= TREE_MAX_LOGS * 2) break;
+                if (!isNaturalLeaf(support) || leavesCleared >= TREE_MAX_LOGS * 2) break;
                 while (await clearRay(supportPosition)) { active(); }
-                if (!bot.canSeeBlock(bot.blockAt(supportPosition))) break;
+                if (!reachable(supportPosition)) break;
                 await dig(supportPosition, tree.leafName, 'leaf');
                 leavesCleared++;
                 await settleDrop(drop);
@@ -3636,7 +3756,8 @@ export async function fellTree(bot, options = {}) {
         const available = TREE_SCAFFOLD_ITEMS.reduce((sum, name) => sum + inventoryItemCount(bot, name), 0);
         if (requiredHeight > 4 && available < requiredHeight) throw new Error(`Bring at least ${requiredHeight} dirt/cobblestone blocks for this tree (have ${available}).`);
         if (bot.inventory.emptySlotCount() < 2) throw new Error('Need two free inventory slots for logs and recovered materials.');
-        await navigate(tree.root.offset(1, 0, 0));
+        await harvestReachable();
+        await approachInitialWork();
         await harvestReachable();
         await releaseCanopyDrops();
         const attemptedColumns = new Set();

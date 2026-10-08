@@ -3,6 +3,8 @@
 const assert = require('node:assert/strict')
 const { EventEmitter } = require('node:events')
 const path = require('node:path')
+const os = require('node:os')
+const { mkdtemp, readFile, writeFile, symlink, rm } = require('node:fs/promises')
 const { createRequire } = require('node:module')
 const { moduleRoot } = require('./dependency_root.cjs')
 const dependencyRequire = createRequire(path.join(moduleRoot(), 'package.json'))
@@ -10,7 +12,9 @@ const { Vec3 } = dependencyRequire('vec3')
 const injectDigging = dependencyRequire('mineflayer/lib/plugins/digging')
 const registryLoader = dependencyRequire('prismarine-registry')
 const BlockProvider = dependencyRequire('prismarine-block')
+const WorldSync = dependencyRequire('prismarine-world/src/worldsync')
 let mining
+let fixtureRuntime
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const TEST_WATCHDOG_MS = 10_000
@@ -31,9 +35,14 @@ function fixture({ digMs = 40, groundTimeoutMs = 40, lookTimeoutMs = 20, confirm
   bot.heldItem = null
   bot.getEquipmentDestSlot = () => 5
   currentBlock = block
-  bot.blockAt = () => currentBlock
+  bot.blockAt = point => point.floored().equals(position) ? currentBlock
+    : { name: 'air', type: 0, shapes: [], position: point.floored() }
+  bot.world = { getBlock: point => bot.blockAt(point), raycast: WorldSync.prototype.raycast }
   bot.canDigBlock = () => true
   bot.canSeeBlock = () => true
+  const aim = position.offset(0.5, 0.5, 0.5).minus(bot.entity.position.offset(0, 1.62, 0))
+  bot.entity.yaw = Math.atan2(-aim.x, -aim.z)
+  bot.entity.pitch = Math.atan2(aim.y, Math.hypot(aim.x, aim.z))
   bot.lookAt = async () => {}
   bot.swingArm = () => {}
   bot._client = new EventEmitter()
@@ -66,7 +75,13 @@ async function rejects(promise, expression) {
 
 async function main() {
   const helper = process.argv[2] || path.resolve(__dirname, '../src/agent/library/mining_sync.js')
-  mining = await import(require('node:url').pathToFileURL(helper))
+  fixtureRuntime = await mkdtemp(path.join(os.tmpdir(), 'mc-mining-sync-'))
+  await writeFile(path.join(fixtureRuntime, 'package.json'), '{"type":"module"}')
+  await symlink(moduleRoot(), path.join(fixtureRuntime, 'node_modules'))
+  for (const name of ['mining_sync.js', 'block_interaction.js']) {
+    await writeFile(path.join(fixtureRuntime, name), await readFile(path.join(path.dirname(helper), name)))
+  }
+  mining = await import(require('node:url').pathToFileURL(path.join(fixtureRuntime, 'mining_sync.js')))
 
   // Correct only the returned block instance; harvest rules still govern eligibility.
   const registry = registryLoader('1.21.1')
@@ -303,9 +318,10 @@ async function main() {
     serverAir(bot, block)
     await digging
   }
-  for (const [method, message] of [['canDigBlock', /out of digging range/], ['canSeeBlock', /not visible/]]) {
+  for (const [method, message] of [['canDigBlock', /out of digging range/], ['raycast', /not visible/]]) {
     const { bot, block } = fixture()
-    bot[method] = () => false
+    if (method === 'raycast') bot.world.raycast = () => null
+    else bot[method] = () => false
     await rejects(bot.dig(block, 'ignore'), message)
     assert.equal(bot.listenerCount(`blockUpdate:${block.position}`), 0)
   }
@@ -429,7 +445,9 @@ const watchdog = setTimeout(() => {
   console.error(`mining_sync.test.cjs: FAILED to finish within ${TEST_WATCHDOG_MS}ms`)
   process.exit(1)
 }, TEST_WATCHDOG_MS)
-main().then(() => clearTimeout(watchdog), error => {
+main().finally(async () => {
+  if (fixtureRuntime) await rm(fixtureRuntime, { recursive: true, force: true })
+}).then(() => clearTimeout(watchdog), error => {
   clearTimeout(watchdog)
   console.error(error)
   process.exitCode = 1

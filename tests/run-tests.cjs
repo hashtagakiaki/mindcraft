@@ -20,6 +20,7 @@ async function setupFarmFixture(root) {
   await write(root, 'package.json', '{"type":"module"}')
   await write(root, 'settings.js', 'export default { block_place_delay: 0 };')
   await write(root, 'src/agent/library/skills.js', await readFile(path.join(repo, 'src/agent/library/skills.js')))
+  await write(root, 'src/agent/library/block_interaction.js', await readFile(path.join(repo, 'src/agent/library/block_interaction.js')))
   await write(root, 'src/agent/library/block_placement.js', await readFile(path.join(repo, 'src/agent/library/block_placement.js')))
   await write(root, 'src/agent/library/operation_context.js', await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
   await write(root, 'src/agent/library/mining_sync.js', await readFile(path.join(repo, 'src/agent/library/mining_sync.js')))
@@ -67,6 +68,7 @@ async function setupNavigationFixture(root) {
   await write(root, 'package.json', '{"type":"module"}')
   await write(root, 'settings.js', 'export default { block_place_delay: 0 };')
   await write(root, 'src/agent/library/skills.js', await readFile(path.join(repo, 'src/agent/library/skills.js')))
+  await write(root, 'src/agent/library/block_interaction.js', await readFile(path.join(repo, 'src/agent/library/block_interaction.js')))
   await write(root, 'src/agent/library/block_placement.js', await readFile(path.join(repo, 'src/agent/library/block_placement.js')))
   await write(root, 'src/agent/library/operation_context.js', await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
   await write(root, 'src/agent/library/operation_context.js', await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
@@ -613,6 +615,7 @@ async function main() {
     return
   }
   execFileSync(node, [path.join(__dirname, 'tree_felling.test.cjs')], { stdio: 'inherit' })
+  execFileSync(node, [path.join(__dirname, 'block_interaction.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'native_sdk.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'codex_session.test.cjs')], { stdio: 'inherit' })
   execFileSync(node, [path.join(__dirname, 'ollama_contract.test.cjs')], { stdio: 'inherit' })

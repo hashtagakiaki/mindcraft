@@ -40,7 +40,7 @@ export function getItemId(name) { return registry.itemsByName[name]?.id ?? null;
 export function mustCollectManually() { return false; }
 `)
   for (const relative of [
-    'src/agent/library/skills.js', 'src/agent/library/block_placement.js',
+    'src/agent/library/skills.js', 'src/agent/library/block_interaction.js', 'src/agent/library/block_placement.js',
     'src/agent/library/crafting_sync.js', 'src/agent/library/mining_sync.js',
     'src/agent/library/operation_context.js', 'src/agent/library/world.js',
     'src/agent/library/index.js', 'src/agent/library/skill_library.js',

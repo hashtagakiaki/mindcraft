@@ -13,7 +13,9 @@ const { moduleRoot } = require('./dependency_root.cjs')
 const repo = path.resolve(__dirname, '..')
 const dependencies = moduleRoot()
 const requireDependency = createRequire(path.join(dependencies, 'package.json'))
-const registry = requireDependency('minecraft-data')('1.21.1')
+const registry = requireDependency('prismarine-registry')('1.21.1')
+const Block = requireDependency('prismarine-block')(registry)
+const WorldSync = requireDependency('prismarine-world/src/worldsync')
 const Vec3 = requireDependency('vec3').Vec3
 const genericPlace = requireDependency('mineflayer/lib/plugins/generic_place')
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -42,7 +44,7 @@ export function getAllBlockIds(ignore) { return Object.values(registry.blocksByN
 export function mustCollectManually() { return false; }
 `)
   for (const relative of [
-    'src/agent/library/skills.js', 'src/agent/library/block_placement.js',
+    'src/agent/library/skills.js', 'src/agent/library/block_interaction.js', 'src/agent/library/block_placement.js',
     'src/agent/library/crafting_sync.js', 'src/agent/library/mining_sync.js',
     'src/agent/library/operation_context.js', 'src/agent/library/world.js',
     'src/agent/library/index.js', 'src/agent/library/skill_library.js',
@@ -63,16 +65,25 @@ function makeBot() {
   bot.version = '1.21.1'
   bot.username = 'targetFixture'; bot.output = ''; bot.interrupt_code = false
   bot.game = { dimension: 'overworld', gameMode: 'creative' }
-  bot.entity = { position: new Vec3(0.5, 64, 0.5), height: 1.8 }
+  bot.entity = { position: new Vec3(0.5, 64, 0.5), eyeHeight:1.62, height: 1.8 }
   bot.modes = { isOn: () => false, pause() {}, unpause() {}, flushBehaviorLog: () => '' }
   bot.inventory = { slots: [], items: () => [] }
   bot.getControlState = () => false
   bot.findBlocks = () => []
-  bot.blockAt = p => state.unknown ? null : { name: 'chest', type: registry.blocksByName.chest.id,
-    position: p.floored(), stateId: 22, getProperties: () => ({ facing: 'north', type: 'single' }) }
-  bot.canSeeBlock = () => state.visible
-  bot.canDigBlock = () => state.visible
-  bot.world = { getBlock: p => bot.blockAt(p), raycast: () => null }
+  bot.blockAt = position => {
+    if(state.unknown) return null
+    const p=position.floored()
+    const name=!state.visible && p.y>=65 ? 'stone' : p.y===64 && p.z===0 && p.x>=0 && p.x<=3 ? 'chest' : p.y<64 ? 'grass_block' : 'air'
+    const block=Block.fromStateId(registry.blocksByName[name].defaultState,0); block.position=p
+    return block
+  }
+  bot.world = { getBlock: p=>bot.blockAt(p), raycast:WorldSync.prototype.raycast }
+  bot.canSeeBlock = block => {
+    const origin=bot.entity.position.offset(0,bot.entity.eyeHeight,0), delta=block.position.offset(.5,.5,.5).minus(origin)
+    return bot.world.raycast(origin,delta.scaled(1/delta.norm()),delta.norm()+.01)?.position.equals(block.position) || false
+  }
+  bot.canDigBlock = block=>bot.entity.position.offset(0,bot.entity.eyeHeight,0).distanceTo(block.position.offset(.5,.5,.5))<=5.1
+  bot.lookAt=async point=>{state.lastAim=point}
   bot.pathfinder = { movements: { original: true },
     setMovements(m) { this.movements = m }, getPathTo: () => ({ status: 'success' }),
     async goto(goal) {
@@ -81,7 +92,17 @@ function makeBot() {
       if (state.onMove) await state.onMove()
       if (state.route === 'ready') { state.visible = true; bot.entity.position = new Vec3(0.5,64,0.5) }
     }, stop() { state.stop?.() }, setGoal() {} }
-  bot.openContainer = async target => {
+  bot.openContainer = async (target,face,cursor) => {
+    if(face) {
+      assert.ok(cursor instanceof Vec3,'explicit chest activation supplies a cursor')
+      await bot.lookAt(target.position.offset(.5,.5,.5))
+      const origin=bot.entity.position.offset(0,bot.entity.eyeHeight,0)
+      const hit=bot.world.raycast(origin,state.lastAim.minus(origin).normalize(),4.5)
+      assert.ok(hit?.position.equals(target.position),'aim hits the designated chest')
+      const vectors=[new Vec3(0,-1,0),new Vec3(0,1,0),new Vec3(0,0,-1),new Vec3(0,0,1),new Vec3(-1,0,0),new Vec3(1,0,0)]
+      assert.ok(face.equals(vectors[hit.face]),'activation face matches the actual surface ray')
+      assert.ok(state.lastAim.distanceTo(target.position.plus(cursor))<1e-6,'cursor and actual aim agree')
+    }
     state.opened.push(key(target.position))
     const container = { containerItems: () => [{ name: `item_${target.position.x}`, count: target.position.x + 1, slot: 0 }],
       close: async () => { state.closed.push(key(target.position)) } }
@@ -162,7 +183,7 @@ async function main() {
     bot.state.visible = false; bot.state.route = 'occluded'
     const partial = await skills.approachBlock(bot,0,64,0)
     assert.equal(partial.status,'blocked'); assert.equal(partial.target.visible,false)
-    assert.match(partial.reason,/partial block face/)
+    assert.match(partial.reason,/surface aim/)
     assert.equal(await skills.breakBlockAt(bot,0,64,0),false)
     assert.equal(bot.state.digs.length,0)
     bot.state.route = 'unreachable'

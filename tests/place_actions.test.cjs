@@ -19,6 +19,7 @@ async function setup(root) {
   await write(root, 'settings.js', 'export default { block_place_delay: 0 };')
   await write(root, 'src/agent/place_actions.js', await readFile(path.join(repo, 'src/agent/place_actions.js')))
   await write(root, 'src/agent/library/skills.js', await readFile(path.join(repo, 'src/agent/library/skills.js')))
+  await write(root, 'src/agent/library/block_interaction.js', await readFile(path.join(repo, 'src/agent/library/block_interaction.js')))
   await write(root, 'src/agent/library/block_placement.js', await readFile(path.join(repo, 'src/agent/library/block_placement.js')))
   await write(root, 'src/agent/library/operation_context.js', await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
   await write(root, 'src/agent/library/world.js', `

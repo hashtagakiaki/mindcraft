@@ -13,7 +13,9 @@ const { moduleRoot } = require('./dependency_root.cjs')
 const repo = path.resolve(__dirname, '..')
 const dependencies = moduleRoot()
 const requireDependency = createRequire(path.join(dependencies, 'package.json'))
-const registry = requireDependency('minecraft-data')('1.21.1')
+const registry = requireDependency('prismarine-registry')('1.21.1')
+const Block = requireDependency('prismarine-block')(registry)
+const WorldSync = requireDependency('prismarine-world/src/worldsync')
 const Vec3 = requireDependency('vec3').Vec3
 
 async function write(root, relative, contents) {
@@ -38,7 +40,7 @@ export function getBlockId(name) { return registry.blocksByName[name]?.id ?? nul
 export function getItemId(name) { return registry.itemsByName[name]?.id ?? null; }
 export function mustCollectManually() { return false; }
 `)
-  for (const relative of ['src/agent/library/skills.js', 'src/agent/library/block_placement.js',
+  for (const relative of ['src/agent/library/skills.js', 'src/agent/library/block_interaction.js', 'src/agent/library/block_placement.js',
     'src/agent/library/crafting_sync.js', 'src/agent/library/mining_sync.js', 'src/agent/library/operation_context.js',
     'src/agent/library/world.js', 'src/agent/library/index.js', 'src/agent/library/skill_library.js',
     'src/agent/library/sdk_capabilities.js', 'src/agent/library/lockdown.js', 'src/agent/commands/actions.js',
@@ -53,9 +55,10 @@ function makeBot({ inventoryCounts = [4], chestCounts = [3] } = {}) {
   const state = { opened: [], closed: [], approached: [], depositCalls: [], withdrawCalls: [], invisible: false, missing: new Set() }
   const chestPositions = [{ x: 2, y: 64, z: 0 }, { x: 8, y: 64, z: 0 }]
   const key = p => `${p.x},${p.y},${p.z}`
-  const makeChest = position => ({ name: 'chest', type: registry.blocksByName.chest.id,
-    position: new Vec3(position.x, position.y, position.z), stateId: 22,
-    getProperties: () => ({ facing: 'north', type: 'single' }) })
+  const makeChest = position => {
+    const block=Block.fromStateId(registry.blocksByName.chest.defaultState,0)
+    block.position=new Vec3(position.x,position.y,position.z); return block
+  }
   const chestBlocks = chestPositions.map(makeChest)
   const itemType = registry.itemsByName.oak_log.id
   const inventory = { slots: [], items: () => inventory.slots,
@@ -64,7 +67,7 @@ function makeBot({ inventoryCounts = [4], chestCounts = [3] } = {}) {
   bot.state = state; bot.registry = registry; bot.version = '1.21.1'
   bot.username = 'chestFixture'; bot.output = ''; bot.interrupt_code = false
   bot.game = { dimension: 'overworld', gameMode: 'survival' }
-  bot.entity = { position: new Vec3(0.5, 64, 0.5), height: 1.8 }
+  bot.entity = { position: new Vec3(0.5, 64, 0.5), eyeHeight:1.62, height: 1.8 }
   bot.modes = { isOn: () => false, pause() {}, unpause() {}, flushBehaviorLog: () => '' }
   bot.chat = () => {}
   bot.inventory = inventory
@@ -73,18 +76,35 @@ function makeBot({ inventoryCounts = [4], chestCounts = [3] } = {}) {
   bot.blockAt = position => {
     const p = position.floored()
     if (state.missing.has(key(p))) return null
-    return chestBlocks.find(block => key(block.position) === key(p)) || { name: 'stone', type: 1, position: p, getProperties: () => ({}) }
+    const chest=chestBlocks.find(block=>key(block.position)===key(p))
+    if(chest) return chest
+    const block=Block.fromStateId(registry.blocksByName[state.invisible && p.y>=65 ? 'stone' : p.y<64 ? 'grass_block' : 'air'].defaultState,0)
+    block.position=p; return block
   }
-  bot.canSeeBlock = () => !state.invisible
-  bot.canDigBlock = () => !state.invisible
-  bot.world = { getBlock: p => bot.blockAt(p), raycast: () => null }
+  bot.world = { getBlock:p=>bot.blockAt(p), raycast:WorldSync.prototype.raycast }
+  bot.canSeeBlock = block => {
+    const origin=bot.entity.position.offset(0,bot.entity.eyeHeight,0), delta=block.position.offset(.5,.5,.5).minus(origin)
+    return bot.world.raycast(origin,delta.scaled(1/delta.norm()),delta.norm()+.01)?.position.equals(block.position) || false
+  }
+  bot.canDigBlock=()=>true
+  bot.lookAt=async point=>{state.lastAim=point}
   bot.pathfinder = { movements: { original: true }, setMovements(m) { this.movements = m },
     getPathTo: () => ({ status: 'success' }), async goto(goal) {
       state.approached.push(key(goal.blockPosition || goal.position || chestPositions[1]))
       bot.entity.position = new Vec3(7.5, 64, 0.5)
       state.invisible = false
     }, stop() {}, setGoal() {} }
-  bot.openContainer = async target => {
+  bot.openContainer = async (target,face,cursor) => {
+    if(face) {
+      assert.ok(cursor instanceof Vec3,'targeted chest activation supplies a cursor')
+      await bot.lookAt(target.position.offset(.5,.5,.5))
+      const origin=bot.entity.position.offset(0,bot.entity.eyeHeight,0)
+      const hit=bot.world.raycast(origin,state.lastAim.minus(origin).normalize(),4.5)
+      assert.ok(hit?.position.equals(target.position),'actual aim hits requested chest')
+      const vectors=[new Vec3(0,-1,0),new Vec3(0,1,0),new Vec3(0,0,-1),new Vec3(0,0,1),new Vec3(-1,0,0),new Vec3(1,0,0)]
+      assert.ok(face.equals(vectors[hit.face]),'activation face matches the actual surface ray')
+      assert.ok(state.lastAim.distanceTo(target.position.plus(cursor))<1e-6,'activation cursor matches the aim')
+    }
     const targetKey = key(target.position)
     state.opened.push(targetKey)
     const slots = new Array(41).fill(null)
@@ -220,9 +240,14 @@ async function main() {
       const failed = makeBot()
       if (mode === 'unknown') failed.state.missing.add('8,64,0')
       if (mode === 'blocked') { failed.state.invisible = true; failed.pathfinder.getPathTo = () => ({ status: 'partial' }); failed.pathfinder.goto = async () => { throw new Error('No path to target') } }
-      if (mode === 'not_chest') failed.blockAt = position => position.x === 8
-        ? { name: 'stone', type: 1, position: position.floored(), getProperties: () => ({}) }
-        : makeBot().blockAt(position)
+      if (mode === 'not_chest') {
+        const originalBlockAt=failed.blockAt
+        failed.blockAt=position=>{
+          if(position.floored().x!==8) return originalBlockAt(position)
+          const block=Block.fromStateId(registry.blocksByName.stone.defaultState,0)
+          block.position=position.floored(); return block
+        }
+      }
       if (mode === 'disappeared') {
         const originalGoto = failed.pathfinder.goto
         failed.pathfinder.goto = async goal => { await originalGoto.call(failed.pathfinder, goal); failed.state.missing.add('8,64,0') }

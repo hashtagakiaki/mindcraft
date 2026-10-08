@@ -2,17 +2,18 @@ import settings from '../settings.js';
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import * as mc from '../../utils/mcdata.js';
+import { resolveBlockInteraction } from './block_interaction.js';
 
 
 
 export function inspectBlockAt(bot, x, y, z) {
     /**
-     * Read one absolute block without moving. Unknown is not air. Visibility uses Mineflayer's block-center check; canDig is Mineflayer's dig admission check.
+     * Read one absolute block without moving. Unknown is not air. visible/interactionDistance retain center checks; interaction reports a reachable surface aim independently. canDig is Mineflayer's dig admission check.
      * @param {Bot} bot - Pass bot first.
      * @param {number} x - Absolute x, not a relative offset.
      * @param {number} y - Absolute y.
      * @param {number} z - Absolute z.
-     * @returns {object} Loaded state, actual position/name/properties, corner distance, eye-to-center interactionDistance, visibility, canDig, observation time and dimension. Unavailable checks are null.
+     * @returns {object} Loaded state, position/name/properties, legacy center distance/visibility, canDig, interaction {status:ready/unknown/blocked,aim,face,distance,reason}, time and dimension. An unknown ray is not air; no sampled aim is not proof of total occlusion.
      * @example
      * const target = world.inspectBlockAt(bot, 10, 64, -3);
      * log(bot, JSON.stringify(target));
@@ -30,6 +31,7 @@ export function inspectBlockAt(bot, x, y, z) {
         interactionDistance: block ? bot.entity.position.offset(0, bot.entity.eyeHeight ?? 1.62, 0).distanceTo(position.offset(0.5, 0.5, 0.5)) : null,
         visible: block && typeof bot.canSeeBlock === 'function' ? bot.canSeeBlock(block) : null,
         canDig: block && typeof bot.canDigBlock === 'function' ? bot.canDigBlock(block) : null,
+        interaction: resolveBlockInteraction(bot, block),
         observedAt: new Date().toISOString(), dimension: bot.game?.dimension ?? null };
 }
 

@@ -54,7 +54,7 @@ s('collectBlock', { blockType: text(), count: positiveInt({ default: 1, descript
 s('pickupNearbyItems', {}, 'Pick up nearby dropped items. Returns boolean.', () => []);
 for (const [name, description] of [
     ['breakBlockAt', 'Break one absolute block, approaching it when needed. Returns boolean.'],
-    ['approachBlock', 'Approach without digging/scaffolding, then check reach and center visibility. Returns ready/unknown/blocked with fresh observation.'],
+    ['approachBlock', 'Approach without digging/scaffolding until a reachable surface aim point is found. Rechecks the actual eye ray; center visibility is not required. Returns ready/unknown/blocked with fresh observation and interaction aim/face/distance.'],
     ['inspectChestAt', 'Open the explicit chest, read contents and close it; never substitute a nearby chest. Returns a timestamped observation, not a transfer.'],
 ]) s(name, { position: position() }, description, coords);
 s('placeBlock', {
@@ -103,7 +103,7 @@ s('useToolOnBlock', { toolName: text(), block: field('block') }, 'Use a tool on 
 s('tendNearbyFarm', { ...farmFields }, 'Tend connected farmland by default; radius scope works a circular area. Harvest, replant and store produce. Inspect confirmed harvested/planted/stored counts and status; this does not guarantee the whole request.', a => a.scope === 'radius' ? { ...a, radius: a.radius ?? 32 } : { ...a, searchRadius: a.searchRadius ?? 32 }, { argsObject: true, constraint: farmConstraint });
 s('fellTree', { startPosition: optional(position()), searchRadius: radius(24, { positive: true, max: 64 }) }, 'Fell one natural single-trunk tree, collect logs and remove this call’s pillars. Returns complete/partial/cancelled/blocked/not_found and confirmed counts. Bring an axe, free slots and scaffolding; inspect leftoverScaffolds/grounded.', a => [a]);
 
-w('inspectBlockAt', { position: position() }, 'Synchronously inspect an absolute block: loaded state, position/name/properties, visibility, reach, canDig, dimension/time. Unknown is not air.', coords);
+w('inspectBlockAt', { position: position() }, 'Synchronously inspect an absolute block: loaded state, position/name/properties, legacy center visibility/distance, canDig, dimension/time, and interaction status/aim/face/distance/reason from surface rays within 4.5 blocks. Center visibility is not required for interaction. Unknown is not air; no sampled aim is not proof of total occlusion.', coords);
 w('getNearestFreeSpace', { size: positiveInt({ default: 1 }), radius: radius(8) }, 'Synchronously find nearest empty size×size space above solid ground. Returns Vec3 or undefined.', a => [a.size, a.radius]);
 w('getBlockAtPosition', { offset: position({ default: Object.freeze({ x: 0, y: 0, z: 0 }), description: 'Relative to bot feet, not absolute position.' }) }, 'Synchronously read a loaded block at a relative offset; returns Block or null.', a => [a.offset.x, a.offset.y, a.offset.z]);
 w('getSurroundingBlocks', {}, 'Synchronously describe blocks below, at legs and at head; unloaded blocks are unknown.', () => []);

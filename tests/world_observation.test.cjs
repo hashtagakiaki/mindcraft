@@ -23,7 +23,7 @@ export function getBlockId() { return 1; }
 export function getAllBlockIds() { return []; }
 export function getAllBiomes() { return [{ name: 'plains' }]; }
 `)
-    for (const file of ['world.js', 'observation_scope.js', 'full_state.js']) {
+    for (const file of ['world.js', 'block_interaction.js', 'observation_scope.js', 'full_state.js']) {
       await fs.copyFile(path.join(repo, 'src/agent/library', file), path.join(root, 'src/agent/library', file))
     }
     await fs.symlink(moduleRoot(), path.join(root, 'node_modules'))
