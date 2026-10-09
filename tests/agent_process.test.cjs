@@ -418,7 +418,9 @@ async function run() {
             terminateTimeout: 300,
             killTimeout: 1000,
             minimumRestartLifetimeMs: 10,
-            restartWindowMs: 1000,
+            // Keep the test's restart budget window longer than its bounded wait,
+            // even when owned process-group cleanup reaches its timeout.
+            restartWindowMs: 10_000,
             maxAbnormalRestarts: 2,
             restartBackoffBaseMs: 10,
             restartBackoffMaxMs: 20,
