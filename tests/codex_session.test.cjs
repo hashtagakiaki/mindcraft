@@ -190,6 +190,75 @@ async function main() {
     await delay(130)
     assert.equal(agent.actions.executing, false)
 
+    // Exercise the actual Coder/SES/ActionManager path with mocked owned SDK work.
+    // Mock place writes stand in for edits; real block changes are checked by terrain eval.
+    const batchAgent = makeAgent('CompoundBatches')
+    await until(() => batchAgent.coder.code_template && batchAgent.coder.code_lint_template)
+    const batchBody = windowMs => `const MAX_EDITS_PER_CHECK = 8;
+const CHUNK_WINDOW_MS = ${windowMs};
+const deadline = Date.now() + CHUNK_WINDOW_MS;
+for (let batch = 0; batch < 10; batch++) {
+    const state = places.find({text: "batch-state"});
+    if (state.remaining === 0) { log(bot, "batch complete"); return; }
+    for (let i = 0; i < Math.min(MAX_EDITS_PER_CHECK, state.remaining); i++) {
+        if (Date.now() >= deadline) { log(bot, "batch yield"); return; }
+        const ok = await places.setAlias({alias: "mock-step", placeId: "mock-place"});
+        if (!ok) { log(bot, "batch false"); return; }
+    }
+}`
+    let batchEdits, batchCalls, batchObservations
+    for (const scenario of ['normal', 'false', 'window']) {
+      batchEdits = 0; batchCalls = 0; batchObservations = []
+      batchAgent.places = { sdk: {
+        find: () => { batchObservations.push(batchEdits); return { remaining: 20 - batchEdits } },
+        setAlias: async () => {
+          batchCalls++
+          if (scenario === 'false' && batchCalls === 3) return false
+          if (scenario === 'window') await delay(10)
+          batchEdits++
+          return true
+        }
+      } }
+      const checked = await batchAgent.actions.runAction('batch-' + scenario,
+        () => batchAgent.coder.executeCode(batchBody(scenario === 'window' ? 5 : 1000)), { timeout: 0 })
+      assert.equal(checked.success, true, 'voluntary return settles the code operation')
+      if (scenario === 'normal') {
+        assert.equal(batchEdits, 20)
+        assert.deepEqual(batchObservations, [0, 8, 16, 20], 'fresh checks occur between batches in one call')
+        assert.match(checked.message, /batch complete/)
+      } else if (scenario === 'false') {
+        assert.equal(batchEdits, 2); assert.equal(batchCalls, 3)
+        assert.match(checked.message, /batch false/)
+      } else {
+        assert.equal(batchEdits, 1); assert.equal(batchCalls, 1)
+        assert.match(checked.message, /batch yield/)
+      }
+    }
+    for (const reason of ['operator_stop', 'superseded', 'disconnect', 'shutdown']) {
+      const pendingBatch = deferred(), enteredBatch = deferred()
+      batchEdits = 0; batchCalls = 0
+      batchAgent.places = { sdk: {
+        find: () => ({ remaining: 20 - batchEdits }),
+        setAlias: async () => {
+          batchCalls++
+          if (batchCalls === 3) { enteredBatch.resolve(); await pendingBatch.promise }
+          batchEdits++
+          return true
+        }
+      } }
+      const runningBatch = batchAgent.actions.runAction('batch-cancel-' + reason,
+        () => batchAgent.coder.executeCode(batchBody(1000)), { timeout: 0 })
+      await enteredBatch.promise
+      const stoppingBatch = batchAgent.actions.stop(reason)
+      pendingBatch.resolve()
+      const cancelledBatch = await runningBatch
+      await stoppingBatch
+      assert.equal(cancelledBatch.success, false)
+      assert.equal(batchCalls, 3, 'cancelled loop starts no further SDK work after the in-flight step')
+      assert.equal(batchEdits, 3, 'earlier mock writes remain after cancellation')
+      assert.equal(batchAgent.actions.executing, false)
+    }
+
     // Native peer communication is an owned SDK call and is acknowledged only after inbox acceptance.
     const { default: convoManager } = await load('src/agent/conversation.js')
     const { serverProxy } = await load('src/agent/mindserver_proxy.js')

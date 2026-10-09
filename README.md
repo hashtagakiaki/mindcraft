@@ -452,6 +452,8 @@ This work is published in the paper [Collaborating Action by Action: A Multi-age
 
 ## Opt-in Codex task session
 
+Native repetitive work can continue several observe/act/check batches within one `minecraft_execute` call. `max_block_edits_per_check` is the limit between fresh checks, not a per-call editing cap. The bot instructions ask for a finite loop, fresh targets and confirmed progress after each batch, and return to the model on failures, unknown/unexpected state, missing prerequisites or a decision requiring reasoning. A named 45,000 ms window guides voluntary yielding before new SDK steps; an in-flight step can exceed it. Existing host deadlines, cancellation and task budgets retain their meaning. This is a model instruction and is not mechanically enforced by an edit counter or a new executor.
+
 Root `settings.js` の `agent_runtime: "codex-session"` と `allow_insecure_coding: true`、profileの明示的な `codex/<model>` で使用する。既定値は `legacy`。`code_model` による判断・実行の役割分離はこの経路では使わない。Codex app-serverのexperimental dynamic toolsを使用するため、対応するCLIが必要（標準待機・遅延SDK読込・画像・永続thread再開・圧縮を隔離確認したCLIは0.160.1）。モデルとreasoning effortの一致を確認し、fallbackは拒否する。reasoning effortはprofile model objectの `params.reasoning_effort`、既定は `medium`。
 
 `minecraft_execute` で複数skillをまとめたJavaScriptを既存Coder/SES/lintとActionManagerへ渡す。Codex標準のdynamic tool応答待機を使い、settleした結果をその呼出しへ返す。操作ごとのturn interrupt・次turnへの結果手渡し・実行中のLLM pollingは行わない。現在のshared bot rulesと受理済みpeer contextを結果に添え、読込失敗や取消後に判断を再開しない。
