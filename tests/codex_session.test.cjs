@@ -514,7 +514,7 @@ for (let batch = 0; batch < 10; batch++) {
       assert.equal(await fs.readFile(path.join(sourceHome, 'auth.json'), 'utf8'), 'fixture refreshed auth', 'refresh writes through the existing auth backend')
       const loadedInstructions = await fs.readFile(path.join(session.cwd, 'AGENTS.md'), 'utf8')
       assert.equal(loadedInstructions, (await fs.readFile(path.join(root, 'src/process/codex/AGENTS.md'), 'utf8')) + '\n' + sdkFixture.catalog + '\n')
-      assert.match(loadedInstructions, /Do not return to the model solely because one small batch finished/)
+      assert.match(loadedInstructions, /小さなバッチが終わっただけでモデルへ戻らない/)
       assert.equal(loadedInstructions.split('AVAILABLE MINECRAFT SDK METHODS (names only):').length - 1, 1)
       assert.doesNotMatch(loadedInstructions, /DOCUMENTATION_ONLY_MARKER/)
       assert.deepEqual(threadParams.dynamicTools[1], sdkFixture.tools[0])
