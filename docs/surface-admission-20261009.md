@@ -20,4 +20,6 @@ task-only snapshotのNode20 `tests/run-tests.cjs`はexit 0。全suite後、追�
 
 ## 範囲
 
-正本は`results/surface-admission-20261009/`。変更前エラー、変更後fixture、task-only source snapshot、offline logs、既存変更の保存確認を保持する。有限samplingが任意の極小の隙間を必ず発見する保証は追加していない。20×20整地の再測定とmanual play反映は未実施。前回の時間・採点を今回の結果として流用しない。
+正本は`results/surface-admission-20261009/`。変更前エラー、変更後fixture、task-only source snapshot、offline logs、既存変更の保存確認を保持する。有限samplingが任意の極小の隙間を必ず発見する保証は追加していない。
+
+その後、65ac392を同じ20×20課題で[再測定](https://github.com/hashtagakiaki/mindcraft-eval/blob/main/docs/surface-admission-remeasurement-20261009.md)し、400/400・保護0・追加指示0で合格した。旧中心距離エラーは7→0、総時間は13分42秒→12分20秒。一方、operationは100→136、コード量は増えた。道具・作業順も異なる単発比較であり、SDK修正だけの速度効果や再現性は推定しない。実ゲームの正本はeval側の`results/surface-admission-20261009/`。manual play反映は未実施。
