@@ -175,7 +175,7 @@ export function getNearestBlocksWhere(bot, predicate, distance=8, count=10000) {
     /**
      * Get a list of the nearest blocks that satisfy the given predicate.
      * @param {Bot} bot - The bot to get the nearest blocks for.
-     * @param {function} predicate - The predicate to filter the blocks.
+     * @param {function|number|number[]} predicate - A predicate on loaded Blocks with position, or numeric block IDs.
      * @param {number} distance - The maximum distance to search, default 16.
      * @param {number} count - The maximum number of blocks to find, default 10000.
      * @returns {Block[]} - The nearest blocks that satisfy the given predicate.
@@ -186,7 +186,10 @@ export function getNearestBlocksWhere(bot, predicate, distance=8, count=10000) {
         const limit = settings.codex_session?.max_search_radius ?? 64;
         if (!Number.isFinite(distance) || distance < 0 || distance > limit) throw new Error(`Search radius must be between 0 and ${limit}; move and observe again instead of a large synchronous scan.`);
     }
-    let positions = bot.findBlocks({matching: predicate, maxDistance: distance, count: count});
+    // Palette entries have no position. Function predicates may inspect any
+    // Block field, so use Mineflayer's full-block search for those callers.
+    // Numeric IDs retain the palette optimization.
+    let positions = bot.findBlocks({matching: predicate, maxDistance: distance, count: count, useExtraInfo: typeof predicate === 'function'});
     let blocks = positions.map(position => bot.blockAt(position));
     return blocks;
 }

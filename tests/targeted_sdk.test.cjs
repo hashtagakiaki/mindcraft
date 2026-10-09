@@ -16,6 +16,9 @@ const requireDependency = createRequire(path.join(dependencies, 'package.json'))
 const registry = requireDependency('prismarine-registry')('1.21.1')
 const Block = requireDependency('prismarine-block')(registry)
 const WorldSync = requireDependency('prismarine-world/src/worldsync')
+const World = requireDependency('prismarine-world')(registry)
+const Chunk = requireDependency('prismarine-chunk')(registry)
+const blocksPlugin = requireDependency('mineflayer/lib/plugins/blocks')
 const Vec3 = requireDependency('vec3').Vec3
 const genericPlace = requireDependency('mineflayer/lib/plugins/generic_place')
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -112,6 +115,28 @@ function makeBot() {
   bot.dig = async b => { state.digs.push(key(b.position)) }
   return bot
 }
+
+function checkBlockSearch(world) {
+  // Real Mineflayer search also checks palette Blocks, which lack position.
+  // Public function predicates must instead see the loaded positioned Blocks.
+  const bot = new EventEmitter()
+  bot.registry = registry; bot.version = '1.21.1'
+  bot.game = { minY: 0, height: 256 }
+  bot.entity = { position: new Vec3(4.5, 72, 4.5) }
+  bot._client = new EventEmitter(); bot.supportFeature = () => false
+  blocksPlugin(bot, { version: bot.version })
+  bot.world = new World().sync
+  const chunk = new Chunk({ minY: 0, worldHeight: 256 })
+  for (const x of [4, 7]) chunk.setBlockStateId(new Vec3(x, 72, 4), registry.blocksByName.dirt.defaultState)
+  bot.world.setColumn(0, 0, chunk)
+  const predicate = b => b.position.x >= 7 && b.position.y === 72 && b.position.z === 4 && b.name === 'dirt'
+  assert.deepEqual(world.getNearestBlocksWhere(bot, predicate, 8, 1).map(b => b.position.x), [7], 'coordinate predicates filter before the result limit')
+  assert.deepEqual(world.getNearestBlocksWhere(bot, b => b.name === 'dirt', 8, 2).map(b => b.position.x), [4, 7])
+  assert.deepEqual(world.getNearestBlocksWhere(bot, registry.blocksByName.dirt.id, 8, 2).map(b => b.position.x), [4, 7], 'numeric matching retains the optimized search')
+  assert.deepEqual(world.getNearestBlocks(bot, ['dirt'], 8, 1).map(b => b.position.x), [4])
+  assert.throws(() => world.getNearestBlocksWhere(bot, () => { throw new Error('predicate failure') }, 8, 1), /predicate failure/, 'real predicate errors remain visible')
+}
+
 async function main() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'mc-targeted-sdk-'))
   const previous = process.cwd()
@@ -120,6 +145,7 @@ async function main() {
     const load = p => import(pathToFileURL(path.join(root, p)))
     const skills = await load('src/agent/library/skills.js')
     const world = await load('src/agent/library/world.js')
+    checkBlockSearch(world)
     const { SkillLibrary } = await load('src/agent/library/skill_library.js')
     const { Coder } = await load('src/agent/coder.js')
     const { ActionManager } = await load('src/agent/action_manager.js')

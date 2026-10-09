@@ -28,6 +28,8 @@ Absolute block coordinates use `position`; `world.getBlockAtPosition` takes a re
 
 Read each selected method's deferred documentation for its fields, defaults, result and availability. The canonical definitions are in [`native_sdk.js`](src/agent/library/native_sdk.js); native methods keep existing synchronous/async results, cancellation, ownership, server confirmation and configured false handling. `log(bot, message)` remains the separate output helper. A changed SDK scope starts a fresh native thread once, then matching tasks resume normally. See [the verification record](docs/native-sdk-arguments-20261007.md).
 
+`world.getNearestBlocksWhere` applies function predicates to loaded Blocks with coordinates, so conditions on `block.position` are supported. Function predicates use Mineflayer's slower full-block search; numeric block IDs and ID arrays keep its palette optimization. Keep the search radius small and log compact summaries instead of dumping thousands of Blocks.
+
 ### Inspect an explicit target and continue after a failure
 
 Use absolute coordinates to distinguish nearby targets:
