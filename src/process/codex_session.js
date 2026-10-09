@@ -142,7 +142,7 @@ export class CodexSession {
                     this.record('documentation_read', { name: p.tool });
                     result = { documentation: this.readDocumentation(p.tool) };
                 } else result = { success: false, error: 'Unknown Minecraft SDK tool or invalid arguments' };
-                // Fresh rules and inbox context belong in the actual tool result, before inference resumes.
+                // Fresh operation and inbox context belong in the actual tool result, before inference resumes.
                 const response = await this.prepareResult(result);
                 this.send({ id: message.id, result: response });
             });

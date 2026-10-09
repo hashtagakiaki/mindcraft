@@ -548,7 +548,6 @@ function settingsForAgent(agentSettings) {
     delete result.place_memory_enabled;
     result.place_memory_enabled = Boolean(settings.place_state_dir && settings.place_world_id);
     result.place_world_id = result.place_memory_enabled ? settings.place_world_id : null;
-    result.bot_rules_file = settings.bot_rules_file ?? null;
     return result;
 }
 

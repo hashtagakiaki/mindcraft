@@ -30,7 +30,7 @@
 
 ## パスと実行境界
 
-- 共通規約はroot `settings.js` の `bot_rules_file`（absolute pathまたはnull）が正本。MindServerが全agentへ同じpathを渡し、個別profile/UIで上書きしない。意思決定ごとに再読込し、読込失敗時は規約なしのmodel requestを送らない。`tests/bot_rules.test.cjs` はoffline suiteに含まれる。稼働中actionや自動reflexを強制変更する仕組みではない。
+- botの基本指示と共通方針の正本は `src/process/codex/AGENTS.md`。Codex sessionが新規開始・thread再開時にbundleの同ファイルを専用cwdへコピーし、生成SDK一覧を追加して標準workspace loaderで読む。独立した規約file・設定key・Prompterによる規約追加は使わない。開発用のrepo root `AGENTS.md` はbotへ渡さない。
 
 | Role | Path |
 |---|---|
@@ -59,7 +59,7 @@
 
 - `agent_runtime: "codex-session"` はroot settingsの明示opt-in。標準tool待機・遅延SDK説明・scope付きthread再開・画像入力の仕様とCLI検証範囲は[README](README.md#opt-in-codex-task-session)と[移行記録](docs/codex-standard-harness-20261006.md)を参照する。`src/process/codex_session.js` は既存owned CLI helperの親登録ACKとprocess回収を再利用する。native task中は旧recovery modelを並行起動しない。機能追加だけでmanual play pinを更新・bot切替しない。
 
-- bot固定指示の正本は `src/process/codex/AGENTS.md`。起動時にSDK文書から自動生成したmethod名一覧を付けて専用一時cwdへ配置し、標準loaderで読む。repo rootの開発指示をbotへコピーしない。専用一時CODEX_HOMEでは既存homeのauth.json/config.toml/sessionsだけをsymlink共有し、global AGENTS/skillsを共有しない。file認証を使用し、認証内容を読出し・複製しない。multi-agentの説明文もagents.enabled=falseで止める。能力設定と更新可能なshared bot rulesはhostが判断ごとに渡す。標準読込に必要な既定workspace accessを残し、shell無効・read-only sandbox・Minecraft以外のtool拒否は維持する。
+- bot指示は起動時にbundleの `src/process/codex/AGENTS.md` のsnapshotへSDK文書から自動生成したmethod名一覧を付け、専用一時cwdへ配置して標準loaderで読む。指示の変更は次のsession開始・再開時に読む。repo rootの開発指示をbotへコピーしない。専用一時CODEX_HOMEでは既存homeのauth.json/config.toml/sessionsだけをsymlink共有し、global AGENTS/skillsを共有しない。file認証を使用し、認証内容を読出し・複製しない。multi-agentの説明文もagents.enabled=falseで止める。能力設定はhostが判断ごとに渡す。標準読込に必要な既定workspace accessを残し、shell無効・read-only sandbox・Minecraft以外のtool拒否は維持する。
 
 - native botは常時見えるSDK method名一覧から選び、必要な説明だけをcode modeで読む。固定templateへmethod一覧や全説明を手書きしない。起動overrideは `features.code_mode.direct_only_tool_namespaces` が正しいキー。変更時はstrict-config・実rollout・新規/再開の説明と画像を隔離確認し、設定受理だけを効果の証拠にしない。context検証は [`docs/native-context-revision-20261006.md`](docs/native-context-revision-20261006.md) と[global/multi-agent分離記録](docs/native-context-isolation-20261006.md)、[SDK一覧の比較記録](docs/native-sdk-catalog-20261006.md)を参照。
 

@@ -47,7 +47,7 @@ async function main() {
     const sourceRoot = path.resolve(__dirname, '..')
     await write(root, 'package.json', '{"type":"module"}')
     await symlink(dependencies, path.join(root, 'node_modules'), 'dir')
-    await write(root, 'settings.js', `export default ${JSON.stringify({ management_auth_mode: 'protected', place_state_dir: null, place_world_id: null, bot_rules_file: null })}`)
+    await write(root, 'settings.js', `export default ${JSON.stringify({ management_auth_mode: 'protected', place_state_dir: null, place_world_id: null })}`)
     await write(root, 'src/utils/message_targets.js', await readFile(path.join(sourceRoot, 'src/utils/message_targets.js')))
     await write(root, 'src/mindcraft/public/settings_spec.json', await readFile(path.join(sourceRoot, 'src/mindcraft/public/settings_spec.json')))
     await write(root, 'src/mindcraft/public/index.html', '<html>protected UI</html>')

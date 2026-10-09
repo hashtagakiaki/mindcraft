@@ -95,7 +95,7 @@ async function main() {
     settings.codex_session.max_operations = 1.5
     assert.throws(() => validateCodexRuntime({ model: 'codex/gpt-6-luna' }), /max_operations/)
     settings.codex_session = defaultConfig
-    const rules = [], routed = [], rows = []
+    const routed = [], rows = []
     const makeAgent = name => {
       const agent = Object.create(Agent.prototype)
       agent.name = name
@@ -105,7 +105,7 @@ async function main() {
       agent.bot = Object.assign(new EventEmitter(), { output: '', interrupt_code: false, players: {}, game: { dimension: 'overworld' }, entity: { position: { x: 0, y: 64, z: 0 } }, inventory: { items: () => [] }, modes: { isOn: () => false, pause() {}, unpause() {}, flushBehaviorLog: () => '' } })
       agent.clearBotLogs = () => { agent.bot.output = ''; agent.bot.interrupt_code = false }
       agent.requestInterrupt = () => { agent.bot.interrupt_code = true; agent.interrupt?.() }
-      agent.prompter = { profile: { model: 'codex/gpt-6-luna' }, skill_libary: { getAllSkillDocs: async () => ['skills.wait\nWait for a bounded number of milliseconds.', 'skills.goToPlayer\nNavigate to a named player and return false when it is missing.', 'communication.sendToBot\nSend a bounded peer message into an authenticated native task inbox.', 'diagnostics.lastTask\nRead bounded previous task diagnostics.'] }, withBotRules: async text => { rules.push(text); return text + '\nCURRENT RULES' } }
+      agent.prompter = { profile: { model: 'codex/gpt-6-luna' }, skill_libary: { getAllSkillDocs: async () => ['skills.wait\nWait for a bounded number of milliseconds.', 'skills.goToPlayer\nNavigate to a named player and return false when it is missing.', 'communication.sendToBot\nSend a bounded peer message into an authenticated native task inbox.', 'diagnostics.lastTask\nRead bounded previous task diagnostics.'] } }
       agent.history = { memory: 'vision used to be unavailable', invalidations: 0, invalidateSummaries() { this.invalidations++ }, getHistory: () => [{ role: 'user', content: 'test' }], add: async (...args) => rows.push(args), checkpointAdd: async (...args) => { rows.push(args); await agent.history.save(); return { saved: true } }, save: async () => {} }
       agent.routeResponse = (source, text) => routed.push(text)
       agent.self_prompter = { state: null, prompt: '', stopForRecovery() {}, isStopped: () => true, isActive: () => false, shouldInterrupt: () => false }
@@ -417,17 +417,17 @@ async function main() {
       assert.equal(await fs.readFile(path.join(resumedSession.cwd, 'AGENTS.md'), 'utf8'), refreshedInstructions + '\n' + sdkFixture.catalog + '\n', 'catalog is restored on resume without embedding full documentation')
       assert.equal(resumedSession.resumed, true, 'saved thread survives removal of the earlier private home')
     } finally { await resumedSession.close(); await fs.writeFile(botInstructions, originalInstructions) }
-    // A failed rule refresh must close admission before another queued operation can start.
+    // A failed result preparation must close admission before another queued operation can start.
     let queuedExecutions = 0
     const queued = new CodexSession({ model: 'fixture', execute: async () => { queuedExecutions++; return { success: true } },
-      prepareResult: async () => { throw Error('rules unreadable') } })
+      prepareResult: async () => { throw Error('result preparation failed') } })
     queued.threadId = 'queued-thread'
     queued.turn = { reject() {} }
     const toolCall = id => ({ id, method: 'item/tool/call', params: { threadId: queued.threadId,
       turnId: 'queued-turn', tool: 'minecraft_execute', arguments: { code: 'await Promise.resolve();' } } })
     await Promise.all([queued.receive(toolCall(1)), queued.receive(toolCall(2))])
     assert.equal(queuedExecutions, 1)
-    assert.match(queued.failure.message, /rules unreadable/)
+    assert.match(queued.failure.message, /result preparation failed/)
     queued.turn = null
     await queued.close()
     // Fast completion and controller resume exactly once on the same thread.
@@ -436,7 +436,6 @@ async function main() {
     assert.equal(await native.run('operator', () => true), true)
     assert.equal(routed.at(-1), 'verified')
     assert.equal(native.active, false)
-    assert.ok(rules.length >= 3, 'shared rules are reread before resumed model judgment')
     const mainAgent = makeAgent('MainPath')
     await until(() => mainAgent.coder.code_template && mainAgent.coder.code_lint_template)
     let acknowledgement
@@ -701,7 +700,7 @@ async function main() {
     assert.equal(await imageRuntime.run('operator', () => true, imageAgent.currentTaskId), true)
     assert.equal(imageResult.contentItems[1].type, 'inputImage')
     assert.equal(imageResult.contentItems[1].imageUrl, 'data:image/jpeg;base64,' + jpeg.toString('base64'))
-    assert.match(imageResult.contentItems[0].text, /CURRENT RULES/)
+    assert.match(imageResult.contentItems[0].text, /COMPLETED OPERATION RESULT/)
     const imageTraceFile = (await fs.readdir('bots/NativeImage/histories'))[0]
     assert.doesNotMatch(await fs.readFile('bots/NativeImage/histories/' + imageTraceFile, 'utf8'), /data:image|\/9j\//,
       'host trace and diagnostics retain image metadata, not base64')
@@ -1034,28 +1033,24 @@ async function main() {
     assert.equal(await mainAgent.handleMessage('operator', '!stop'), true)
     assert.equal(mainAgent.history.invalidations, 2, 'Stop also invalidates any outstanding summary epoch')
     assert.equal(mainAgent.actions.userStopped, true, 'literal Stop remains available')
-    // Rule contents can change between decisions; keep them out of the fixed AGENTS.md.
-    const ruleAgent = makeAgent('Rules')
-    let rule = 'first rule', turnCount = 0
+    // Resumed decisions retain the accepted operator request and current budgets.
+    const ruleAgent = makeAgent('RequestContext')
+    let turnCount = 0
     const inputs = []
     const acceptedRequest = { role: 'user', content: 'Complete the original requested outcome.' }
     ruleAgent.history.getHistory = () => [acceptedRequest]
-    ruleAgent.prompter.withBotRules = async text => text + '\n' + rule
     const ruleRuntime = new CodexRuntime(ruleAgent, { makeSession: ({ execute }) => ({
       open: async () => {},
-      runTurn: async input => { inputs.push(input); turnCount++; if (turnCount === 1) { rule = 'updated rule'; ruleAgent.history.getHistory = () => [{ role: 'system', content: 'Later operation context.' }]; return { operation: execute('await Promise.resolve();'), messages: [] } } return { operation: null, messages: ['done'] } },
+      runTurn: async input => { inputs.push(input); turnCount++; if (turnCount === 1) { ruleAgent.history.getHistory = () => [{ role: 'system', content: 'Later operation context.' }]; return { operation: execute('await Promise.resolve();'), messages: [] } } return { operation: null, messages: ['done'] } },
       close: async () => {}
     }) })
     ruleAgent.codexRuntime = ruleRuntime
     await until(() => ruleAgent.coder.code_template && ruleAgent.coder.code_lint_template)
     assert.equal(await ruleRuntime.run('operator', () => true), true)
-    assert.doesNotMatch(await fs.readFile(path.join(root, 'src/process/codex/AGENTS.md'), 'utf8'), /first rule/)
-    assert.ok(inputs[0].endsWith('first rule'))
-    assert.ok(inputs[1].endsWith('updated rule'))
     const resumedRequest = inputs[1].split('CURRENT OPERATOR REQUEST (still active):\n')[1].split('\nCURRENT CAPABILITIES:')[0]
     const readTask = text => JSON.parse(text.split('CURRENT TASK:\n')[1].split('\n')[0])
     const firstTask = readTask(inputs[0]), nextTask = readTask(inputs[1])
-    assert.equal(firstTask.self.name, 'Rules')
+    assert.equal(firstTask.self.name, 'RequestContext')
     assert.equal(firstTask.budget.hostDecisionsUsed, 1)
     assert.equal(nextTask.budget.hostDecisionsUsed, 2)
     assert.equal(nextTask.budget.remainingOperations, firstTask.budget.remainingOperations - 1)

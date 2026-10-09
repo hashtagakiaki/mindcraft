@@ -247,7 +247,7 @@ async function runHubShutdownFixture(root) {
   const nodeModules = path.join(fixtureRoot, 'node_modules')
   await Promise.all([mindcraftDir, path.join(mindcraftDir, 'public'), processDir, stubsDir, nodeModules].map(dir => mkdir(dir, { recursive: true })))
   await writeFile(path.join(fixtureRoot, 'package.json'), '{"type":"module"}')
-  await writeFile(path.join(fixtureRoot, 'settings.js'), `export default ${JSON.stringify({ place_state_dir: path.join(fixtureRoot, 'state'), place_world_id: WORLD_A, bot_rules_file: path.join(fixtureRoot, 'BOT_RULES.md') })}`)
+  await writeFile(path.join(fixtureRoot, 'settings.js'), `export default ${JSON.stringify({ place_state_dir: path.join(fixtureRoot, 'state'), place_world_id: WORLD_A })}`)
   await writeFile(path.join(mindcraftDir, 'public/settings_spec.json'), await readFile(path.join(sourceRoot, 'mindcraft/public/settings_spec.json')))
   await writeFile(path.join(mindcraftDir, 'place_store.js'), await readFile(path.join(sourceRoot, 'mindcraft/place_store.js')))
   await writeFile(path.join(mindcraftDir, 'place_rpc.js'), await readFile(path.join(sourceRoot, 'mindcraft/place_rpc.js')))
@@ -368,7 +368,7 @@ async function runHubShutdownFixture(root) {
     const controlSocket = new EventEmitter()
     controlSocket.data = { identity: { role: 'legacy' } }
     globalThis.__fixtureSocketServer.emit('connection', controlSocket)
-    const settings = name => ({ profile: { name, bot_rules_file: '/ignored/profile.md' }, bot_rules_file: '/ignored/agent.md', host: 'localhost', port: 1, minecraft_version: '1.20' })
+    const settings = name => ({ profile: { name }, host: 'localhost', port: 1, minecraft_version: '1.20' })
 
     const emitCreate = input => new Promise(resolve => controlSocket.emit('create-agent', input, resolve))
     const raceResults = await Promise.all([
@@ -437,7 +437,6 @@ async function runHubShutdownFixture(root) {
     assert.equal(metadata.settings.place_memory_enabled, true)
     assert.equal(metadata.settings.place_world_id, WORLD_A)
     assert.equal(metadata.settings.place_state_dir, undefined, 'private store root path stays server-owned')
-    assert.equal(metadata.settings.bot_rules_file, path.join(fixtureRoot, 'BOT_RULES.md'), 'root rules path overrides individual settings')
     assert.match(metadata.management.generation, /^[0-9a-f-]{36}$/i)
     assert.equal(metadata.management.agentName, 'reused-name')
     assert.equal(metadata.management.placeMemoryEnabled, true)

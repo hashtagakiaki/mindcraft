@@ -19,7 +19,7 @@ const MAX_NATIVE_DEDUPE_IDS = 256;
 const MAX_BLOCK_EDITS_PER_CHECK = 8;
 const MAX_OPERATION_IMAGES = 4;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
-const NATIVE_CONTEXT_PROTOCOL = 6;
+const NATIVE_CONTEXT_PROTOCOL = 7;
 
 export function validateCodexRuntime(profile) {
     if (settings.agent_runtime !== 'codex-session') return null;
@@ -322,8 +322,6 @@ export class CodexRuntime {
                     budget: { remainingMs: config.task_budget_ms === null ? null : Math.max(0, config.task_budget_ms - (Date.now() - acceptedAt)),
                         remainingOperations: config.max_operations === null ? null : Math.max(0, config.max_operations - operationCount),
                         hostDecisionsUsed: turnCount, remainingHostDecisions: config.max_turns === null ? null : Math.max(0, config.max_turns - turnCount) } });
-            // Fail closed on unreadable shared rules, before creating a model request.
-            await agent.prompter.withBotRules('');
             if (!current()) return false;
             const turns = agent.history.getHistory();
             const operatorRequest = JSON.stringify(turns.at(-1));
@@ -334,9 +332,9 @@ export class CodexRuntime {
                     throw new Error('Task model decision budget reached');
                 }
                 turnCount++;
-                const input = await agent.prompter.withBotRules(this._appendNativeInbox(
+                const input = this._appendNativeInbox(
                     'Settled tool result.\nCURRENT OPERATOR REQUEST (still active):\n' + operatorRequest + decisionContext() + '\n'
-                    + (result.documentation ? 'SDK DOCUMENTATION RESULT:\n' : 'COMPLETED OPERATION RESULT:\n') + JSON.stringify(modelOperationResult(result)), this._takeNativeInbox()));
+                    + (result.documentation ? 'SDK DOCUMENTATION RESULT:\n' : 'COMPLETED OPERATION RESULT:\n') + JSON.stringify(modelOperationResult(result)), this._takeNativeInbox());
                 if (!current()) throw new Error('Stale task tool result');
                 record('tool_result', { input, images: this.images?.length ?? 0 });
                 const images = this.images ?? [];
@@ -366,7 +364,6 @@ export class CodexRuntime {
                 }
                 turnCount++;
                 input = this._appendNativeInbox(input + '\nCURRENT OPERATOR REQUEST (still active):\n' + operatorRequest + decisionContext(), this._takeNativeInbox());
-                input = await agent.prompter.withBotRules(input);
                 if (!current()) return false;
                 record('turn_input', { input });
                 const turn = await this.session.runTurn(input);

@@ -126,7 +126,6 @@ async function main() {
       assert.deepEqual(scopedUsage.usage, { promptTokens: 6 }, 'missing completion usage stays absent')
       prompter.profile.conversing = 'conversation prompt'
       prompter.convo_examples = []
-      prompter.withBotRules = async prompt => prompt
       let conversationSignal
       let conversationCalls = 0
       globalThis.fetch = request => {

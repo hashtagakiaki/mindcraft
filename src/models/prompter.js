@@ -5,7 +5,6 @@ import { SkillLibrary } from "../agent/library/skill_library.js";
 import { stringifyTurns } from '../utils/text.js';
 import { getCommand } from '../agent/commands/index.js';
 import settings from '../agent/settings.js';
-import { promises as fs } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { selectAPI, createModel } from './_model_map.js';
@@ -134,22 +133,6 @@ export class Prompter {
         }
     }
 
-    async withBotRules(prompt) {
-        const rulesPath = settings.bot_rules_file;
-        if (rulesPath == null) return prompt;
-        if (typeof rulesPath !== 'string' || !path.isAbsolute(rulesPath)) {
-            throw new Error('bot_rules_file must be an absolute path or null');
-        }
-        let rules;
-        try {
-            rules = (await fs.readFile(rulesPath, 'utf8')).trim();
-        } catch (error) {
-            throw new Error(`Cannot read shared bot rules ${rulesPath}: ${error.message}`, { cause: error });
-        }
-        if (!rules) return prompt;
-        return `${prompt}\n\nSHARED BOT RULES\nThese operator rules apply to every bot, including you. Follow them when choosing goals, planning actions, and writing code. They take precedence over conflicting individual profile preferences and old conversation or memory. A current explicit operator instruction may make an exception.\n\n${rules}`;
-    }
-
     async replaceStrings(prompt, messages, examples=null, to_summarize=[], last_goals=null) {
         prompt = prompt.replaceAll('$NAME', this.agent.name);
 
@@ -263,7 +246,6 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
 
             let prompt = this.profile.conversing;
             prompt = await this.replaceStrings(prompt, messages, this.convo_examples);
-            prompt = await this.withBotRules(prompt);
             if (this.agent.places) prompt += `\n\nPLACE MEMORY CONTEXT\n${this.agent.places.getPromptContext()}`;
             let generation;
 
@@ -323,8 +305,7 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
             }
             if (signal?.aborted) return null;
             let prompt = this.profile.coding;
-            const promptPreparation = this.replaceStrings(prompt, messages, this.coding_examples)
-                .then(prepared => this.withBotRules(prepared));
+            const promptPreparation = this.replaceStrings(prompt, messages, this.coding_examples);
             prompt = signal
                 ? await awaitRequestOrCancellation(promptPreparation, signal)
                 : await promptPreparation;
@@ -375,7 +356,6 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
         let messages = this.agent.history.getHistory();
         messages.push({role: 'user', content: new_message});
         prompt = await this.replaceStrings(prompt, null, null, messages);
-        prompt = await this.withBotRules(prompt);
         let res = await this.chat_model.sendRequest([], prompt);
         return res.trim().toLowerCase() === 'respond';
     }
@@ -409,7 +389,6 @@ Treat missing or stale observations as uncertain. Do not claim reported coordina
         // deprecated
         let system_message = this.profile.goal_setting;
         system_message = await this.replaceStrings(system_message, messages);
-        system_message = await this.withBotRules(system_message);
 
         let user_message = 'Use the below info to determine what goal to target next\n\n';
         user_message += '$LAST_GOALS\n$STATS\n$INVENTORY\n$CONVO'
