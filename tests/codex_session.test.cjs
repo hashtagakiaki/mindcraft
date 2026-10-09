@@ -272,6 +272,23 @@ for (let batch = 0; batch < 10; batch++) {
           { ok: false, status: 'unreachable', confirmed: 2 })
       }
     }
+    batchAgent.actions.beginUserIntent()
+    settings.codex_session.execution_window_ms = 1000
+    batchEdits = 0; batchCalls = 0; batchObservations = []
+    batchAgent.places = { sdk: {
+      find: () => { batchObservations.push(batchEdits); return { remaining: 20 - batchEdits } },
+      setAlias: async () => { batchCalls++; batchEdits++; return true }
+    } }
+    const continued = await batchAgent.actions.runAction('sdk-owned-multiple-batches',
+      () => batchAgent.coder.executeCode(`for (let batch = 0; batch < 10; batch++) {
+        const state = places.find({text: "batch-state"});
+        if (state.remaining === 0) return;
+        for (let i = 0; i < Math.min(8, state.remaining); i++)
+          await places.setAlias({alias: "mock-step", placeId: "mock-place"});
+      }`), { timeout: 0 })
+    assert.equal(continued.success, true)
+    assert.equal(batchEdits, 20); assert.equal(batchCalls, 20)
+    assert.deepEqual(batchObservations, [0, 8, 16, 20], 'normal work continues across fresh batches without a clock or false-check wrapper')
     delete settings.codex_session.execution_window_ms
     for (const reason of ['operator_stop', 'superseded', 'disconnect', 'shutdown']) {
       const pendingBatch = deferred(), enteredBatch = deferred()
@@ -497,6 +514,7 @@ for (let batch = 0; batch < 10; batch++) {
       assert.equal(await fs.readFile(path.join(sourceHome, 'auth.json'), 'utf8'), 'fixture refreshed auth', 'refresh writes through the existing auth backend')
       const loadedInstructions = await fs.readFile(path.join(session.cwd, 'AGENTS.md'), 'utf8')
       assert.equal(loadedInstructions, (await fs.readFile(path.join(root, 'src/process/codex/AGENTS.md'), 'utf8')) + '\n' + sdkFixture.catalog + '\n')
+      assert.match(loadedInstructions, /Do not return to the model solely because one small batch finished/)
       assert.equal(loadedInstructions.split('AVAILABLE MINECRAFT SDK METHODS (names only):').length - 1, 1)
       assert.doesNotMatch(loadedInstructions, /DOCUMENTATION_ONLY_MARKER/)
       assert.deepEqual(threadParams.dynamicTools[1], sdkFixture.tools[0])

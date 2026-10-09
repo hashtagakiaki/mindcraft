@@ -1,14 +1,11 @@
 import { resolveBlockInteraction, interactionFaceVector, currentViewDirection, interactionEye } from './block_interaction.js'
 
 const installedBots = new WeakMap()
-// Keep native canDigBlock's existing range admission for plugin/legacy callers.
-const NATIVE_DIG_REACH = 5.1
-
 function digInteraction (bot, block, ignoreLook, aim = null) {
   let direction = ignoreLook ? currentViewDirection(bot) : null
   if (ignoreLook && !direction) throw new Error('Current digging view is unknown')
   if (aim && !ignoreLook) direction = aim.minus(interactionEye(bot))
-  const hit = resolveBlockInteraction(bot, block, { reach: NATIVE_DIG_REACH, direction })
+  const hit = resolveBlockInteraction(bot, block, { direction })
   if (hit.status !== 'ready') throw new Error(`Block is not visible: ${hit.reason} ${block.position}`)
   return hit
 }
@@ -205,6 +202,10 @@ function installStopContract (bot, state) {
 }
 
 function installDigContract (bot, state, options) {
+  // Share the same surface admission as SDK approach/goals. Native's center
+  // distance can reject a reachable corner before any digging packet is sent.
+  bot.canDigBlock = block => Boolean(block?.diggable &&
+    resolveBlockInteraction(bot, block).status === 'ready')
   const originalBlockAt = bot.blockAt
   const decoratedBlocks = new WeakSet()
   const decorateBlock = block => {
@@ -253,8 +254,8 @@ function installDigContract (bot, state, options) {
         if (active.cancelled) throw new Error('Digging aborted before start packet')
         if (bot.interrupt_code) throw new Error('Digging aborted by interrupt')
         const current = freshTargetBlock(bot, active.block)
-        if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(current)) throw new Error(`Block out of digging range: ${current.position}`)
         const hit = digInteraction(bot, current, active.ignoreLook, active.interaction.aim)
+        if (!bot.canDigBlock(current)) throw new Error(`Block is not diggable: ${current.position}`)
         active.interaction = hit
         packet = { ...packet, face: hit.face }
         bot.targetDigFace = hit.face
@@ -283,9 +284,9 @@ function installDigContract (bot, state, options) {
     if (bot.interrupt_code) throw new Error('Digging aborted by interrupt')
     block = decorateBlock(freshTargetBlock(bot, block))
     if (bot.interrupt_code) throw new Error('Digging aborted by interrupt')
-    if (typeof bot.canDigBlock === 'function' && !bot.canDigBlock(block)) throw new Error(`Block out of digging range: ${block.position}`)
     const ignoreLook = forceLook === 'ignore'
     const interaction = digInteraction(bot, block, ignoreLook)
+    if (!bot.canDigBlock(block)) throw new Error(`Block is not diggable: ${block.position}`)
 
     const expectedDigMs = bot.digTime(block)
     if (!Number.isFinite(expectedDigMs)) throw new Error(`Cannot dig ${block.name} with the current tool`)

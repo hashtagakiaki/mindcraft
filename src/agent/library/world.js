@@ -8,7 +8,7 @@ import { resolveBlockInteraction } from './block_interaction.js';
 
 export function inspectBlockAt(bot, x, y, z) {
     /**
-     * Read one absolute block without moving. Unknown is not air. visible/interactionDistance retain center checks; interaction reports a reachable surface aim independently. canDig is Mineflayer's dig admission check.
+     * Read one absolute block without moving. Unknown is not air. visible/interactionDistance retain center checks; interaction reports a reachable surface aim independently. canDig is the installed bot's dig admission; mining_sync uses the same surface resolver.
      * @param {Bot} bot - Pass bot first.
      * @param {number} x - Absolute x, not a relative offset.
      * @param {number} y - Absolute y.

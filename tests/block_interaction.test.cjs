@@ -143,6 +143,42 @@ async function main() {
       assert.equal(bot.blockAt(new Vec3(-2,65,-1)).name,'stone','the obstruction remains untouched')
     }
 
+    // Replay the seven terrain failures relative to this fixture's target.
+    // Native's old center-distance check rejects these reachable surfaces.
+    const terrainFeet = [
+      [-3.5531157024254, 3.55311570242446],
+      [-3.431877594824066, 3.58253709182867],
+      [-3.431877594824066, 3.58253709182867],
+      [-3.5062528111458, -2.6334590842377],
+      [3.43538048867953, -3.65512355809363],
+      [3.66249222741452, -3.4746690894932],
+      [-3.51078896258648, -2.5665570380773]
+    ]
+    for (const [x,z] of terrainFeet) {
+      const bot=scene({feet:new Vec3(x,target.y,z),name:'dirt',obstruction:false})
+      assert.equal(bot.canDigBlock(bot.blockAt(target)),false,'old native center check rejects the target')
+      install(bot)
+      const hit=helper.resolveBlockInteraction(bot,bot.blockAt(target))
+      assert.equal(hit.status,'ready'); assert.ok(hit.distance<=helper.BLOCK_INTERACTION_REACH)
+      const observed=world.inspectBlockAt(bot,target.x,target.y,target.z)
+      const before=bot.moves.length
+      assert.equal((await skills.approachBlock(bot,target.x,target.y,target.z)).status,'ready')
+      assert.equal(await skills.breakBlockAt(bot,target.x,target.y,target.z),true)
+      assert.equal(observed.canDig,true,'public dig admission matches the surface resolver')
+      assert.equal(bot.moves.length,before,'a reachable surface needs no extra approach')
+      assert.equal(starts(bot).length,1); assert.equal(starts(bot)[0].face,hit.face)
+      assert.equal(bot.blockAt(target).name,'air')
+    }
+
+    {
+      const bot=scene({feet:new Vec3(-4.55,64,.5),obstruction:false})
+      assert.equal(bot.canDigBlock(bot.blockAt(target)),true,'old center allowance extends past the SDK surface reach')
+      install(bot)
+      assert.equal(bot.canDigBlock(bot.blockAt(target)),false,'surface reach remains bounded at 4.5')
+      await assert.rejects(bot.dig(bot.blockAt(target),true),/not visible/)
+      assert.equal(starts(bot).length,0)
+    }
+
     // Real slab and fence selection shapes, including a partial-height blocker.
     for(const name of ['stone_slab','oak_fence']) {
       const bot=scene({name,obstruction:false,feet:new Vec3(-2.5,64,.5)}); install(bot)
@@ -233,7 +269,7 @@ async function main() {
       assert.equal(starts(bot).length,0)
     }
     await sleep(0)
-    console.log('block interaction: geometric center/face/edge, real shapes/native digging, fresh guards, unknown/range/stop and actual-goal checks passed')
+    console.log('block interaction: seven terrain distance failures, geometric center/face/edge, real shapes/native digging, fresh guards, unknown/range/stop and actual-goal checks passed')
   } finally { await rm(root,{recursive:true,force:true}) }
 }
 main().catch(error=>{console.error(error);process.exitCode=1})

@@ -318,7 +318,7 @@ async function main() {
     serverAir(bot, block)
     await digging
   }
-  for (const [method, message] of [['canDigBlock', /out of digging range/], ['raycast', /not visible/]]) {
+  for (const [method, message] of [['canDigBlock', /not diggable/], ['raycast', /not visible/]]) {
     const { bot, block } = fixture()
     if (method === 'raycast') bot.world.raycast = () => null
     else bot[method] = () => false
