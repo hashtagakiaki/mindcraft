@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict')
 const { execFileSync } = require('node:child_process')
+const { closeSync, mkdtempSync, openSync, readFileSync, rmSync } = require('node:fs')
 const { mkdtemp, mkdir, readFile, rm, writeFile } = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
@@ -9,6 +10,32 @@ const { pathToFileURL } = require('node:url')
 
 const repo = path.resolve(__dirname, '..')
 const node = process.execPath
+
+function runFixture(executable, script, args = [], label = path.basename(script)) {
+  const captureDir = mkdtempSync(path.join(os.tmpdir(), 'mindcraft-fixture-output-'))
+  const capturePath = path.join(captureDir, 'combined.log')
+  let captureFd
+  try {
+    captureFd = openSync(capturePath, 'w')
+    try {
+      execFileSync(executable, [script, ...args], { stdio: ['inherit', captureFd, captureFd] })
+      process.stdout.write(`[ok] ${label}\n`)
+    } catch (error) {
+      const status = error.signal ? `signal ${error.signal}` : `exit ${error.status ?? 'unknown'}`
+      process.stderr.write(`\n[failed] ${label} (${status})\n`)
+      const output = readFileSync(capturePath)
+      if (output.length > 0) {
+        process.stderr.write(output)
+        if (output.at(-1) !== 0x0a) process.stderr.write('\n')
+      }
+      process.stderr.write(`[end failed fixture: ${label}]\n`)
+      throw new Error(`Fixture ${label} failed (${status})`, { cause: error })
+    }
+  } finally {
+    if (captureFd !== undefined) closeSync(captureFd)
+    rmSync(captureDir, { recursive: true, force: true })
+  }
+}
 
 async function write(root, relative, content) {
   const target = path.join(root, relative)
@@ -608,43 +635,44 @@ async function main() {
       await setupNavigationFixture(fixture)
       await write(temp, 'node_modules/prismarine-item/package.json', '{"main":"index.js"}')
       await write(temp, 'node_modules/prismarine-item/index.js', 'module.exports = () => class Item { static toNotch(item) { return item ? { itemId: item.type, itemCount: item.count, addedComponentCount: 0, removedComponentCount: 0, components: [], removeComponents: [] } : { itemCount: 0, components: [], removeComponents: [] } } static fromNotch(item) { if (!item || item.present === false || item.itemCount === 0) return null; const type = item.itemId ?? item.blockId ?? item.type; const count = item.itemCount ?? item.count; return type == null ? null : { type, count, metadata: item.metadata ?? item.itemDamage ?? 0, stackSize: 64 } } };')
-      execFileSync(node, [path.join(__dirname, 'interaction_confirmation.test.cjs'), fixture], { stdio: 'inherit' })
+      runFixture(node, path.join(__dirname, 'interaction_confirmation.test.cjs'), [fixture])
     } finally {
       await rm(temp, { recursive: true, force: true })
     }
     return
   }
-  execFileSync(node, [path.join(__dirname, 'tree_felling.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'block_interaction.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'native_sdk.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'codex_session.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'ollama_contract.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'state_poller.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'camera_lifecycle.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'vision_request_ownership.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'vision_sdk_validation.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'message_targets.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'partial_read_capture.test.cjs'), path.join(repo, 'src/utils/partial_read_capture.js')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'minecraft_protocol_overrides.test.mjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'place_store.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'place_rpc.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'block_placement.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'targeted_sdk.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'chest_transfer.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'place_actions.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'place_agent.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'action_manager.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'operation_context.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'idle_scheduling.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'generation_cancellation.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'furnace_lifecycle.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'recovery_replanning.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'management_reconnect.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'management_auth.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'agent_process.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'agent_shutdown.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'world_observation.test.cjs')], { stdio: 'inherit' })
-  execFileSync(node, [path.join(__dirname, 'shutdown_experiments.cjs')], { stdio: 'inherit' })
+  runFixture(node, path.join(__dirname, 'run_tests_output.test.cjs'))
+  runFixture(node, path.join(__dirname, 'tree_felling.test.cjs'))
+  runFixture(node, path.join(__dirname, 'block_interaction.test.cjs'))
+  runFixture(node, path.join(__dirname, 'native_sdk.test.cjs'))
+  runFixture(node, path.join(__dirname, 'codex_session.test.cjs'))
+  runFixture(node, path.join(__dirname, 'ollama_contract.test.cjs'))
+  runFixture(node, path.join(__dirname, 'state_poller.test.cjs'))
+  runFixture(node, path.join(__dirname, 'camera_lifecycle.test.cjs'))
+  runFixture(node, path.join(__dirname, 'vision_request_ownership.test.cjs'))
+  runFixture(node, path.join(__dirname, 'vision_sdk_validation.test.cjs'))
+  runFixture(node, path.join(__dirname, 'message_targets.test.cjs'))
+  runFixture(node, path.join(__dirname, 'partial_read_capture.test.cjs'), [path.join(repo, 'src/utils/partial_read_capture.js')])
+  runFixture(node, path.join(__dirname, 'minecraft_protocol_overrides.test.mjs'))
+  runFixture(node, path.join(__dirname, 'place_store.test.cjs'))
+  runFixture(node, path.join(__dirname, 'place_rpc.test.cjs'))
+  runFixture(node, path.join(__dirname, 'block_placement.test.cjs'))
+  runFixture(node, path.join(__dirname, 'targeted_sdk.test.cjs'))
+  runFixture(node, path.join(__dirname, 'chest_transfer.test.cjs'))
+  runFixture(node, path.join(__dirname, 'place_actions.test.cjs'))
+  runFixture(node, path.join(__dirname, 'place_agent.test.cjs'))
+  runFixture(node, path.join(__dirname, 'action_manager.test.cjs'))
+  runFixture(node, path.join(__dirname, 'operation_context.test.cjs'))
+  runFixture(node, path.join(__dirname, 'idle_scheduling.test.cjs'))
+  runFixture(node, path.join(__dirname, 'generation_cancellation.test.cjs'))
+  runFixture(node, path.join(__dirname, 'furnace_lifecycle.test.cjs'))
+  runFixture(node, path.join(__dirname, 'recovery_replanning.test.cjs'))
+  runFixture(node, path.join(__dirname, 'management_reconnect.test.cjs'))
+  runFixture(node, path.join(__dirname, 'management_auth.test.cjs'))
+  runFixture(node, path.join(__dirname, 'agent_process.test.cjs'))
+  runFixture(node, path.join(__dirname, 'agent_shutdown.test.cjs'))
+  runFixture(node, path.join(__dirname, 'world_observation.test.cjs'))
+  runFixture(node, path.join(__dirname, 'shutdown_experiments.cjs'))
   const temp = await mkdtemp(path.join(os.tmpdir(), 'mindcraft-owned-tests-'))
   try {
     const helper = path.join(temp, 'crafting_sync.js')
@@ -652,16 +680,18 @@ async function main() {
     await writeFile(path.join(temp, 'operation_context.js'), await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
     await write(temp, 'node_modules/prismarine-item/package.json', '{"main":"index.js"}')
     await write(temp, 'node_modules/prismarine-item/index.js', 'module.exports = () => class Item { static toNotch(item) { return item ? { itemId: item.type, itemCount: item.count, addedComponentCount: 0, removedComponentCount: 0, components: [], removeComponents: [] } : { itemCount: 0, components: [], removeComponents: [] } } static fromNotch(item) { if (!item || item.present === false || item.itemCount === 0) return null; const type = item.itemId ?? item.blockId ?? item.type; const count = item.itemCount ?? item.count; return type == null ? null : { type, count, metadata: item.metadata ?? item.itemDamage ?? 0, stackSize: 64 } } };')
-    execFileSync(node, [path.join(__dirname, 'crafting_sync.test.cjs'), helper], { stdio: 'inherit' })
-    execFileSync(node, [path.join(__dirname, 'mining_sync.test.cjs'), path.join(repo, 'src/agent/library/mining_sync.js')], { stdio: 'inherit' })
+    runFixture(node, path.join(__dirname, 'crafting_sync.test.cjs'), [helper])
+    runFixture(node, path.join(__dirname, 'mining_sync.test.cjs'), [path.join(repo, 'src/agent/library/mining_sync.js')])
     const farmRoot = path.join(temp, 'farm-fixture')
     await testFarm(farmRoot)
     await testNavigation(path.join(temp, 'navigation-fixture'))
-    execFileSync(node, [path.join(__dirname, 'interaction_confirmation.test.cjs'), path.join(temp, 'navigation-fixture')], { stdio: 'inherit' })
-    execFileSync(node, [path.join(__dirname, 'mining_integration.test.cjs'), farmRoot], { stdio: 'inherit' })
+    runFixture(node, path.join(__dirname, 'interaction_confirmation.test.cjs'), [path.join(temp, 'navigation-fixture')])
+    runFixture(node, path.join(__dirname, 'mining_integration.test.cjs'), [farmRoot])
   } finally {
     await rm(temp, { recursive: true, force: true })
   }
 }
 
-main().catch(error => { console.error(error); process.exitCode = 1 })
+if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1 })
+
+module.exports = { runFixture }
