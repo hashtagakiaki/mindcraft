@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 const ownership = new AsyncLocalStorage();
+export const NATIVE_EXECUTION_WINDOW_MS = 45_000;
 
 export function operationContext() { return ownership.getStore()?.operation ?? null; }
 
@@ -146,7 +147,8 @@ export function trackSkill(name, body) {
                 call.status = operation.signal.aborted ? 'cancelled' : value === false ? 'returned_false' : value === true ? 'returned_true' : 'returned';
                 return value;
             } catch (error) {
-                call.status = operation.signal.aborted ? 'cancelled' : 'error';
+                call.status = operation.signal.aborted ? 'cancelled'
+                    : name === 'generated_code' && error === operation.executionYieldError ? 'yielded' : 'error';
                 call.error = String(error);
                 throw error;
             } finally {
@@ -177,6 +179,8 @@ export function operationResult(operation) {
         unconfirmedChanges: operation.uncertain.map(event => ({ ...event })),
         trackingScope: 'public SDK calls; raw bot/plugin work is not fully tracked',
         lateDiagnostics: operation.diagnostics,
+        ...(operation.sdkFailure ? { sdkFailure: operation.sdkFailure } : {}),
+        ...(operation.executionYield ? { executionYield: operation.executionYield } : {}),
     };
 }
 

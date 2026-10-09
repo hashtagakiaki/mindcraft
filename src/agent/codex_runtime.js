@@ -6,20 +6,20 @@ import { getNativeSdkDocs } from './library/native_sdk.js';
 import settings from './settings.js';
 import { readTaskDiagnostics, createTaskDiagnostics, appendOperationDiagnostic, finishTaskDiagnostics } from './task_diagnostics.js';
 import { createObservationScope } from './library/observation_scope.js';
-import { operationContext, registerOwnedPromise } from './library/operation_context.js';
+import { operationContext, registerOwnedPromise, NATIVE_EXECUTION_WINDOW_MS } from './library/operation_context.js';
 import convoManager from './conversation.js';
 import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
 
 const DEFAULTS = { stall_timeout_ms: 30000, action_timeout_ms: 600000, output_limit: 16000, max_search_radius: 64,
-    task_budget_ms: null, max_operations: null, max_turns: null, goals: false };
+    task_budget_ms: null, max_operations: null, max_turns: null, goals: false,
+    execution_window_ms: NATIVE_EXECUTION_WINDOW_MS };
 const OPTIONAL_TASK_LIMITS = new Set(['task_budget_ms', 'max_operations', 'max_turns']);
 const MAX_UNCHANGED_OPERATION_FAILURES = 3;
 const MAX_NATIVE_INBOX_MESSAGES = 32;
 const MAX_NATIVE_DEDUPE_IDS = 256;
-const MAX_BLOCK_EDITS_PER_CHECK = 8;
 const MAX_OPERATION_IMAGES = 4;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
-const NATIVE_CONTEXT_PROTOCOL = 7;
+const NATIVE_CONTEXT_PROTOCOL = 8;
 
 export function validateCodexRuntime(profile) {
     if (settings.agent_runtime !== 'codex-session') return null;
@@ -319,7 +319,8 @@ export class CodexRuntime {
                 const connected = serverProxy.managementReady && serverProxy.socket?.connected === true;
                 return { vision: !!settings.allow_vision, place_memory: !!(connected && agent.places?.isEnabled()),
                     native_peer_messages: !!(connected && serverProxy.managementCredential && this._taskScope.isCurrent()),
-                    max_search_radius: config.max_search_radius, max_block_edits_per_check: MAX_BLOCK_EDITS_PER_CHECK };
+                    max_search_radius: config.max_search_radius, execution_window_ms: config.execution_window_ms,
+                    sdk_stops_on_failure: true, navigation_edits: false };
             };
             const decisionContext = () => '\nCURRENT CAPABILITIES:\n' + JSON.stringify(currentCapabilities())
                 + '\nCURRENT TASK:\n' + JSON.stringify({ self: { name: agent.name }, taskId,

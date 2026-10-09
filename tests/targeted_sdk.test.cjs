@@ -43,6 +43,7 @@ import { createRequire } from 'node:module';
 const registry = createRequire(import.meta.url)('minecraft-data')('1.21.1');
 export function getBlockId(name) { return registry.blocksByName[name]?.id ?? null; }
 export function getItemId(name) { return registry.itemsByName[name]?.id ?? null; }
+export function getEntityId(name) { return registry.entitiesByName[name]?.id ?? null; }
 export function getAllBlockIds(ignore) { return Object.values(registry.blocksByName).filter(b => !ignore.includes(b.name)).map(b => b.id); }
 export function mustCollectManually() { return false; }
 `)
@@ -284,8 +285,26 @@ async function main() {
     assert.equal(corrected.success,true,'corrected calls work in the same execution environment')
     assert.equal(scans,2)
     assert.equal(world.getPosition(bot).x,bot.entity.position.x,'internal bot-first API still works')
+    agent.places.sdk.verify=async()=>({ok:false,status:'missing'})
+    const observationFalse=await run('await Promise.resolve(); log(bot,JSON.stringify({entity:world.isEntityType({name:"dirt"})})); log(bot,JSON.stringify(await places.verify({placeId:"missing"}))); await skills.goToPosition({position:{x:0,y:64,z:0}});')
+    assert.equal(observationFalse.success,true,'a false observation does not stop subsequent actions')
+    assert.match(observationFalse.message,/"entity":false/)
+    const restricted=bot.state.moves.at(-1).movements
+    assert.equal(restricted.canDig,false)
+    assert.equal(restricted.canPlaceOn,false)
+    assert.equal(restricted.allow1by1towers,false)
+    assert.equal(restricted.canOpenDoors,false)
+    assert.deepEqual(restricted.scafoldingBlocks,[])
+    bot.state.route='unreachable'
+    const blocked=await run('await skills.goToPosition({position:{x:0,y:64,z:0}}); await skills.breakBlockAt({position:{x:1,y:64,z:0}});')
+    assert.equal(blocked.success,false)
+    assert.equal(blocked.sdkFailure.method,'skills.goToPosition')
+    assert.equal(blocked.skillResults.some(call=>call.skill==='skills.breakBlockAt'),false,'blocked navigation prevents the next edit')
+    bot.state.route='ready'
     settings.agent_runtime='legacy'
     assert.equal((await run('await Promise.resolve(); log(bot,JSON.stringify(world.getPosition(bot)));')).success,true,'legacy generated code retains its original contract')
+    assert.equal((await run('await skills.goToPosition(bot,0,64,0);')).success,true)
+    assert.equal(bot.state.moves.at(-1).movements.canDig,true,'legacy navigation retains its existing policy')
     console.log('Targeted SDK real Coder/SES/ActionManager fixture passed')
   } finally { process.chdir(previous); await rm(root,{recursive:true,force:true}) }
 }

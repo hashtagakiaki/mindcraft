@@ -2011,6 +2011,15 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     // Older callers passed a boolean in this previously unused position.
     if (typeof movementOverride !== 'object') movementOverride = null;
 
+    // Native code uses explicit edits for changes; all navigation, including
+    // navigation inside other skills, stays free of digging and scaffolding.
+    if (operationContext()?.nativeNavigationNoEdits) {
+        movementOverride = Object.assign(new pf.Movements(bot), movementOverride ?? {}, {
+            canDig: false, canPlaceOn: false, allow1by1towers: false,
+            allowFreeMotion: false, scafoldingBlocks: [], canOpenDoors: false,
+        });
+    }
+
     const nonDestructiveMovements = movementOverride || new pf.Movements(bot);
     const dontBreakBlocks = ['glass', 'glass_pane'];
     for (let block of dontBreakBlocks) {

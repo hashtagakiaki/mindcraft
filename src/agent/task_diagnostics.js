@@ -65,6 +65,8 @@ export function appendOperationDiagnostic(snapshot, code, result) {
         executionStatus: result.executionStatus ?? null, success: result.success ?? null,
         error: text(failure, 4000),
         ...(result.argumentError ? { argumentError: bounded(result.argumentError) } : {}),
+        ...(result.sdkFailure ? { sdkFailure: bounded(result.sdkFailure) } : {}),
+        ...(result.executionYield ? { executionYield: bounded(result.executionYield) } : {}),
         output: text(result.message, 3000), skillResults,
         confirmedChanges: bounded(result.confirmedChanges ?? []),
         unconfirmedChanges: bounded(result.unconfirmedChanges ?? []),

@@ -5,7 +5,7 @@ import * as world from './library/world.js';
 import settings from './settings.js';
 import { Vec3 } from 'vec3';
 import {ESLint} from "eslint";
-import { trackSkill, operationContext, registerOwnedPromise } from './library/operation_context.js';
+import { trackSkill, operationContext, registerOwnedPromise, NATIVE_EXECUTION_WINDOW_MS } from './library/operation_context.js';
 
 export class Coder {
     constructor(agent) {
@@ -32,10 +32,12 @@ export class Coder {
         const check = () => {
             if (context?.signal.aborted || this.agent.bot.interrupt_code) throw new Error('Action cancelled');
         };
+        const safety = settings.agent_runtime === 'codex-session'
+            ? nativeExecutionSafety(settings.codex_session?.execution_window_ms ?? NATIVE_EXECUTION_WINDOW_MS) : null;
         lockdown();
         check();
         this.agent.actions.setPhase('staging', context?.actionId);
-        const staged = await this._stageCode(code, check);
+        const staged = await this._stageCode(code, check, safety);
         check();
         this.agent.actions.setPhase('linting', context?.actionId);
         if (!staged) throw new Error('Could not stage code');
@@ -43,7 +45,16 @@ export class Coder {
         check();
         if (error) throw new Error(error);
         this.agent.actions.setPhase('executing', context?.actionId);
-        await trackSkill('generated_code', () => staged.func.main(this.agent.bot, staged.places))();
+        safety?.start();
+        try {
+            await trackSkill('generated_code', () => staged.func.main(this.agent.bot, staged.places))();
+            check();
+            safety?.finish();
+        } catch (error) {
+            check();
+            if (!safety?.isYield(error)) throw error;
+            skills.log(this.agent.bot, 'SDK execution window reached; yielding with completed changes retained.');
+        }
         check();
     }
 
@@ -193,7 +204,7 @@ export class Coder {
     }
     // write custom code to file and import it
     // write custom code to file and prepare for evaluation
-    async _stageCode(code, check = null) {
+    async _stageCode(code, check = null, safety = null) {
         code = this._sanitizeCode(code);
         let src = '';
         code = code.replaceAll('console.log(', 'log(bot,');
@@ -224,7 +235,7 @@ export class Coder {
         // It will only have access to these things, (in addition to basic javascript objects like Array, Object, etc.)
         // Note that the code may be able to modify the exposed objects.
         // Guard each SDK entry, including inline compound code after an await.
-        const guarded = sdk => guardSdk(sdk, check);
+        const guarded = (sdk, namespace) => guardSdk(sdk, check, safety, namespace);
         const bindings = {
             skills: configureGeneratedCodeFalseMode(skills, settings.generated_code_fail_on_false),
             world,
@@ -248,7 +259,7 @@ export class Coder {
         const api = settings.agent_runtime === 'codex-session'
             ? (await import('./library/native_sdk.js')).createNativeSdk({ bot: this.agent.bot, ...bindings }, settings)
             : bindings;
-        const endowments = Object.fromEntries(Object.entries(api).map(([namespace, sdk]) => [namespace, guarded(sdk)]));
+        const endowments = Object.fromEntries(Object.entries(api).map(([namespace, sdk]) => [namespace, guarded(sdk, namespace)]));
         const compartment = makeCompartment({
             ...endowments,
             log: skills.log,
@@ -311,13 +322,65 @@ function configureGeneratedCodeFalseMode(skillLibrary, configuredNames = []) {
     }));
 }
 
-function guardSdk(sdk, check) {
+function guardSdk(sdk, check, safety = null, namespace = '') {
     if (!sdk) return sdk;
     const captured = operationContext();
     return Object.fromEntries(Object.entries(sdk).map(([name, value]) =>
         [name, typeof value !== 'function' ? value : (...args) => {
             if (captured?.closed || captured?.signal.aborted) throw new Error('Action cancelled or settled');
             check?.();
-            return value(...args);
+            safety?.before();
+            if (!safety) return value(...args);
+            const method = `${namespace}.${name}`;
+            try {
+                const result = value(...args);
+                if (result?.then) return registerOwnedPromise(result.then(
+                    settled => safety.after(method, settled), error => { throw safety.fail(method, error); }));
+                return safety.after(method, result);
+            } catch (error) { throw safety.fail(method, error); }
         }]));
+}
+
+// Per generated operation, shared by all native SDK entries. A caught or
+// unawaited failure cannot authorize another operation in this same body.
+function nativeExecutionSafety(windowMs) {
+    if (!Number.isFinite(windowMs) || windowMs <= 0) throw new Error('Invalid codex_session.execution_window_ms');
+    const owner = operationContext();
+    const queries = new Set(['skills.inspectChestAt', 'places.find', 'places.inspect', 'places.verify', 'places.resolveAlias']);
+    let deadline, failure, yielded;
+    const fail = (method, error, result) => {
+        failure ||= error;
+        if (owner && !owner.sdkFailure) owner.sdkFailure = {
+            method, error: String(error), ...(result !== undefined ? { result } : {}),
+        };
+        return failure;
+    };
+    return {
+        start() {
+            deadline = Date.now() + windowMs;
+            if (owner) owner.nativeNavigationNoEdits = true;
+        },
+        before() {
+            if (failure) throw failure;
+            if (!yielded && Date.now() >= deadline) {
+                yielded = new Error('SDK execution window reached');
+                if (owner) {
+                    owner.executionYield = { reason: 'execution-window', windowMs };
+                    owner.executionYieldError = yielded;
+                }
+            }
+            if (yielded) throw yielded;
+        },
+        after(method, result) {
+            const action = !method.startsWith('world.') && !method.startsWith('diagnostics.') && !queries.has(method);
+            const failed = action && (result === false || result?.ok === false)
+                || method === 'skills.approachBlock' && result?.status !== 'ready'
+                || method === 'skills.fellTree' && result?.status !== 'complete';
+            if (failed) throw fail(method, new Error(`${method} failed: ${result === false ? "returned false" : result?.status ?? "ok:false"}`), result);
+            return result;
+        },
+        fail,
+        finish() { if (failure) throw failure; if (yielded) throw yielded; },
+        isYield(error) { return !failure && error === yielded; },
+    };
 }

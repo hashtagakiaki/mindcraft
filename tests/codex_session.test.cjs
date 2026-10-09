@@ -149,8 +149,9 @@ async function main() {
     assert.match(result.message, /first[\s\S]*second/)
     settings.generated_code_fail_on_false = []
     const falseDefault = await agent.actions.runAction('generated-false-default', () => agent.coder.executeCode('await skills.goToPlayer({username: "missing"});\nlog(bot, "continued after false");'), { timeout: 0 })
-    assert.equal(falseDefault.success, true, 'default SDK mode preserves boolean false')
-    assert.match(falseDefault.message, /continued after false/)
+    assert.equal(falseDefault.success, false, 'native SDK stops on false without caller checks')
+    assert.doesNotMatch(falseDefault.message, /continued after false/)
+    assert.equal(falseDefault.sdkFailure.result, false)
     settings.generated_code_fail_on_false = ['goToPlayer']
     const { goToPlayer } = await load('src/agent/library/skills.js')
     assert.equal(await goToPlayer(agent.bot, 'missing'), false, 'direct SDK/skill callers retain the standard boolean API')
@@ -161,7 +162,7 @@ async function main() {
     assert.equal(falseConfigured.skillResults.some(call => call.skill === 'skills.goToPlayer' && call.status === 'returned_false'), true)
     const caughtFalse = await agent.actions.runAction('generated-caught-false', () => agent.coder.executeCode(
       'try { await skills.goToPlayer({username: "missing"}); } catch (error) { log(bot, error.message); }\nlog(bot, "continued after catch");'), { timeout: 0 })
-    assert.equal(caughtFalse.success, true, 'generated code can explicitly recover from configured false errors')
+    assert.equal(caughtFalse.success, false, 'caught failure remains a failed native operation')
     assert.match(caughtFalse.message, /continued after catch/)
     const unhandledSdkRejections = []
     const onUnhandledSdkRejection = reason => unhandledSdkRejections.push(reason)
@@ -169,7 +170,7 @@ async function main() {
     const unawaitedFalse = await agent.actions.runAction('generated-unawaited-false', () => agent.coder.executeCode('skills.goToPlayer({username: "missing"});\nawait Promise.resolve();'), { timeout: 0 })
     await delay(20)
     process.removeListener('unhandledRejection', onUnhandledSdkRejection)
-    assert.equal(unawaitedFalse.success, true, 'unawaited domain false remains a completed generated action')
+    assert.equal(unawaitedFalse.success, false, 'unawaited native failure is retained at completion')
     assert.equal(unawaitedFalse.skillResults.some(call => call.skill === 'skills.goToPlayer' && call.status === 'returned_false'), true, 'the owned derived promise is drained into the action result')
     assert.deepEqual(unhandledSdkRejections, [], 'the generated false mode does not leak an unhandled rejection')
     settings.generated_code_fail_on_false = []
@@ -221,19 +222,57 @@ for (let batch = 0; batch < 10; batch++) {
       } }
       const checked = await batchAgent.actions.runAction('batch-' + scenario,
         () => batchAgent.coder.executeCode(batchBody(scenario === 'window' ? 5 : 1000)), { timeout: 0 })
-      assert.equal(checked.success, true, 'voluntary return settles the code operation')
+      assert.equal(checked.success, scenario !== 'false', 'native false stops; voluntary return settles normally')
       if (scenario === 'normal') {
         assert.equal(batchEdits, 20)
         assert.deepEqual(batchObservations, [0, 8, 16, 20], 'fresh checks occur between batches in one call')
         assert.match(checked.message, /batch complete/)
       } else if (scenario === 'false') {
         assert.equal(batchEdits, 2); assert.equal(batchCalls, 3)
-        assert.match(checked.message, /batch false/)
+        assert.equal(checked.sdkFailure.method, 'places.setAlias')
+        assert.equal(checked.sdkFailure.result, false)
       } else {
         assert.equal(batchEdits, 1); assert.equal(batchCalls, 1)
         assert.match(checked.message, /batch yield/)
       }
     }
+    // The caller supplies only a finite action loop. SDK guards own failure
+    // stopping, including catch/unawaited work, and the soft execution window.
+    const simpleLoop = 'for (let i = 0; i < 20; i++) { await places.setAlias({alias: "mock-step", placeId: "mock-place"}); }'
+    for (const mode of ['false', 'error', 'structured', 'caught', 'window']) {
+      batchAgent.actions.beginUserIntent()
+      batchEdits = 0; batchCalls = 0
+      batchAgent.places = { sdk: { setAlias: async () => {
+        batchCalls++
+        if (mode === 'window') await delay(10)
+        if (batchCalls === 3) {
+          if (mode === 'error') throw new Error('mock step failed')
+          if (mode === 'structured') return { ok: false, status: 'unreachable', confirmed: 2 }
+          if (mode === 'false' || mode === 'caught') return false
+        }
+        batchEdits++
+        return true
+      } } }
+      settings.codex_session.execution_window_ms = mode === 'window' ? 5 : 1000
+      const code = mode === 'caught'
+        ? `try { ${simpleLoop} } catch (error) { try { await places.setAlias({alias: "after-failure", placeId: "mock-place"}); } catch (later) { log(bot, later.message); } }`
+        : simpleLoop
+      const guarded = await batchAgent.actions.runAction('sdk-owned-' + mode,
+        () => batchAgent.coder.executeCode(code), { timeout: 0 })
+      assert.equal(guarded.success, mode === 'window')
+      assert.equal(batchEdits, mode === 'window' ? 1 : 2)
+      assert.equal(batchCalls, mode === 'window' ? 1 : 3, 'no later SDK step starts')
+      if (mode === 'window') {
+        assert.deepEqual(guarded.executionYield, { reason: 'execution-window', windowMs: 5 })
+        assert.equal(guarded.operationSettlement, 'settled')
+        assert.equal(guarded.skillResults.find(call => call.skill === 'generated_code').status, 'yielded', 'soft yield is not an unchanged failure')
+      } else {
+        assert.equal(guarded.sdkFailure.method, 'places.setAlias')
+        if (mode === 'structured') assert.deepEqual(guarded.sdkFailure.result,
+          { ok: false, status: 'unreachable', confirmed: 2 })
+      }
+    }
+    delete settings.codex_session.execution_window_ms
     for (const reason of ['operator_stop', 'superseded', 'disconnect', 'shutdown']) {
       const pendingBatch = deferred(), enteredBatch = deferred()
       batchEdits = 0; batchCalls = 0
@@ -755,7 +794,9 @@ for (let batch = 0; batch < 10; batch++) {
     assert.doesNotMatch(resumedStart.input, /OLDER_REQUEST_MARKER/, 'resumed thread is not fed the old conversation again')
     assert.doesNotMatch(await fs.readFile(path.join(root, 'src/process/codex/AGENTS.md'), 'utf8'), /Wait for a bounded number/, 'full SDK stays out of fixed instructions')
     assert.equal(resumedStart.instructionsFile, 'src/process/codex/AGENTS.md')
-    assert.equal(resumedStart.capabilities.max_block_edits_per_check, 8)
+    assert.equal(resumedStart.capabilities.execution_window_ms, 45000)
+    assert.equal(resumedStart.capabilities.sdk_stops_on_failure, true)
+    assert.equal(resumedStart.capabilities.navigation_edits, false)
     assert.match(persistentTraces.find(row => row.taskId === 'persistent-second' && row.type === 'turn_input').input, /CURRENT CAPABILITIES/)
     for (const scope of [{ ...savedThread.scope, bot: 'Other' }, { ...savedThread.scope, worldId: 'another-world' },
       { ...savedThread.scope, model: 'another-model' }, { ...savedThread.scope, sdk: 'changed-sdk' }]) {
@@ -899,6 +940,8 @@ for (let batch = 0; batch < 10; batch++) {
     const boundedDiagnostic = createTaskDiagnostics(diagnosticAgent, 'bounded-task')
     for (let index = 0; index < 20; index++) appendOperationDiagnostic(boundedDiagnostic, 'x'.repeat(10000), {
       success: index !== 0, message: 'y'.repeat(10000), executionStatus: index === 0 ? 'error' : 'completed',
+      sdkFailure: index === 0 ? { method: 'skills.breakBlockAt', result: false } : undefined,
+      executionYield: index !== 0 ? { reason: 'execution-window', windowMs: 45000 } : undefined,
       skillResults: Array.from({ length: 100 }, () => ({ skill: 'example', status: 'returned', error: 'z'.repeat(10000) })),
       confirmedChanges: [{ quantity: 3, target: { x: 1, y: 64, z: 2 }, observedAt: new Date().toISOString() }],
       unconfirmedChanges: [{ reason: 'cancelled after partial mutation', confirmedQuantity: 1 }],
@@ -906,6 +949,8 @@ for (let batch = 0; batch < 10; batch++) {
     assert.equal(boundedDiagnostic.operations.length, 6)
     assert.equal(boundedDiagnostic.operationsTruncated, true)
     assert.equal(boundedDiagnostic.lastFailure.success, false, 'latest failure remains available after later successful operations')
+    assert.equal(boundedDiagnostic.lastFailure.sdkFailure.result, false)
+    assert.equal(boundedDiagnostic.operations[0].executionYield.windowMs, 45000)
     assert.equal(boundedDiagnostic.operations[0].codeTruncated, true)
     assert.equal(boundedDiagnostic.operations[0].skillResultsTruncated, true)
     assert.equal(boundedDiagnostic.operations[0].confirmedChanges[0].quantity, 3)

@@ -45,7 +45,7 @@ const settings = {
 
     "allow_insecure_coding": false, // allows newAction command and model can write/run code on your computer. enable at own risk
     "agent_runtime": "legacy", // "codex-session" uses one Codex task thread
-    "codex_session": { "stall_timeout_ms": 30000, "action_timeout_ms": 600000, "output_limit": 16000, "max_search_radius": 64, "task_budget_ms": null, "max_operations": null, "max_turns": null },
+    "codex_session": { "execution_window_ms": 45000, "stall_timeout_ms": 30000, "action_timeout_ms": 600000, "output_limit": 16000, "max_search_radius": 64, "task_budget_ms": null, "max_operations": null, "max_turns": null },
     "generated_code_fail_on_false": [], // selected SDK skill booleans that throw only inside generated code
     "navigation_stall_timeout_ms": 90000,
     "navigation_check_interval_ms": 5000,

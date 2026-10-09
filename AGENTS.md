@@ -66,3 +66,5 @@
 - native SDK引数の正本は `src/agent/library/native_sdk.js`。全namespaceをhost bot束縛・名前付きobject1つで公開し、同一定義からdeferred説明/名前一覧/lintを作る。内部/legacy/chatのbot-first署名は保つ。入力errorは副作用前に拒否し、公開field・修正例をoperationとtask diagnosticsへ残す。契約を変更したらscope/protocolと新規・再開の隔離確認も更新する。raw `log(bot, message)` は別の出力helper。
 
 - `codex_session.goals: true` は標準Goalsの明示opt-in。CLI 0.162.0のthread/goal API・自動turnを同じownerで待つ。ephemeral非対応、依頼4,000文字上限、goal completeとゲームの独立採点を区別する。通常予算・取消境界を維持し、manual playへ自動反映しない。
+
+- native生成codeの操作安全はCoderのentry guardとowned operation contextが所有する。action false/error/ok:falseはそのoperationの後続SDK呼出しを拒否し、終了時にも失敗を確認する。soft yieldはcodex_session.execution_window_ms（既定45,000ms）、生成codeに時計や安全編集counterを要求しない。native contextの移動はgoToGoalで掘削・足場・door openingを禁止する。legacy/chatと自然言語による作業許可の判断は別契約で、対象選択と全依頼の検証はbotが担当する。
