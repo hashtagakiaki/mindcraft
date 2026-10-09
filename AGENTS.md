@@ -64,3 +64,5 @@
 - native botは常時見えるSDK method名一覧から選び、必要な説明だけをcode modeで読む。固定templateへmethod一覧や全説明を手書きしない。起動overrideは `features.code_mode.direct_only_tool_namespaces` が正しいキー。変更時はstrict-config・実rollout・新規/再開の説明と画像を隔離確認し、設定受理だけを効果の証拠にしない。context検証は [`docs/native-context-revision-20261006.md`](docs/native-context-revision-20261006.md) と[global/multi-agent分離記録](docs/native-context-isolation-20261006.md)、[SDK一覧の比較記録](docs/native-sdk-catalog-20261006.md)を参照。
 
 - native SDK引数の正本は `src/agent/library/native_sdk.js`。全namespaceをhost bot束縛・名前付きobject1つで公開し、同一定義からdeferred説明/名前一覧/lintを作る。内部/legacy/chatのbot-first署名は保つ。入力errorは副作用前に拒否し、公開field・修正例をoperationとtask diagnosticsへ残す。契約を変更したらscope/protocolと新規・再開の隔離確認も更新する。raw `log(bot, message)` は別の出力helper。
+
+- `codex_session.goals: true` は標準Goalsの明示opt-in。CLI 0.162.0のthread/goal API・自動turnを同じownerで待つ。ephemeral非対応、依頼4,000文字上限、goal completeとゲームの独立採点を区別する。通常予算・取消境界を維持し、manual playへ自動反映しない。

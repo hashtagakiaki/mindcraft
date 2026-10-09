@@ -472,6 +472,8 @@ native taskのvisionはJPEGをtool resultの `inputImage` として判断中のC
 
 `codex_session` の既定値は、`stall_timeout_ms: 30000`、`action_timeout_ms: 600000`、`output_limit: 16000`、`max_search_radius: 64`、`task_budget_ms: null`、`max_operations: null`、`max_turns: null`。この3つだけは`null`で上限を無効化でき、既定では長時間taskを時間・操作・判断回数で打ち切らない。有限の上限を使う場合は正の数（操作・判断回数は整数）を設定する。各判断の残りbudgetも無制限は`null`を返す。
 
+`codex_session.goals: true` は標準Codex Goalsを使う明示opt-in（既定false）。受理した依頼をthreadの目標に設定し、最初の応答後の自動続行も同じtask・操作ownerで受け取る。CLI 0.162.0で模擬課題の2ターン実行を確認した。Goalsはephemeral threadでは使えないため、world scopeがない場合も保存可能な新規threadを作るが、次の依頼へ自動再開しない。依頼は標準APIの4,000文字上限に従い、上限超過やAPI非対応を通常実行へfallbackしない。自動続行もhostの時間・操作・判断予算、Stop・差替え・shutdownの対象になる。goal statusを終了記録へ残すが、モデルのcompleteはゲーム上の達成を独立検証した意味ではない。次のターンが発生しないactive goalにも既存model待機期限を適用する。[標準Goals API](https://learn.chatgpt.com/docs/app-server#manage-a-thread-goal)
+
 task budgetの経過時間はmodel待ち・再試行・operation待ちを含み、operation数は受理した実行要求、旧名 `max_turns` はhostの判断再開数（turn開始と各SDK tool resultによる再開）を数え、Codex内部の検索・圧縮回数は含めない。先に達した上限は停止を要求し、実operationのsettlementを代替しない。
 
 通常actionでは位置の0.5 block以上の変化か在庫の変化で停滞timerを更新する。navigation phase中はnative monitorも生の位置変化でなくowned callの未訪問route node到達を進捗として使うため、無応答は既定30秒でstopする。`goToGoal` はさらに既定90秒の有限stall期限を保ち、同じnodeの再到達やpath再計算だけでは時計を更新しない。1操作のhard timeoutは既定10分で、task全体の制限と独立して働く。settleしたtimeout/stallの結果は同じtaskへ返し、状態確認と修正を続けられる。

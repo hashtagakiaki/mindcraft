@@ -430,6 +430,43 @@ async function main() {
     assert.match(queued.failure.message, /result preparation failed/)
     queued.turn = null
     await queued.close()
+    // A goal owns automatic turns until a terminal goal and its turn settle.
+    let continuations = 0
+    const goalEvents = [], goalReplies = []
+    const goalSession = new CodexSession({ model: 'fixture',
+      execute: async () => ({ success: true, observedCounter: 2 }),
+      record: (type, detail) => goalEvents.push({ type, detail }),
+      onContinuation: () => { continuations++ } })
+    goalSession.threadId = 'goal-thread'
+    goalSession.send = message => goalReplies.push(message)
+    goalSession.request = async (method, params) => {
+      if (method === 'thread/goal/set') {
+        assert.equal(params.origin, 'user')
+        return { goal: { status: 'active', objective: params.objective } }
+      }
+      assert.equal(method, 'turn/start')
+      queueMicrotask(async () => {
+        const notify = (method, params) => goalSession.receive({ method, params: { threadId: 'goal-thread', ...params } })
+        await notify('turn/started', { turn: { id: 'goal-1' } })
+        await notify('item/completed', { item: { type: 'agentMessage', text: 'まだ未達', phase: 'final_answer' } })
+        await notify('turn/completed', { turn: { id: 'goal-1', status: 'completed' } })
+        assert.ok(goalSession.turn, 'an active goal keeps the same waiter')
+        await notify('turn/started', { turn: { id: 'goal-2' } })
+        await goalSession.receive({ id: 901, method: 'item/tool/call', params: {
+          threadId: 'goal-thread', turnId: 'goal-2', tool: 'minecraft_execute', arguments: { code: 'await Promise.resolve();' } } })
+        await notify('thread/goal/updated', { goal: { status: 'complete' } })
+        await notify('item/completed', { item: { type: 'agentMessage', text: '観測して完了', phase: 'final_answer' } })
+        await notify('turn/completed', { turn: { id: 'goal-2', status: 'completed' } })
+      })
+      return {}
+    }
+    const goalResult = await goalSession.runTurn('simulated task', { goalObjective: 'counter = 2' })
+    assert.deepEqual(goalResult.messages, ['観測して完了'])
+    assert.equal(goalResult.goal.status, 'complete')
+    assert.equal(continuations, 1)
+    assert.equal(goalReplies.length, 1)
+    assert.equal(goalEvents.filter(event => event.type === 'goal_continuation').length, 1)
+    await goalSession.close()
     // Fast completion and controller resume exactly once on the same thread.
     const native = new CodexRuntime(agent)
     agent.codexRuntime = native

@@ -11,7 +11,7 @@ import convoManager from './conversation.js';
 import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
 
 const DEFAULTS = { stall_timeout_ms: 30000, action_timeout_ms: 600000, output_limit: 16000, max_search_radius: 64,
-    task_budget_ms: null, max_operations: null, max_turns: null };
+    task_budget_ms: null, max_operations: null, max_turns: null, goals: false };
 const OPTIONAL_TASK_LIMITS = new Set(['task_budget_ms', 'max_operations', 'max_turns']);
 const MAX_UNCHANGED_OPERATION_FAILURES = 3;
 const MAX_NATIVE_INBOX_MESSAGES = 32;
@@ -29,6 +29,10 @@ export function validateCodexRuntime(profile) {
     if (selected.api !== 'codex' || !selected.model) throw new Error('codex-session requires an explicit codex/model profile');
     const config = { ...DEFAULTS, ...settings.codex_session };
     for (const [key, value] of Object.entries(config)) {
+        if (key === 'goals') {
+            if (typeof value !== 'boolean') throw new Error('Invalid codex_session.goals');
+            continue;
+        }
         if (value === null && OPTIONAL_TASK_LIMITS.has(key)) continue;
         if (!Number.isFinite(value) || value <= 0) throw new Error(`Invalid codex_session.${key}`);
     }
@@ -341,7 +345,15 @@ export class CodexRuntime {
                 this.images = null;
                 return { contentItems: [{ type: 'inputText', text: input }, ...images], success: result.success !== false };
             };
-            this.session = this.makeSession({ model, effort, record, execute, ...sdk, prepareResult, persistent,
+            this.session = this.makeSession({ model, effort, record, execute, ...sdk, prepareResult, persistent: persistent || config.goals,
+                onContinuation: () => {
+                    if (!current()) throw new Error('Stale goal continuation');
+                    if (config.max_turns !== null && turnCount >= config.max_turns) {
+                        reachBudget('thread-turns');
+                        throw new Error('Task model decision budget reached');
+                    }
+                    turnCount++;
+                },
                 threadId: persistent ? agent.history.getCodexThread(scope) : null,
                 onMessage: message => { if (current()) sendOutputToServer(agent.name, message); } });
             await this.session.open(this.abort.signal);
@@ -366,7 +378,7 @@ export class CodexRuntime {
                 input = this._appendNativeInbox(input + '\nCURRENT OPERATOR REQUEST (still active):\n' + operatorRequest + decisionContext(), this._takeNativeInbox());
                 if (!current()) return false;
                 record('turn_input', { input });
-                const turn = await this.session.runTurn(input);
+                const turn = await this.session.runTurn(input, { goalObjective: config.goals ? operatorRequest : null });
                 if (!current()) return false;
 
                 const peerMessages = this._takeNativeInbox();
@@ -395,7 +407,8 @@ export class CodexRuntime {
                 reportedAt = new Date().toISOString();
                 completion = 'reported';
                 record('response_reported', { generatedAt, reportedAt, response });
-                terminalDetail = { status: 'completed', completion: 'reported', terminationReason: 'reported', saveSucceeded, response, reportedAt };
+                terminalDetail = { status: 'completed', completion: 'reported', terminationReason: turn.goal ? `goal-${turn.goal.status}` : 'reported',
+                    ...(turn.goal ? { goal: turn.goal } : {}), saveSucceeded, response, reportedAt };
                 return saveSucceeded;
             }
             return false;

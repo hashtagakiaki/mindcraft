@@ -16,8 +16,8 @@ const helperPath = fileURLToPath(new URL('./owned_cli.js', import.meta.url));
 export class CodexSession {
     constructor({ model, effort = 'medium', record = () => {}, execute, tools = [], catalog = '', readDocumentation,
         prepareResult = async result => ({ contentItems: [{ type: 'inputText', text: JSON.stringify(result) }], success: result.success !== false }),
-        onMessage = () => {}, threadId = null, persistent = false }) {
-        Object.assign(this, { model, effort, record, execute, tools, catalog, readDocumentation, prepareResult, onMessage, threadId, persistent });
+        onMessage = () => {}, onContinuation = () => {}, threadId = null, persistent = false }) {
+        Object.assign(this, { model, effort, record, execute, tools, catalog, readDocumentation, prepareResult, onMessage, onContinuation, threadId, persistent });
         this.pending = new Map();
         this.seq = 0;
         this.closed = false;
@@ -160,10 +160,24 @@ export class CodexSession {
             if (phase !== 'commentary') this.messages.push(text);
             this.record('model_message', { text, phase });
             this.onMessage(text, phase);
+        } else if (message.method === 'thread/goal/updated' && message.params.threadId === this.threadId) {
+            this.goal = message.params.goal;
+            this.record('goal_updated', { goal: this.goal });
+        } else if (message.method === 'turn/started' && message.params.threadId === this.threadId && this.turn) {
+            if (this.goalMode && this.startedTurns++ > 0) {
+                this.record('goal_continuation', { turnId: message.params.turn.id });
+                this.messages = [];
+                this.onContinuation();
+            }
+            this.armModelTimer();
         } else if (message.method === 'turn/completed') {
             const turn = message.params.turn;
             this.record('turn_completed', { id: turn.id, status: turn.status });
-            if (turn.status === 'completed') this.turn?.resolve();
+            if (turn.status === 'completed') {
+                // Goals dispatch their own next turn. Keep the same task/tool owner alive.
+                if (!this.goalMode || this.goal?.status !== 'active') this.turn?.resolve();
+                else this.armModelTimer();
+            }
             else this.fail(new Error(JSON.stringify(turn)));
         } else if (message.method === 'thread/tokenUsage/updated') this.record('token_usage', message.params);
     }
@@ -173,19 +187,28 @@ export class CodexSession {
         if (this.turn && !this.failure && !this.waitingTools) this.modelTimer = setTimeout(() => this.fail(new Error('Model turn timed out')), REQUEST_TIMEOUT_MS);
     }
 
-    async runTurn(input) {
+    async runTurn(input, { goalObjective = null } = {}) {
         if (this.failure) throw this.failure;
         if (this.turn) throw new Error('Concurrent model turns are not supported');
         this.messages = [];
+        this.goalMode = goalObjective !== null;
+        this.startedTurns = 0;
+        this.goal = null;
         const done = new Promise((resolve, reject) => {
             this.turn = { resolve, reject };
         });
         this.armModelTimer();
         done.catch(() => {});
         try {
+            if (this.goalMode) {
+                const response = await this.request('thread/goal/set', { threadId: this.threadId,
+                    objective: goalObjective, origin: 'user', status: 'active' });
+                this.goal = response.goal;
+                this.record('goal_started', { goal: this.goal });
+            }
             await this.request('turn/start', { threadId: this.threadId, effort: this.effort, input: [{ type: 'text', text: input }] });
             await done;
-            return { messages: this.messages };
+            return { messages: this.messages, ...(this.goalMode ? { goal: this.goal } : {}) };
         } finally { clearTimeout(this.modelTimer); this.turn = null; }
     }
 
