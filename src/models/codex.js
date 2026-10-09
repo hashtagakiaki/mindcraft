@@ -370,7 +370,7 @@ function abortError(reason) {
 
 export function getCodexEnvironment() {
     const allowedVariables = [
-        'CODEX_HOME', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'SSL_CERT_FILE',
+        'CODEX_HOME', 'MINDCRAFT_CODEX_SESSIONS_DIR', 'HOME', 'LANG', 'LC_ALL', 'PATH', 'SSL_CERT_FILE',
         'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY'
     ];
     return Object.fromEntries(allowedVariables

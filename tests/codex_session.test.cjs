@@ -16,6 +16,7 @@ async function main() {
   const oldCwd = process.cwd()
   const oldBin = process.env.MINDCRAFT_CODEX_BIN
   const oldCodexHome = process.env.CODEX_HOME
+  const oldSessionStore = process.env.MINDCRAFT_CODEX_SESSIONS_DIR
   try {
     await fs.cp(path.join(repo, 'src'), path.join(root, 'src'), { recursive: true })
     await fs.writeFile(path.join(root, 'package.json'), '{"type":"module"}')
@@ -507,9 +508,11 @@ for (let batch = 0; batch < 10; batch++) {
       assert.equal(Object.hasOwn(threadParams, 'environments'), false, 'default workspace access enables native bot AGENTS discovery')
       assert.deepEqual(threadParams.selectedCapabilityRoots, [], 'unrelated capabilities remain unselected')
       assert.notEqual(session.codexHome, sourceHome)
-      for (const name of ['auth.json', 'config.toml', 'sessions']) {
+      for (const name of ['auth.json', 'config.toml']) {
         assert.equal(await fs.readlink(path.join(session.codexHome, name)), path.join(sourceHome, name))
       }
+      assert.equal(await fs.readlink(path.join(session.codexHome, 'sessions')),
+        path.join(sourceHome, 'mindcraft-sessions'))
       await assert.rejects(fs.access(path.join(session.codexHome, 'AGENTS.md')), { code: 'ENOENT' })
       assert.equal(await fs.readFile(path.join(sourceHome, 'auth.json'), 'utf8'), 'fixture refreshed auth', 'refresh writes through the existing auth backend')
       const loadedInstructions = await fs.readFile(path.join(session.cwd, 'AGENTS.md'), 'utf8')
@@ -1283,6 +1286,7 @@ for (let batch = 0; batch < 10; batch++) {
     process.chdir(oldCwd)
     if (oldBin === undefined) delete process.env.MINDCRAFT_CODEX_BIN; else process.env.MINDCRAFT_CODEX_BIN = oldBin
     if (oldCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = oldCodexHome
+    if (oldSessionStore === undefined) delete process.env.MINDCRAFT_CODEX_SESSIONS_DIR; else process.env.MINDCRAFT_CODEX_SESSIONS_DIR = oldSessionStore
     await fs.rm(root, { recursive: true, force: true })
   }
 }

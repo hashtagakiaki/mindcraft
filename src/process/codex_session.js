@@ -40,15 +40,18 @@ export class CodexSession {
             '-c', 'agents.enabled=false', '-c', 'cli_auth_credentials_store="file"',
             '-c', 'features.skill_search=false',
             '-c', `skills.max_context_tokens=${BOT_SKILL_CATALOG_TOKEN_LIMIT}`];
-        // Share only existing file auth/config and durable rollouts, never global AGENTS/skills.
+        // Share only existing file auth/config; keep bot rollouts in an isolated store.
         // Keep normal credential refresh writing through the auth symlink.
         const env = getCodexEnvironment();
         const sourceHome = path.resolve(env.CODEX_HOME || path.join(homedir(), '.codex'));
+        const sessionStore = path.resolve(env.MINDCRAFT_CODEX_SESSIONS_DIR
+            || path.join(sourceHome, 'mindcraft-sessions'));
         this.codexHome = await mkdtemp(path.join(this.cwd, 'codex-home-'));
-        await mkdir(path.join(sourceHome, 'sessions'), { recursive: true });
-        for (const name of ['auth.json', 'config.toml', 'sessions']) {
+        await mkdir(sessionStore, { recursive: true, mode: 0o700 });
+        for (const name of ['auth.json', 'config.toml']) {
             await symlink(path.join(sourceHome, name), path.join(this.codexHome, name));
         }
+        await symlink(sessionStore, path.join(this.codexHome, 'sessions'));
         env.CODEX_HOME = this.codexHome;
         this.child = spawn(process.execPath, [helperPath, this.requestId,
             process.env.MINDCRAFT_CODEX_BIN || 'codex', JSON.stringify(args), this.cwd],

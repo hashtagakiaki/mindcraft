@@ -59,7 +59,7 @@
 
 - `agent_runtime: "codex-session"` はroot settingsの明示opt-in。標準tool待機・遅延SDK説明・scope付きthread再開・画像入力の仕様とCLI検証範囲は[README](README.md#opt-in-codex-task-session)と[移行記録](docs/codex-standard-harness-20261006.md)を参照する。`src/process/codex_session.js` は既存owned CLI helperの親登録ACKとprocess回収を再利用する。native task中は旧recovery modelを並行起動しない。機能追加だけでmanual play pinを更新・bot切替しない。
 
-- bot指示は起動時にbundleの `src/process/codex/AGENTS.md` のsnapshotへSDK文書から自動生成したmethod名一覧を付け、専用一時cwdへ配置して標準loaderで読む。指示の変更は次のsession開始・再開時に読む。repo rootの開発指示をbotへコピーしない。専用一時CODEX_HOMEでは既存homeのauth.json/config.toml/sessionsだけをsymlink共有し、global AGENTS/skillsを共有しない。file認証を使用し、認証内容を読出し・複製しない。multi-agentの説明文もagents.enabled=falseで止める。能力設定はhostが判断ごとに渡す。標準読込に必要な既定workspace accessを残し、shell無効・read-only sandbox・Minecraft以外のtool拒否は維持する。
+- bot指示は起動時にbundleの `src/process/codex/AGENTS.md` のsnapshotへSDK文書から自動生成したmethod名一覧を付け、専用一時cwdへ配置して標準loaderで読む。指示の変更は次のsession開始・再開時に読む。repo rootの開発指示をbotへコピーしない。専用一時CODEX_HOMEでは既存homeのauth.json/config.tomlだけをsymlink共有し、rolloutは `MINDCRAFT_CODEX_SESSIONS_DIR` の専用領域へ保存する。file認証を使用し、認証内容を読出し・複製しない。multi-agentの説明文もagents.enabled=falseで止める。能力設定はhostが判断ごとに渡す。標準読込に必要な既定workspace accessを残し、shell無効・read-only sandbox・Minecraft以外のtool拒否は維持する。
 
 - native botは常時見えるSDK method名一覧から選び、必要な説明だけをcode modeで読む。固定templateへmethod一覧や全説明を手書きしない。起動overrideは `features.code_mode.direct_only_tool_namespaces` が正しいキー。変更時はstrict-config・実rollout・新規/再開の説明と画像を隔離確認し、設定受理だけを効果の証拠にしない。context検証は [`docs/native-context-revision-20261006.md`](docs/native-context-revision-20261006.md) と[global/multi-agent分離記録](docs/native-context-isolation-20261006.md)、[SDK一覧の比較記録](docs/native-sdk-catalog-20261006.md)を参照。
 
