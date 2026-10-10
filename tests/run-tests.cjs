@@ -103,6 +103,14 @@ async function setupNavigationFixture(root) {
   await write(root, 'src/utils/mcdata.js', 'export function mustCollectManually(name) { return name === "wheat"; } export function getBlockId() { return 1; } export function getItemId(name) { return ({ oak_log: 1, oak_planks: 36, crafting_table: 300, wooden_pickaxe: 820, stone_pickaxe: 825, stick: 848 })[name] ?? null; } export function getItemCraftingRecipes(name) { return name === "oak_planks" || name === "stone_pickaxe" ? [[{}]] : []; } export function ingredientsFromPrismarineRecipe(recipe) { return recipe.requiredItems || {}; } export function calculateLimitingResource() { return { num: 1, limitingResource: "cobblestone" }; }')
   await write(root, 'src/agent/library/world.js', `
 export function getNearestBlock(bot) { return bot.navigation.block || null; }
+export function inspectBlockAt(bot, x, y, z) {
+  bot.navigation.inspectCount = (bot.navigation.inspectCount || 0) + 1;
+  const block = bot.blockAt({ x: Math.floor(x), y: Math.floor(y), z: Math.floor(z) });
+  const interaction = bot.navigation.interaction || { status: 'ready', aim: { x, y, z }, face: { x: 0, y: 1, z: 0 }, distance: 1 };
+  return { loaded: block != null, position: { x, y, z }, name: block?.name ?? null,
+    interaction: { status: interaction.status, aim: interaction.aim ?? null, face: interaction.face ?? null,
+      distance: interaction.distance ?? null, reason: interaction.reason ?? null } };
+}
 export function getNearestBlocksWhere(bot, predicate) { return (bot.navigation.blocks || []).filter(predicate); }
 export function getNearestEntityWhere(bot, predicate) { return (bot.navigation.entities || []).find(predicate) || null; }
 export function isEntityType(name) { return name === 'cow'; }
@@ -113,7 +121,7 @@ export function getInventoryCounts(bot) { return bot.navigation.inventory || {};
 export function getNearestFreeSpace(bot) { return bot.navigation.freeSpace || { x: 0, y: 0, z: 0 }; }
 `)
   await write(root, 'node_modules/vec3/package.json', '{"type":"module","exports":"./index.js"}')
-  await write(root, 'node_modules/vec3/index.js', 'export default function Vec3(x, y, z) { return { x, y, z, plus(v) { return Vec3(x + v.x, y + v.y, z + v.z); }, offset(dx, dy, dz) { return Vec3(x + dx, y + dy, z + dz); }, distanceTo(v) { return Math.hypot(x - v.x, y - v.y, z - v.z); }, equals(v) { return x === v.x && y === v.y && z === v.z; }, toString() { return `(${x}, ${y}, ${z})`; } }; }')
+  await write(root, 'node_modules/vec3/index.js', 'export default function Vec3(x, y, z) { return { x, y, z, floored() { return Vec3(Math.floor(x), Math.floor(y), Math.floor(z)); }, plus(v) { return Vec3(x + v.x, y + v.y, z + v.z); }, offset(dx, dy, dz) { return Vec3(x + dx, y + dy, z + dz); }, distanceTo(v) { return Math.hypot(x - v.x, y - v.y, z - v.z); }, equals(v) { return x === v.x && y === v.y && z === v.z; }, toString() { return `(${x}, ${y}, ${z})`; } }; }')
   await write(root, 'node_modules/mineflayer-pathfinder/package.json', '{"type":"module","exports":"./index.js"}')
   await write(root, 'node_modules/mineflayer-pathfinder/index.js', `
 class GoalNear {
@@ -128,7 +136,8 @@ class GoalInvert {
   constructor(goal) { this.goal = goal; }
   heuristic(node) { return -this.goal.heuristic(node); }
 }
-export default { goals: { GoalNear, GoalFollow, GoalInvert }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } } };
+class GoalLookAtBlock { constructor(position, world, options) { this.position = position; this.world = world; this.options = options; } heuristic(node) { return Math.hypot(this.position.x - node.x, this.position.z - node.z) + Math.abs(this.position.y - node.y); } }
+export default { goals: { GoalNear, GoalFollow, GoalInvert, GoalLookAtBlock }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } } };
 `)
 }
 
@@ -642,6 +651,7 @@ async function main() {
     return
   }
   runFixture(node, path.join(__dirname, 'run_tests_output.test.cjs'))
+  runFixture(node, path.join(__dirname, 'surface_navigation.test.cjs'))
   runFixture(node, path.join(__dirname, 'tree_felling.test.cjs'))
   runFixture(node, path.join(__dirname, 'block_interaction.test.cjs'))
   runFixture(node, path.join(__dirname, 'native_sdk.test.cjs'))

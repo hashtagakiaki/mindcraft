@@ -305,7 +305,7 @@ async function main() {
     delta: [{ id: 1, count: -1 }, { id: 36, count: 4 }],
     requiredItems: { oak_log: 1 }
   }
-  const craftBot = ({ table = null, includeTableItem = false } = {}) => {
+  const craftBot = ({ table = null, includeTableItem = false, interaction = null, disappearOnBlockRead = 0 } = {}) => {
     const items = [
       { name: 'cobblestone', type: 35, count: 3 },
       { name: 'stick', type: 848, count: 2 },
@@ -318,7 +318,7 @@ async function main() {
     }
     const bot = {
       output: '',
-      navigation: { block: table, inventory: { cobblestone: 3, stick: 2, oak_log: 1, crafting_table: includeTableItem ? 1 : 0 } },
+      navigation: { block: table, interaction, inventory: { cobblestone: 3, stick: 2, oak_log: 1, crafting_table: includeTableItem ? 1 : 0 } },
       inventory,
       game: { gameMode: 'survival' },
       entity: { position: makePosition(0, 0, 0) },
@@ -328,7 +328,20 @@ async function main() {
         if (itemId === 36) return [inventoryRecipe]
         return []
       },
-      blockAt(position) { return makeBlock('air', position, { type: 0 }) },
+      blockAt(position) {
+        bot.tableBlockReads = (bot.tableBlockReads || 0) + 1
+        if (table && position.x === table.position.x && position.y === table.position.y && position.z === table.position.z) {
+          return disappearOnBlockRead && bot.tableBlockReads >= disappearOnBlockRead
+            ? makeBlock('stone', position)
+            : table
+        }
+        return makeBlock('air', position, { type: 0 })
+      },
+      pathfinder: {
+        async getPathTo() { return { status: 'success' } },
+        setMovements() {},
+        async goto() {}
+      },
       async equip() {},
       async lookAt() {},
       armorManager: { async equipAll() {} }
@@ -348,9 +361,41 @@ async function main() {
     assert.equal(craftCalls.at(-1).table, null, 'the inventory-grid recipe retains its null-table path')
 
     const tableBlock = makeBlock('crafting_table', makePosition(1, 0, 0))
+    const inventoryBot = craftBot()
+    const inspectionsBeforeInventoryRecipe = inventoryBot.navigation.inspectCount || 0
+    await skills.craftRecipe(inventoryBot, 'oak_planks')
+    assert.equal(inventoryBot.navigation.inspectCount || 0, inspectionsBeforeInventoryRecipe,
+      '2x2 inventory recipes do not invoke table interaction checks')
+
     const tableResult = await skills.craftRecipe(craftBot({ table: tableBlock }), 'stone_pickaxe')
     assert.equal(tableResult, true, 'a table recipe still reaches crafting with the observed table')
     assert.equal(craftCalls.at(-1).table, tableBlock, 'the table recipe retains its 3x3-table path')
+    const craftCallsBeforeRejectedTable = craftCalls.length
+
+    const blockedTable = craftBot({ table: tableBlock, interaction: { status: 'blocked', reason: 'no reachable surface aim point' } })
+    assert.equal(await skills.craftRecipe(blockedTable, 'stone_pickaxe'), false,
+      'a nearby but occluded crafting table is rejected before craft synchronization')
+    assert.equal(craftCalls.length, craftCallsBeforeRejectedTable,
+      'blocked interaction does not invoke the craft callback')
+    assert.match(blockedTable.output, /interaction approach blocked/)
+
+    const unknownTable = craftBot({ table: tableBlock, interaction: { status: 'unknown', reason: 'ray data unavailable' } })
+    assert.equal(await skills.craftRecipe(unknownTable, 'stone_pickaxe'), false,
+      'an unknown table interaction is rejected before craft synchronization')
+    assert.equal(craftCalls.length, craftCallsBeforeRejectedTable,
+      'an unknown interaction does not invoke the craft callback')
+
+    const changedTable = craftBot({ table: tableBlock, disappearOnBlockRead: 2 })
+    assert.equal(await skills.craftRecipe(changedTable, 'stone_pickaxe'), false,
+      'a crafting table replaced after the ready observation is rejected')
+    assert.equal(craftCalls.length, craftCallsBeforeRejectedTable,
+      'a changed target does not invoke the craft callback')
+
+    const cancelledTable = craftBot({ table: tableBlock })
+    cancelledTable.interrupt_code = true
+    await assert.rejects(skills.craftRecipe(cancelledTable, 'stone_pickaxe'), /Action cancelled before target interaction/)
+    assert.equal(craftCalls.length, craftCallsBeforeRejectedTable,
+      'cancellation does not invoke the craft callback')
   } finally {
     craftingSync.run = originalCraftRun
   }

@@ -26,6 +26,14 @@ const FURNACE_POLL_INTERVAL_MS = 100;
 const FURNACE_IDLE_TIMEOUT_MS = 11000;
 const DEFAULT_NAVIGATION_STALL_TIMEOUT_MS = 90_000;
 const DEFAULT_NAVIGATION_CHECK_INTERVAL_MS = 5_000;
+const SURFACE_SEARCH_RADIUS = 6;
+const SURFACE_ARRIVAL_Y_TOLERANCE = 0.25;
+const SURFACE_SETTLE_TICKS = 2;
+const SURFACE_CONNECTED_STEP_HEIGHT = 1;
+const UNSAFE_SURFACE_BLOCKS = new Set([
+    'magma_block', 'cactus', 'campfire', 'soul_campfire', 'fire', 'soul_fire',
+    'powder_snow', 'sweet_berry_bush', 'wither_rose', 'pointed_dripstone',
+]);
 const furnaceClickGuards = new WeakMap();
 const FARM_NEIGHBORS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 const CROPS = {
@@ -401,8 +409,20 @@ export async function craftRecipe(bot, itemName, num=1) {
         return false;
     }
     
-    if (craftingTable && bot.entity.position.distanceTo(craftingTable.position) > 4) {
-        await goToNearestBlock(bot, 'crafting_table', 4, craftingTableRange);
+    if (craftingTable) {
+        requireActiveTarget(bot);
+        const tablePosition = craftingTable.position;
+        const approach = await approachBlock(bot, tablePosition.x, tablePosition.y, tablePosition.z);
+        requireActiveTarget(bot);
+        if (approach.status !== 'ready' || !approach.target?.loaded || approach.target.name !== 'crafting_table') {
+            log(bot, `Cannot use crafting table at ${tablePosition}: interaction approach ${approach.status}${approach.reason ? ` (${approach.reason})` : ''}; refusing to open a crafting window.`);
+            return false;
+        }
+        craftingTable = bot.blockAt(new Vec3(tablePosition.x, tablePosition.y, tablePosition.z).floored());
+        if (!craftingTable || craftingTable.name !== 'crafting_table') {
+            log(bot, `Crafting table at ${tablePosition} changed before activation; refusing to open a crafting window.`);
+            return false;
+        }
     }
 
     const recipe = recipes[0];
@@ -3046,22 +3066,126 @@ export async function digDown(bot, distance = 10) {
     return true;
 }
 
+function isFullCubeSurfaceSupport(block, movements) {
+    if (!block || block.boundingBox !== 'block' || block.name.includes('leaves')) return false;
+    if (UNSAFE_SURFACE_BLOCKS.has(block.name) || movements?.blocksToAvoid?.has(block.type)) return false;
+    return block.shapes?.some(shape => shape.length === 6 &&
+        shape[0] === 0 && shape[1] === 0 && shape[2] === 0 &&
+        shape[3] === 1 && shape[4] === 1 && shape[5] === 1) === true;
+}
+
+function isClearStandingSpace(block, movements) {
+    if (!block || !Array.isArray(block.shapes)) return false;
+    if (block.shapes.length !== 0 || UNSAFE_SURFACE_BLOCKS.has(block.name) ||
+        movements?.blocksToAvoid?.has(block.type)) return false;
+    return !block.name.includes('water') && !block.name.includes('lava');
+}
+
+function findLoadedSurfaceCandidate(bot, x, z, minY, maxY, movements) {
+    let highestCollision = null;
+    for (let y = maxY - 1; y >= minY; y--) {
+        const block = bot.blockAt(new Vec3(x, y, z));
+        if (!block) return null;
+        if (block.shapes?.length) {
+            highestCollision = block;
+            break;
+        }
+    }
+    if (!isFullCubeSurfaceSupport(highestCollision, movements)) return null;
+
+    const feetY = Math.floor(highestCollision.position.y) + 1;
+    for (const y of [feetY, feetY + 1]) {
+        const block = bot.blockAt(new Vec3(x, y, z));
+        if (!isClearStandingSpace(block, movements)) return null;
+    }
+    return { x, y: feetY, z, support: highestCollision };
+}
+
+function isConnectedSurfaceCandidate(candidate, candidates) {
+    return candidates.some(neighbor =>
+        Math.abs(neighbor.x - candidate.x) + Math.abs(neighbor.z - candidate.z) === 1 &&
+        Math.abs(neighbor.y - candidate.y) <= SURFACE_CONNECTED_STEP_HEIGHT);
+}
+
+function hasLoadedSurfaceNeighbor(bot, candidate, minY, maxY, movements) {
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const neighbor = findLoadedSurfaceCandidate(bot, candidate.x + dx, candidate.z + dz, minY, maxY, movements);
+        if (neighbor && Math.abs(neighbor.y - candidate.y) <= SURFACE_CONNECTED_STEP_HEIGHT) return true;
+    }
+    return false;
+}
+
+function isAtSurfaceCandidate(bot, candidate, minY, maxY, movements) {
+    const position = bot.entity.position;
+    if (Math.floor(position.x) !== candidate.x || Math.floor(position.z) !== candidate.z ||
+        Math.abs(position.y - candidate.y) > SURFACE_ARRIVAL_Y_TOLERANCE) return false;
+    const support = bot.blockAt(new Vec3(candidate.x, candidate.y - 1, candidate.z));
+    if (!isFullCubeSurfaceSupport(support, movements)) return false;
+    for (const y of [candidate.y, candidate.y + 1]) {
+        const block = bot.blockAt(new Vec3(candidate.x, y, candidate.z));
+        if (!isClearStandingSpace(block, movements)) return false;
+    }
+    return bot.entity.onGround === true && hasLoadedSurfaceNeighbor(bot, candidate, minY, maxY, movements);
+}
+
 export async function goToSurface(bot) {
     /**
-     * Navigate to the surface (highest non-air block at current x,z).
+     * Navigate to a loaded, safe surface within a small radius of the current position.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @returns {Promise<boolean>} true if the surface was reached, false otherwise.
+     * @returns {Promise<boolean>} true only after standing on a confirmed surface candidate.
      **/
-    const pos = bot.entity.position;
-    for (let y = 360; y > -64; y--) { // probably not the best way to find the surface but it works
-        const block = bot.blockAt(new Vec3(pos.x, y, pos.z));
-        if (!block || block.name === 'air' || block.name === 'cave_air') {
-            continue;
-        }
-        await goToPosition(bot, block.position.x, block.position.y + 1, block.position.z, 0); // this will probably work most of the time but a custom mining and towering up implementation could be added if needed
-        log(bot, `Going to the surface at y=${y+1}.`);``
-        return true;
+    const context = getActionContext(bot);
+    requireActiveTarget(bot);
+    const { minY, height } = bot.game ?? {};
+    if (!Number.isSafeInteger(minY) || !Number.isSafeInteger(height) || height <= 0) {
+        log(bot, 'Cannot search for the surface: dimension height is unavailable.');
+        return false;
     }
+
+    const position = bot.entity.position;
+    const movements = new pf.Movements(bot);
+    const centerX = Math.floor(position.x);
+    const centerZ = Math.floor(position.z);
+    const candidates = [];
+    for (let dx = -SURFACE_SEARCH_RADIUS; dx <= SURFACE_SEARCH_RADIUS; dx++) {
+        for (let dz = -SURFACE_SEARCH_RADIUS; dz <= SURFACE_SEARCH_RADIUS; dz++) {
+            const candidate = findLoadedSurfaceCandidate(bot, centerX + dx, centerZ + dz, minY, minY + height, movements);
+            if (candidate) candidates.push(candidate);
+        }
+    }
+    if (candidates.length === 0) {
+        log(bot, `No loaded safe surface candidate found within ${SURFACE_SEARCH_RADIUS} blocks.`);
+        return false;
+    }
+
+    const surfaceCandidates = candidates.filter(candidate => isConnectedSurfaceCandidate(candidate, candidates));
+    if (surfaceCandidates.length === 0) {
+        log(bot, `No connected loaded surface candidate found within ${SURFACE_SEARCH_RADIUS} blocks.`);
+        return false;
+    }
+
+    surfaceCandidates.sort((a, b) =>
+        Math.hypot(a.x + 0.5 - position.x, a.y - position.y, a.z + 0.5 - position.z) -
+        Math.hypot(b.x + 0.5 - position.x, b.y - position.y, b.z + 0.5 - position.z));
+    requireActiveTarget(bot);
+    const goal = new pf.goals.GoalCompositeAny(surfaceCandidates.map(candidate =>
+        new pf.goals.GoalBlock(candidate.x, candidate.y, candidate.z)));
+    try {
+        const moved = await goToGoal(bot, goal, movements);
+        requireActiveTarget(bot);
+        if (moved && bot.entity.onGround !== true && typeof bot.waitForTicks === 'function') {
+            await bot.waitForTicks(SURFACE_SETTLE_TICKS);
+            requireActiveTarget(bot);
+        }
+        if (moved && surfaceCandidates.some(candidate => isAtSurfaceCandidate(bot, candidate, minY, minY + height, movements))) {
+            log(bot, `Reached a confirmed surface at ${bot.entity.position.floored()}.`);
+            return true;
+        }
+    } catch (error) {
+        if (!isActionCancelled(bot, context)) log(bot, `Surface navigation failed: ${error.message}.`);
+        return false;
+    }
+    log(bot, 'Surface navigation ended without confirmed arrival at a safe surface.');
     return false;
 }
 
