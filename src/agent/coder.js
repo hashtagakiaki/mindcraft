@@ -375,7 +375,8 @@ function nativeExecutionSafety(windowMs) {
             const action = !method.startsWith('world.') && !method.startsWith('diagnostics.') && !queries.has(method);
             const failed = action && (result === false || result?.ok === false)
                 || method === 'skills.approachBlock' && result?.status !== 'ready'
-                || method === 'skills.fellTree' && result?.status !== 'complete';
+                || method === 'skills.fellTree' && result?.status !== 'complete'
+                || method === 'skills.reachPosition' && (result?.status !== 'reached' || result?.ok !== true);
             if (failed) throw fail(method, new Error(`${method} failed: ${result === false ? "returned false" : result?.status ?? "ok:false"}`), result);
             return result;
         },

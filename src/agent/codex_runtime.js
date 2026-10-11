@@ -19,7 +19,7 @@ const MAX_NATIVE_INBOX_MESSAGES = 32;
 const MAX_NATIVE_DEDUPE_IDS = 256;
 const MAX_OPERATION_IMAGES = 4;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
-const NATIVE_CONTEXT_PROTOCOL = 8;
+const NATIVE_CONTEXT_PROTOCOL = 9;
 
 export function validateCodexRuntime(profile) {
     if (settings.agent_runtime !== 'codex-session') return null;

@@ -653,6 +653,7 @@ async function main() {
   runFixture(node, path.join(__dirname, 'run_tests_output.test.cjs'))
   runFixture(node, path.join(__dirname, 'surface_navigation.test.cjs'))
   runFixture(node, path.join(__dirname, 'tree_felling.test.cjs'))
+  runFixture(node, path.join(__dirname, 'reach_position.test.cjs'))
   runFixture(node, path.join(__dirname, 'block_interaction.test.cjs'))
   runFixture(node, path.join(__dirname, 'native_sdk.test.cjs'))
   runFixture(node, path.join(__dirname, 'codex_session.test.cjs'))

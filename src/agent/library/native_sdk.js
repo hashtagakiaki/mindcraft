@@ -82,6 +82,21 @@ s('consume', { itemName: field('stringValue', { default: '', description: 'Empty
 s('giveToPlayer', { itemName: text(), playerName: text(), quantity: positiveInt({ default: 1 }) }, 'Give quantity items to the visible player. Returns boolean.', a => [a.itemName, a.playerName, a.quantity]);
 s('goToGoal', { goal: field('goal'), movementOverride: optional(field('movements')) }, 'Navigate using an existing pathfinder Goal reference. Optional Movements reference disables destructive fallback. Returns boolean.', a => [a.goal, a.movementOverride ?? null]);
 s('goToPosition', { position: position(), minDistance: distance({ default: 2 }) }, 'Navigate to absolute position with the given arrival tolerance. In minecraft_execute, navigation never digs, places scaffolding or opens doors; the same policy covers implicit navigation inside other skills. A blocked route stops execution. Clear an obstruction with an explicit authorized edit in a later operation. Returns true on success.', a => [...coords(a), a.minDistance]);
+s('reachPosition', {
+    position: position(), tolerance: distance({ default: 1, max: 8, description: 'Minimum 0.75 blocks; maximum 8 blocks.' }),
+    allowDig: field('boolean', { default: false }), allowScaffold: field('boolean', { default: false }),
+    scaffoldBlocks: field('strings', { default: Object.freeze([]), description: 'When allowScaffold is true, choose from dirt and cobblestone actually in inventory.' }),
+    safeWater: field('boolean', { default: false }),
+}, 'Prioritize reaching an exact feet position using bounded replanning. Digging, scaffold placement, and water traversal each require explicit permission; scaffolds use only the listed dirt/cobblestone types and are cleaned up when safe. Returns {ok,status,finalPosition,reason,edits,cleanupRequired}; only reached is success, and every other status stops this execution.', a => a, {
+    argsObject: true,
+    constraint: (a, fail) => {
+        if (a.tolerance < 0.75) fail('tolerance', 'between 0.75 and 8 blocks');
+        if (a.allowScaffold && a.scaffoldBlocks.length === 0) fail('scaffoldBlocks', 'a nonempty list when allowScaffold is true');
+        if (!a.allowScaffold && a.scaffoldBlocks.length > 0) fail('scaffoldBlocks', 'omitted or empty unless allowScaffold is true');
+        for (const block of a.scaffoldBlocks) if (!['dirt', 'cobblestone'].includes(block)) fail('scaffoldBlocks', 'dirt and/or cobblestone');
+        if (new Set(a.scaffoldBlocks).size !== a.scaffoldBlocks.length) fail('scaffoldBlocks', 'unique block names');
+    },
+});
 s('goToNearestBlock', { blockType: text(), minDistance: distance({ default: 2 }), radius: radius(64) }, 'Navigate to the nearest matching block within radius. Returns boolean.', a => [a.blockType, a.minDistance, a.radius]);
 s('goToNearestEntity', { entityType: text(), minDistance: distance({ default: 2 }), radius: radius(64) }, 'Navigate to the nearest matching entity within radius. Returns boolean.', a => [a.entityType, a.minDistance, a.radius]);
 s('goToPlayer', { username: text(), minDistance: distance({ default: 3 }) }, 'Navigate near a visible player. Returns boolean.', a => [a.username, a.minDistance]);

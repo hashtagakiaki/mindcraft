@@ -7,7 +7,7 @@ import settings from "../../../settings.js";
 import craftingSync from "./crafting_sync.js";
 import { placeBlockOriented } from './block_placement.js';
 import { resolveBlockInteraction, makeBlockInteractionGoal, interactionFaceVector, interactionEye } from './block_interaction.js';
-import { trackSkill, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, withSkillPhase, registerOwnedPromise } from './operation_context.js';
+import { trackSkill, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, withSkillPhase, registerOwnedPromise, withNativeNavigationEditScope, nativeNavigationEditScopeActive } from './operation_context.js';
 
 const require = createRequire(import.meta.url);
 
@@ -26,6 +26,16 @@ const FURNACE_POLL_INTERVAL_MS = 100;
 const FURNACE_IDLE_TIMEOUT_MS = 11000;
 const DEFAULT_NAVIGATION_STALL_TIMEOUT_MS = 90_000;
 const DEFAULT_NAVIGATION_CHECK_INTERVAL_MS = 5_000;
+const REACH_POSITION_MAX_DISTANCE = 512;
+const REACH_POSITION_MAX_SEGMENTS = 32;
+const REACH_POSITION_MAX_DURATION_MS = 180_000;
+const REACH_POSITION_SEARCH_RADIUS = 64;
+const REACH_POSITION_SEARCH_TIMEOUT_MS = 1_200;
+const REACH_POSITION_SEARCH_TICK_MS = 60;
+const REACH_POSITION_SEARCH_STEPS = 12;
+const REACH_POSITION_CHUNK_WAIT_MS = 5_000;
+const REACH_POSITION_NO_PROGRESS_LIMIT = 3;
+const reachPositionMovementOwners = new WeakMap();
 const SURFACE_SEARCH_RADIUS = 6;
 const SURFACE_ARRIVAL_Y_TOLERANCE = 0.25;
 const SURFACE_SETTLE_TICKS = 2;
@@ -2033,7 +2043,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
 
     // Native code uses explicit edits for changes; all navigation, including
     // navigation inside other skills, stays free of digging and scaffolding.
-    if (operationContext()?.nativeNavigationNoEdits) {
+    if (operationContext()?.nativeNavigationNoEdits && !nativeNavigationEditScopeActive()) {
         movementOverride = Object.assign(new pf.Movements(bot), movementOverride ?? {}, {
             canDig: false, canPlaceOn: false, allow1by1towers: false,
             allowFreeMotion: false, scafoldingBlocks: [], canOpenDoors: false,
@@ -2229,6 +2239,383 @@ function startDoorInterval(bot) {
     }, 200);
     _doorInterval = doorCheckInterval;
     return doorCheckInterval;
+}
+
+function reachPositionResult(status, finalPosition, reason, edits = [], cleanupRequired = []) {
+    return { ok: status === 'reached', status, finalPosition, reason, edits, cleanupRequired };
+}
+
+function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safeWater }) {
+    const movements = new pf.Movements(bot);
+    movements.canDig = allowDig;
+    movements.allow1by1towers = allowScaffold;
+    movements.scafoldingBlocks = allowScaffold
+        ? scaffoldBlocks.map(name => bot.registry.itemsByName[name].id) : [];
+    movements.canOpenDoors = false;
+    movements.allowFreeMotion = false;
+    movements.allowParkour = false;
+    movements.maxDropDown = 1;
+    movements.infiniteLiquidDropdownDistance = false;
+
+    const avoidNames = [
+        'lava', 'fire', 'soul_fire', 'magma_block', 'cactus', 'campfire', 'soul_campfire', 'bubble_column',
+        'powder_snow', 'sweet_berry_bush', 'wither_rose', 'pointed_dripstone',
+        ...(!safeWater ? ['water', 'flowing_water'] : []),
+    ];
+    const protectedNames = [
+        'glass', 'glass_pane', 'sand', 'red_sand', 'gravel', 'suspicious_sand', 'suspicious_gravel',
+        'anvil', 'chipped_anvil', 'damaged_anvil', 'dragon_egg', 'turtle_egg', 'farmland', 'dirt_path',
+        ...avoidNames,
+    ];
+    for (const name of avoidNames) {
+        const id = bot.registry.blocksByName[name]?.id;
+        if (id != null) movements.blocksToAvoid.add(id);
+    }
+    for (const name of protectedNames) {
+        const id = bot.registry.blocksByName[name]?.id;
+        if (id != null) movements.blocksCantBreak.add(id);
+    }
+    // Never destroy gravity blocks while pathing; the pathfinder's default set
+    // omits several blocks which can fall in current registries.
+    for (const block of bot.registry.blocksArray ?? []) {
+        if (block.name.endsWith('glass') || block.name.endsWith('glass_pane') || movements.interactableBlocks.has(block.id)) {
+            movements.blocksCantBreak.add(block.id);
+        }
+        if (/(?:sand|gravel|concrete_powder|anvil)$/.test(block.name) || block.name === 'dragon_egg') {
+            movements.blocksCantBreak.add(block.id);
+        }
+    }
+    if (safeWater) {
+        const getBlock = movements.getBlock.bind(movements);
+        movements.getBlock = (position, dx, dy, dz) => {
+            const block = getBlock(position, dx, dy, dz);
+            if (block.liquid && ['water', 'flowing_water'].includes(block.name)) {
+                const support = bot.blockAt(block.position.offset(0, -1, 0));
+                if (!support?.shapes?.some(shape => shape[4] >= 0.99)) block.safe = false;
+            }
+            return block;
+        };
+    }
+    return movements;
+}
+
+function reachPositionGoal(target, tolerance) {
+    // Pathfinder goals use block centers, while arrival is measured from the
+    // actual entity position. Leave room for the entity's within-block offset.
+    const goalRadius = Math.max(0, tolerance - Math.SQRT1_2);
+    const distanceFromNode = node => Math.hypot(node.x + 0.5 - target.x, node.y - target.y, node.z + 0.5 - target.z);
+    const goal = new pf.goals.Goal();
+    goal.isEnd = node => distanceFromNode(node) <= goalRadius;
+    goal.heuristic = node => Math.max(0, distanceFromNode(node) - goalRadius);
+    return goal;
+}
+
+function reachPositionHasUnknownNeighbor(bot, position, radius = 4) {
+    const center = position.floored();
+    for (let distance = 1; distance <= radius; distance++) {
+        for (let dx = -distance; dx <= distance; dx++) {
+            for (const dz of [-distance, distance]) {
+                if (!bot.blockAt(center.offset(dx, 0, dz))) return true;
+            }
+        }
+        for (let dz = -distance + 1; dz < distance; dz++) {
+            for (const dx of [-distance, distance]) {
+                if (!bot.blockAt(center.offset(dx, 0, dz))) return true;
+            }
+        }
+    }
+    return false;
+}
+
+async function waitForReachPositionChunk(bot, operation, timeoutMs) {
+    const world = bot.world;
+    if (!world?.on) return false;
+    const wait = beginOwnedWait({ phase: 'navigation', reason: 'loaded-route-segment', timeoutMs, startedAt: new Date().toISOString() });
+    const startedAt = new Date().toISOString();
+    let timer;
+    let poll;
+    try {
+        return await new Promise(resolve => {
+            let settled = false;
+            const finish = value => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                clearInterval(poll);
+                world.removeListener('chunkColumnLoad', onLoad);
+                resolve(value);
+            };
+            const onLoad = () => finish(true);
+            world.on('chunkColumnLoad', onLoad);
+            timer = setTimeout(() => finish(false), timeoutMs);
+            poll = setInterval(() => {
+                if (operation?.signal.aborted || bot.interrupt_code) finish(false);
+            }, 25);
+        });
+    } finally {
+        finishOwnedWait(wait, { phase: 'navigation', reason: 'loaded-route-segment', startedAt, endedAt: new Date().toISOString(), timeoutMs,
+            outcome: operation?.signal.aborted || bot.interrupt_code ? 'cancelled' : 'settled' });
+    }
+}
+
+function reachPositionPath(bot, movements, goal) {
+    if (typeof bot.pathfinder.getPathFromTo !== 'function') return { status: 'unavailable', path: [] };
+    const generator = bot.pathfinder.getPathFromTo(movements, bot.entity.position, goal, {
+        timeout: REACH_POSITION_SEARCH_TIMEOUT_MS, tickTimeout: REACH_POSITION_SEARCH_TICK_MS,
+        searchRadius: REACH_POSITION_SEARCH_RADIUS,
+    });
+    let result = { status: 'unavailable', path: [] };
+    for (let step = 0; step < REACH_POSITION_SEARCH_STEPS; step++) {
+        const next = generator.next();
+        if (next.done || !next.value?.result) break;
+        result = next.value.result;
+        if (result.status !== 'partial') break;
+    }
+    return result;
+}
+
+export async function reachPosition(bot, options = {}) {
+    /**
+     * Reach an absolute bot-feet position using explicitly permitted digging
+     * and/or pathfinder scaffolding. Only server-confirmed edits are reported.
+     * @param {MinecraftBot} bot
+     * @param {{position:{x:number,y:number,z:number}, tolerance?:number, allowDig?:boolean, allowScaffold?:boolean, scaffoldBlocks?:string[], safeWater?:boolean}} options
+     * @returns {Promise<{ok:boolean,status:'reached'|'blocked'|'stalled'|'cancelled',finalPosition:{x:number,y:number,z:number}|null,reason:string,edits:Array,cleanupRequired:Array}>}
+     * @example
+     * const result = await skills.reachPosition(bot, { position: {x: 10.5, y: 64, z: -3.5}, allowDig: true });
+     **/
+    const snapshotPosition = () => bot.entity?.position
+        ? { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z } : null;
+    const edits = [];
+    const cleanupRequired = [];
+    const early = reason => reachPositionResult('blocked', snapshotPosition(), reason, edits, cleanupRequired);
+    if (!bot?.entity?.position || !bot.pathfinder || !options || typeof options !== 'object' || Array.isArray(options)) return early('Bot, position, or pathfinder is unavailable.');
+    const { position, tolerance = 1, allowDig = false, allowScaffold = false, scaffoldBlocks = [], safeWater = false } = options;
+    if (!position || ![position.x, position.y, position.z].every(Number.isFinite)) return early('Position must contain finite x, y, and z coordinates.');
+    if (!Number.isFinite(tolerance) || tolerance < 0.75 || tolerance > 8) return early('Tolerance must be between 0.75 and 8 blocks.');
+    if (![allowDig, allowScaffold, safeWater].every(value => typeof value === 'boolean')) return early('Edit and water permissions must be booleans.');
+    if (!Array.isArray(scaffoldBlocks) || new Set(scaffoldBlocks).size !== scaffoldBlocks.length ||
+        scaffoldBlocks.some(name => !['dirt', 'cobblestone'].includes(name)) ||
+        (allowScaffold && scaffoldBlocks.length === 0) || (!allowScaffold && scaffoldBlocks.length > 0)) {
+        return early('Scaffold permission requires a unique, nonempty dirt/cobblestone allowlist; omit it when scaffolding is disabled.');
+    }
+
+    const operation = operationContext();
+    const actionContext = operation?.cancellation ?? getActionContext(bot);
+    const cancelled = () => !!operation?.signal?.aborted || isActionCancelled(bot, actionContext);
+    const active = () => { if (cancelled()) throw Object.assign(new Error('Reach cancelled.'), { name: 'ReachCancelledError' }); };
+    const target = new Vec3(position.x, position.y, position.z);
+    if (bot.game?.minY != null && (target.y < bot.game.minY || bot.game.height != null && target.y >= bot.game.minY + bot.game.height)) return early('Target is outside the loaded dimension height.');
+    if (bot.entity.position.distanceTo(target) > REACH_POSITION_MAX_DISTANCE) return early(`Target exceeds the ${REACH_POSITION_MAX_DISTANCE}-block range limit.`);
+    const availableScaffoldBlocks = allowScaffold
+        ? scaffoldBlocks.filter(name => bot.registry?.itemsByName?.[name] &&
+            (bot.inventory?.items?.() ?? []).some(item => item.name === name && item.count > 0))
+        : [];
+    if (allowScaffold && availableScaffoldBlocks.length === 0) {
+        return early('None of the permitted scaffold blocks are available in inventory.');
+    }
+
+    const context = operationContext();
+    const originalDig = bot.dig;
+    const originalPlaceBlock = bot.placeBlock;
+    const originalMovements = bot.pathfinder.movements;
+    const ownedMovements = new WeakSet();
+    const scaffoldRecords = [];
+    const movement = reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks: availableScaffoldBlocks, safeWater });
+    ownedMovements.add(movement);
+    reachPositionMovementOwners.set(bot.pathfinder, context ?? movement);
+    const movementOwner = reachPositionMovementOwners.get(bot.pathfinder);
+    let editPhase = 'traversal';
+    let activeGoal = null;
+    let budgetExpired = false;
+    let lastNavigationError = '';
+    let status = 'blocked';
+    let reason = 'No safe route was found.';
+    let hardTimer;
+    const startedAt = Date.now();
+    let chunkWaitCount = 0;
+    const routeAttempts = new Map();
+    const finalDistance = () => bot.entity.position.distanceTo(target);
+    const goal = reachPositionGoal(target, tolerance);
+
+    const digWrapper = async function (block, ...args) {
+        active();
+        const result = await registerOwnedPromise(originalDig.call(this, block, ...args));
+        const observed = bot.blockAt(block.position);
+        if (!observed || observed.type !== 0) throw new Error(`Server did not confirm route excavation at ${block.position}.`);
+        const kind = editPhase === 'cleanup' ? 'scaffold_removed' : 'dug';
+        const change = { kind, block: block.name, position: { x: block.position.x, y: block.position.y, z: block.position.z } };
+        edits.push(change);
+        recordConfirmation({ quantity: 1, unit: 'block', target: { block: block.name, position: change.position },
+            evidence: 'Mineflayer dig promise resolved after server block update' });
+        active();
+        return result;
+    };
+    const placeWrapper = async function (reference, face, ...args) {
+        active();
+        const blockName = bot.heldItem?.name;
+        if (!allowScaffold || !scaffoldBlocks.includes(blockName)) throw new Error(`Pathfinder attempted an unpermitted scaffold block: ${blockName ?? 'unknown'}.`);
+        const targetPosition = reference.position.plus(face).floored();
+        const result = await registerOwnedPromise(originalPlaceBlock.call(this, reference, face, ...args));
+        const observed = bot.blockAt(targetPosition);
+        if (!observed || observed.name !== blockName) throw new Error(`Server did not confirm ${blockName} at ${targetPosition}.`);
+        const positionRecord = { x: targetPosition.x, y: targetPosition.y, z: targetPosition.z };
+        const record = { position: positionRecord, block: blockName, stateId: observed.stateId };
+        scaffoldRecords.push(record);
+        const change = { kind: 'scaffold_placed', block: blockName, position: positionRecord };
+        edits.push(change);
+        recordConfirmation({ quantity: 1, unit: 'block', target: { block: blockName, position: positionRecord },
+            evidence: 'Mineflayer placement promise resolved after server block update' });
+        active();
+        return result;
+    };
+
+    const restoreWrappers = () => {
+        if (bot.dig === digWrapper) bot.dig = originalDig;
+        if (bot.placeBlock === placeWrapper) bot.placeBlock = originalPlaceBlock;
+    };
+    const cleanupScaffolds = async () => {
+        editPhase = 'cleanup';
+        for (const scaffold of [...scaffoldRecords].reverse()) {
+            if (cancelled()) break;
+            const p = new Vec3(scaffold.position.x, scaffold.position.y, scaffold.position.z);
+            const observed = bot.blockAt(p);
+            if (observed?.type === 0) continue;
+            if (!observed || observed.name !== scaffold.block || scaffold.stateId != null && observed.stateId !== scaffold.stateId) {
+                cleanupRequired.push({ ...scaffold.position, block: scaffold.block, reason: 'Owned scaffold state changed or became unknown.' });
+                continue;
+            }
+            const feet = bot.entity.position.floored();
+            if (bot.entity.onGround && feet.x === p.x && feet.z === p.z && feet.y - 1 === p.y) {
+                cleanupRequired.push({ ...scaffold.position, block: scaffold.block, reason: 'Scaffold supports the bot at its current position.' });
+                continue;
+            }
+            try {
+                const targetBlock = bot.blockAt(p);
+                if (!targetBlock) throw new Error('Scaffold became unobserved.');
+                const current = bot.blockAt(p);
+                if (!current || current.name !== scaffold.block || scaffold.stateId != null && current.stateId !== scaffold.stateId) throw new Error('Owned scaffold changed before cleanup.');
+                const interaction = resolveBlockInteraction(bot, current, { reach: 4.5 });
+                if (interaction.status !== 'ready') throw new Error(`Scaffold is not safely reachable: ${interaction.reason}.`);
+                await bot.dig(current);
+                active();
+                if (bot.blockAt(p)?.type !== 0) throw new Error('Server did not confirm scaffold removal.');
+            } catch (error) {
+                if (cancelled()) break;
+                cleanupRequired.push({ ...scaffold.position, block: scaffold.block, reason: String(error.message ?? error) });
+            }
+        }
+    };
+
+    try {
+        if (!originalDig || (allowScaffold && !originalPlaceBlock) || typeof bot.pathfinder.getPathFromTo !== 'function') throw new Error('The required Mineflayer/pathfinder edit APIs are unavailable.');
+        bot.dig = digWrapper;
+        if (allowScaffold) bot.placeBlock = placeWrapper;
+        bot.pathfinder.setMovements(movement);
+        hardTimer = setTimeout(() => {
+            budgetExpired = true;
+            if (activeGoal && bot.pathfinder.goal === activeGoal) bot.pathfinder.stop();
+        }, REACH_POSITION_MAX_DURATION_MS);
+
+        for (let segment = 0; segment < REACH_POSITION_MAX_SEGMENTS; segment++) {
+            active();
+            if (finalDistance() <= tolerance) {
+                status = 'reached';
+                reason = 'Reached the requested feet position.';
+                break;
+            }
+            if (Date.now() - startedAt > REACH_POSITION_MAX_DURATION_MS) {
+                status = 'stalled'; reason = 'Reach exceeded its elapsed-time budget.'; break;
+            }
+            const start = bot.entity.position.floored();
+            const pathResult = reachPositionPath(bot, movement, goal);
+            if (pathResult.status === 'unavailable') { status = 'blocked'; reason = 'Bounded path search is unavailable.'; break; }
+            const path = Array.isArray(pathResult.path) ? pathResult.path : [];
+            const endpoint = path.at(-1);
+            if (!endpoint || endpoint.x === start.x && endpoint.y === start.y && endpoint.z === start.z) {
+                if (reachPositionHasUnknownNeighbor(bot, bot.entity.position)) {
+                    if (++chunkWaitCount > REACH_POSITION_MAX_SEGMENTS) { status = 'stalled'; reason = 'Chunk loading retry limit reached.'; break; }
+                    const loaded = await waitForReachPositionChunk(bot, context, REACH_POSITION_CHUNK_WAIT_MS);
+                    active();
+                    if (loaded) continue;
+                    status = 'blocked'; reason = 'No newly loaded safe route segment appeared before the chunk wait deadline.'; break;
+                }
+                status = 'blocked'; reason = `Path search ended ${pathResult.status} without a safe next segment.`; break;
+            }
+
+            const routeKey = `${start.x},${start.y},${start.z}>${endpoint.x},${endpoint.y},${endpoint.z}:${pathResult.status}`;
+            const attempts = (routeAttempts.get(routeKey) ?? 0) + 1;
+            routeAttempts.set(routeKey, attempts);
+            if (attempts >= REACH_POSITION_NO_PROGRESS_LIMIT) {
+                status = 'stalled'; reason = 'The same route segment failed repeatedly without progress.'; break;
+            }
+            const checkpoint = pathResult.status === 'success' ? goal : new pf.goals.GoalBlock(endpoint.x, endpoint.y, endpoint.z);
+            activeGoal = checkpoint;
+            const before = bot.entity.position.clone();
+            try {
+                await withNativeNavigationEditScope(() => goToGoal(bot, checkpoint, movement));
+            } catch (error) {
+                lastNavigationError = String(error.message ?? error);
+                if (cancelled()) throw error;
+                if (budgetExpired || error.name === 'NavigationStallTimeoutError' || error.name === 'Timeout') {
+                    status = 'stalled'; reason = lastNavigationError; break;
+                }
+                if (bot.entity.position.distanceTo(before) < 0.5 && attempts + 1 >= REACH_POSITION_NO_PROGRESS_LIMIT) {
+                    status = 'stalled'; reason = lastNavigationError; break;
+                }
+                continue;
+            }
+            active();
+            if (bot.entity.position.distanceTo(before) < 0.5 && finalDistance() > tolerance) {
+                if (reachPositionHasUnknownNeighbor(bot, bot.entity.position)) {
+                    const loaded = await waitForReachPositionChunk(bot, context, REACH_POSITION_CHUNK_WAIT_MS);
+                    active();
+                    if (loaded) continue;
+                }
+                if (attempts + 1 >= REACH_POSITION_NO_PROGRESS_LIMIT) { status = 'stalled'; reason = 'Navigation returned without observable route progress.'; break; }
+            }
+        }
+
+        if (status === 'blocked' && reason === 'No safe route was found.' && !cancelled()) {
+            status = 'stalled'; reason = 'Reach exceeded its bounded route-segment budget.';
+        }
+
+        if (scaffoldRecords.length && !cancelled()) await cleanupScaffolds();
+        if (cancelled()) { status = 'cancelled'; reason = 'Action was cancelled; no further edits were started.'; }
+        else if (status === 'reached' && finalDistance() > tolerance) { status = 'blocked'; reason = 'Cleanup completed, but the final position is outside the requested tolerance.'; }
+        else if (status !== 'reached' && status === 'blocked' && lastNavigationError) reason = `${reason} Last navigation error: ${lastNavigationError}`;
+    } catch (error) {
+        if (cancelled() || error.name === 'ReachCancelledError') { status = 'cancelled'; reason = 'Action was cancelled; no further edits were started.'; }
+        else if (budgetExpired || error.name === 'NavigationStallTimeoutError' || error.name === 'Timeout') { status = 'stalled'; reason = String(error.message ?? error); }
+        else { status = 'blocked'; reason = String(error.message ?? error); }
+        if (status !== 'cancelled' && scaffoldRecords.length) await cleanupScaffolds();
+        if (cleanupRequired.length && status === 'reached') status = 'blocked';
+    } finally {
+        clearTimeout(hardTimer);
+        restoreWrappers();
+        if (reachPositionMovementOwners.get(bot.pathfinder) === movementOwner) {
+            if (ownedMovements.has(bot.pathfinder.movements) && originalMovements) bot.pathfinder.setMovements(originalMovements);
+            reachPositionMovementOwners.delete(bot.pathfinder);
+        }
+    }
+    for (const scaffold of scaffoldRecords) {
+        const block = bot.blockAt(new Vec3(scaffold.position.x, scaffold.position.y, scaffold.position.z));
+        if ((!block || block.type !== 0) && !cleanupRequired.some(entry => entry.x === scaffold.position.x && entry.y === scaffold.position.y && entry.z === scaffold.position.z)) {
+            cleanupRequired.push({ ...scaffold.position, block: scaffold.block, reason: cancelled() ? 'Action cancelled before owned scaffold cleanup.' : 'Owned scaffold remains or became unobserved after route completion.' });
+        }
+    }
+    const finalPosition = snapshotPosition();
+    if (status === 'reached' && cleanupRequired.length) {
+        status = 'blocked';
+        reason = `Reached the target, but ${cleanupRequired.length} owned scaffold(s) could not be safely removed.`;
+    }
+    if (status === 'reached' && finalDistance() <= tolerance) {
+        log(bot, `Reached ${target} within ${tolerance} blocks; confirmed ${edits.length} route edits.`);
+        return reachPositionResult('reached', finalPosition, reason, edits, cleanupRequired);
+    }
+    if (cleanupRequired.length) reason += ` Cleanup required at ${cleanupRequired.map(item => `(${item.x}, ${item.y}, ${item.z})`).join(', ')}.`;
+    log(bot, `Could not complete route to ${target}: ${reason}`);
+    return reachPositionResult(status, finalPosition, reason, edits, cleanupRequired);
 }
 
 export async function goToPosition(bot, x, y, z, min_distance=2) {
@@ -4028,6 +4415,7 @@ consume = trackSkill("skills.consume", consume);
 giveToPlayer = trackSkill("skills.giveToPlayer", giveToPlayer);
 goToGoal = trackSkill("skills.goToGoal", goToGoal);
 goToPosition = trackSkill("skills.goToPosition", goToPosition);
+reachPosition = trackSkill("skills.reachPosition", reachPosition);
 goToNearestBlock = trackSkill("skills.goToNearestBlock", goToNearestBlock);
 goToNearestEntity = trackSkill("skills.goToNearestEntity", goToNearestEntity);
 goToPlayer = trackSkill("skills.goToPlayer", goToPlayer);

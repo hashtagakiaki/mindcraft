@@ -300,6 +300,12 @@ async function main() {
     assert.equal(blocked.success,false)
     assert.equal(blocked.sdkFailure.method,'skills.goToPosition')
     assert.equal(blocked.skillResults.some(call=>call.skill==='skills.breakBlockAt'),false,'blocked navigation prevents the next edit')
+    const failedReach=await run('await skills.reachPosition({position:{x:0.5,y:64,z:0.5}}); await skills.breakBlockAt({position:{x:1,y:64,z:0}});')
+    assert.equal(failedReach.success,false,'a structured non-reached navigation result fails the native execution')
+    assert.equal(failedReach.sdkFailure.method,'skills.reachPosition')
+    assert.equal(failedReach.sdkFailure.result.status,'blocked')
+    assert.equal(failedReach.sdkFailure.result.ok,false)
+    assert.equal(failedReach.skillResults.some(call=>call.skill==='skills.breakBlockAt'),false,'failed reach prevents a later SDK mutation')
     bot.state.route='ready'
     settings.agent_runtime='legacy'
     assert.equal((await run('await Promise.resolve(); log(bot,JSON.stringify(world.getPosition(bot)));')).success,true,'legacy generated code retains its original contract')

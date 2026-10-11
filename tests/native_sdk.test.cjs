@@ -100,6 +100,16 @@ async function main() {
   }
   assert.deepEqual(sdk.skills.putInChest({ itemName: 'oak_log', quantity: 2, chestPosition: input.position }), [botA, 'oak_log', 2, { chestPosition: input.position }])
   assert.deepEqual(sdk.skills.goToPlayer({ username: 'Steve' }), [botA, 'Steve', 3])
+  assert.deepEqual(sdk.skills.reachPosition({ position: input.position }), [botA, {
+    position: input.position, tolerance: 1, allowDig: false, allowScaffold: false, scaffoldBlocks: [], safeWater: false,
+  }])
+  assert.deepEqual(sdk.skills.reachPosition({ position: input.position, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'] }), [botA, {
+    position: input.position, tolerance: 1, allowDig: false, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false,
+  }])
+  invalid(sdk.skills.reachPosition, [{ position: input.position, tolerance: 0.5 }], 'tolerance')
+  invalid(sdk.skills.reachPosition, [{ position: input.position, allowScaffold: true }], 'scaffoldBlocks')
+  invalid(sdk.skills.reachPosition, [{ position: input.position, allowScaffold: true, scaffoldBlocks: ['stone'] }], 'scaffoldBlocks')
+  invalid(sdk.skills.reachPosition, [{ position: input.position, scaffoldBlocks: ['dirt'] }], 'scaffoldBlocks')
   assert.deepEqual(sdk.skills.stay({ seconds: -1 }), [botA, -1])
   invalid(sdk.skills.stay, [{ seconds: -2 }], 'seconds')
   assert.deepEqual(sdk.skills.tendNearbyFarm(), [botA, { scope: 'connected', seedReserve: 1, searchRadius: 32 }])

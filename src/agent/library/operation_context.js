@@ -1,9 +1,20 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 const ownership = new AsyncLocalStorage();
+const navigationEditOwnership = new AsyncLocalStorage();
 export const NATIVE_EXECUTION_WINDOW_MS = 45_000;
 
 export function operationContext() { return ownership.getStore()?.operation ?? null; }
+
+export function withNativeNavigationEditScope(body) {
+    const operation = operationContext();
+    return navigationEditOwnership.run(operation, body);
+}
+
+export function nativeNavigationEditScopeActive() {
+    const operation = operationContext();
+    return !!operation && navigationEditOwnership.getStore() === operation && operation.nativeNavigationNoEdits === true;
+}
 
 export function createOperationContext(action, agent, manager, taskId = null) {
     return {
