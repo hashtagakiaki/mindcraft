@@ -492,13 +492,13 @@ native taskのvisionはJPEGをtool resultの `inputImage` として判断中のC
 
 `codex_session` の既定値は、`execution_window_ms: 45000`、`stall_timeout_ms: 30000`、`action_timeout_ms: 600000`、`output_limit: 16000`、`max_search_radius: 64`、`task_budget_ms: null`、`max_operations: null`、`max_turns: null`。この3つだけは`null`で上限を無効化でき、既定では長時間taskを時間・操作・判断回数で打ち切らない。有限の上限を使う場合は正の数（操作・判断回数は整数）を設定する。各判断の残りbudgetも無制限は`null`を返す。
 
-`codex_session.goals: true` は標準Codex Goalsを使う明示opt-in（既定false）。受理した依頼をthreadの目標に設定し、最初の応答後の自動続行も同じtask・操作ownerで受け取る。CLI 0.162.0で模擬課題の2ターン実行を確認した。Goalsはephemeral threadでは使えないため、world scopeがない場合も保存可能な新規threadを作るが、次の依頼へ自動再開しない。依頼は標準APIの4,000文字上限に従い、上限超過やAPI非対応を通常実行へfallbackしない。自動続行もhostの時間・操作・判断予算、Stop・差替え・shutdownの対象になる。goal statusを終了記録へ残すが、モデルのcompleteはゲーム上の達成を独立検証した意味ではない。次のターンが発生しないactive goalにも既存model待機期限を適用する。[標準Goals API](https://learn.chatgpt.com/docs/app-server#manage-a-thread-goal)
+`codex_session.goals: true` は標準Codex Goalsを使う明示opt-in（既定false）。受理した依頼をthreadの目標に設定し、最初の応答後の自動続行も同じtask・操作ownerで受け取る。CLI 0.162.0で模擬課題の2ターン実行を確認した。Goalsはephemeral threadでは使えないため、world scopeがない場合も保存可能な新規threadを作るが、次の依頼へ自動再開しない。依頼は標準APIの4,000文字上限に従い、上限超過やAPI非対応を通常実行へfallbackしない。自動続行もhostの時間・操作・判断予算、Stop・差替え・shutdownの対象になる。goal statusを終了記録へ残すが、モデルのcompleteはゲーム上の達成を独立検証した意味ではない。次のターンが発生しないactive goalにも既存model待機期限を適用する。Goals有効中に単独の `skills.stay` が成功した場合、hostが現在のgoalを完了状態にし、現在turnの一度の結果報告後にtaskを終える。複合operation内の `stay` はこの扱いにならない。[標準Goals API](https://learn.chatgpt.com/docs/app-server#manage-a-thread-goal)
 
 task budgetの経過時間はmodel待ち・再試行・operation待ちを含み、operation数は受理した実行要求、旧名 `max_turns` はhostの判断再開数（turn開始と各SDK tool resultによる再開）を数え、Codex内部の検索・圧縮回数は含めない。先に達した上限は停止を要求し、実operationのsettlementを代替しない。
 
 通常actionでは位置の0.5 block以上の変化か在庫の変化で停滞timerを更新する。navigation phase中はnative monitorも生の位置変化でなくowned callの未訪問route node到達を進捗として使うため、無応答は既定30秒でstopする。`goToGoal` はさらに既定90秒の有限stall期限を保ち、同じnodeの再到達やpath再計算だけでは時計を更新しない。1操作のhard timeoutは既定10分で、task全体の制限と独立して働く。settleしたtimeout/stallの結果は同じtaskへ返し、状態確認と修正を続けられる。
 
-失敗した同じcode・error・観測状態が進捗なしで3回繰り返された場合は、次の実行を拒否してtask errorとして報告する。途中の読み取り成功だけではこの回数を消さず、異なる失敗条件・観測状態、確認済み変更、または観測された操作進捗で更新する。同期のblock検索はこのruntimeに限り指定半径を超えるとerrorを返す。任意の同期codeや協調停止しない操作をtimerで強制停止できる保証はない。既存10秒stop watchdogと親process回収が最終境界となる。
+失敗した同じcode・error・観測状態が進捗なしで3回繰り返された場合は、次の実行を拒否してtask errorとして報告する。読み取り成功は回数を消さない。さらにNoPath/path search timeoutの移動失敗は、同じ8×4×8 block局所区画・dimension・inventory状態の間、座標の小数差や生成codeの変更をまたいで同じ失敗として数える。観測された移動進捗または確認済み変更で回数をリセットする。同期のblock検索はこのruntimeに限り指定半径を超えるとerrorを返す。任意の同期codeや協調停止しない操作をtimerで強制停止できる保証はない。既存10秒stop watchdogと親process回収が最終境界となる。
 
 Codex app-serverから受信した確定済み `agentMessage` は、Codex turnが終わるのを待たず、MindServer operator UIのBot output logへ時刻・bot名・本文付きで追記する。ページ接続時は保存済み `bots/<bot>/histories/codex-*.jsonl` から確定済み回答を読み込み、旧bundleに残る履歴も含めて直近200件を表示する。履歴APIは回答本文とtask失敗だけを返し、内部推論や実行traceは返さない。ログ本体はサーバーに残るCodex task traceを使い、ブラウザーlocalStorageには保存しない。保護モードのobserver接続には配信しない。
 

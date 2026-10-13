@@ -570,8 +570,13 @@ for (let batch = 0; batch < 10; batch++) {
     goalSession.send = message => goalReplies.push(message)
     goalSession.request = async (method, params) => {
       if (method === 'thread/goal/set') {
-        assert.equal(params.origin, 'user')
-        return { goal: { status: 'active', objective: params.objective } }
+        if (params.status === 'active') {
+          assert.equal(params.origin, 'user')
+          return { goal: { status: 'active', objective: params.objective } }
+        }
+        assert.equal(params.status, 'complete')
+        assert.equal(params.objective, undefined, 'updating the current objective preserves Goal usage')
+        return { goal: { status: 'complete', objective: 'counter = 2' } }
       }
       assert.equal(method, 'turn/start')
       queueMicrotask(async () => {
@@ -583,6 +588,7 @@ for (let batch = 0; batch < 10; batch++) {
         await notify('turn/started', { turn: { id: 'goal-2' } })
         await goalSession.receive({ id: 901, method: 'item/tool/call', params: {
           threadId: 'goal-thread', turnId: 'goal-2', tool: 'minecraft_execute', arguments: { code: 'await Promise.resolve();' } } })
+        assert.equal(await goalSession.completeGoalAfterWait(), true)
         await notify('thread/goal/updated', { goal: { status: 'complete' } })
         await notify('item/completed', { item: { type: 'agentMessage', text: '観測して完了', phase: 'final_answer' } })
         await notify('turn/completed', { turn: { id: 'goal-2', status: 'completed' } })
@@ -1124,6 +1130,77 @@ for (let batch = 0; batch < 10; batch++) {
     }) })
     repairAgent.codexRuntime = repairRuntime
     assert.equal(await repairRuntime.run('operator', () => true, 'distinct-repairs'), true)
+
+    // Fractional target and observed-position changes within one local area do not evade the navigation no-path guard.
+    const navigationRetryAgent = makeAgent('NavigationRetry')
+    let navigationAttempts = 0
+    navigationRetryAgent.actions.runAction = async () => {
+      navigationAttempts++
+      navigationRetryAgent.bot.entity.position.x = 70.1 + navigationAttempts * 0.2
+      return { success: false, message: 'Pathfinding stopped: No path to the goal', progressObserved: false,
+        skillResults: [
+          { id: `generated-${navigationAttempts}`, skill: 'generated_code', parentCallId: null, status: 'returned' },
+          { id: `position-${navigationAttempts}`, skill: 'skills.goToPosition', parentCallId: `generated-${navigationAttempts}`, status: 'returned_false' },
+          { id: `goal-${navigationAttempts}`, skill: 'skills.goToGoal', parentCallId: `position-${navigationAttempts}`, status: 'error', error: 'NoPath: No path to the goal' }
+        ] }
+    }
+    const navigationRetryRuntime = new CodexRuntime(navigationRetryAgent, { makeSession: ({ execute }) => {
+      let decision = 0
+      return { open: async () => {}, close: async () => {}, runTurn: async () => {
+        while (decision < 3) {
+          await execute(`await skills.goToPosition({position:{x:${70.5 + decision++ * 0.37},y:69,z:-287.5}});`)
+        }
+        await assert.rejects(execute('retry nearby route'), /Repeated no-path navigation failures/)
+        return { messages: ['reported navigation blocker'] }
+      } }
+    } })
+    navigationRetryAgent.codexRuntime = navigationRetryRuntime
+    assert.equal(await navigationRetryRuntime.run('operator', () => true, 'navigation-retry'), true)
+    assert.equal(navigationAttempts, 3, 'nearby no-path failures stop at the existing three-failure limit')
+    assert.equal((await eventsFor('NavigationRetry')).find(event => event.type === 'operation_retry_blocked').failureKind, 'navigation-no-path')
+
+    // An isolated successful wait closes an active Goal while preserving one final report turn.
+    settings.codex_session = { ...unlimitedSettings, goals: true }
+    const waitGoalAgent = makeAgent('StandaloneWaitGoal')
+    waitGoalAgent.actions.runAction = async () => ({ success: true, progressObserved: false, confirmedChanges: [], skillResults: [
+      { id: 'generated-stay', skill: 'generated_code', parentCallId: null, status: 'returned' },
+      { id: 'stay-call', skill: 'skills.stay', parentCallId: 'generated-stay', status: 'returned_true' }
+    ] })
+    let waitGoalCompletions = 0
+    const waitGoalRuntime = new CodexRuntime(waitGoalAgent, { makeSession: ({ execute }) => {
+      return { open: async () => {}, close: async () => {},
+        completeGoalAfterWait: async () => { waitGoalCompletions++; return true },
+        runTurn: async () => {
+          await execute('await skills.stay({seconds:30});')
+          return { messages: ['待機状態を一度報告しました'] }
+        } }
+    } })
+    waitGoalAgent.codexRuntime = waitGoalRuntime
+    assert.equal(await waitGoalRuntime.run('operator', () => true, 'standalone-wait-goal'), true)
+    assert.equal(waitGoalCompletions, 1)
+    assert.equal((await eventsFor('StandaloneWaitGoal')).filter(event => event.type === 'goal_wait_completed').length, 1)
+
+    // A stay embedded in a compound operation does not complete the task Goal.
+    const compoundStayAgent = makeAgent('CompoundStayGoal')
+    compoundStayAgent.actions.runAction = async () => ({ success: true, progressObserved: false, confirmedChanges: [], skillResults: [
+      { id: 'generated-compound', skill: 'generated_code', parentCallId: null, status: 'returned' },
+      { id: 'stay-compound', skill: 'skills.stay', parentCallId: 'generated-compound', status: 'returned_true' },
+      { id: 'observe-after-stay', skill: 'world.getPosition', parentCallId: 'generated-compound', status: 'returned' }
+    ] })
+    let compoundWaitCompletions = 0
+    const compoundStayRuntime = new CodexRuntime(compoundStayAgent, { makeSession: ({ execute }) => ({
+      open: async () => {}, close: async () => {},
+      completeGoalAfterWait: async () => { compoundWaitCompletions++; return true },
+      runTurn: async () => {
+        await execute('await skills.stay({seconds:30}); world.getPosition();')
+        return { messages: ['compound operation completed'] }
+      }
+    }) })
+    compoundStayAgent.codexRuntime = compoundStayRuntime
+    assert.equal(await compoundStayRuntime.run('operator', () => true, 'compound-stay-goal'), true)
+    assert.equal(compoundWaitCompletions, 0)
+    settings.codex_session = unlimitedSettings
+
     const taskBudgets = { ...settings.codex_session, task_budget_ms: 30, max_operations: 24, max_turns: 30 }
     settings.codex_session = taskBudgets
     // Elapsed limits cancel model waits and produce exactly one terminal.
