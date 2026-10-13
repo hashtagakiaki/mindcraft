@@ -75,19 +75,23 @@ export class Prompter {
         }
 
         
-        let embedding_model_profile = null;
-        if (this.profile.embedding) {
-            try {
-                embedding_model_profile = selectAPI(this.profile.embedding);
-            } catch (e) {
-                embedding_model_profile = null;
+        if (settings.agent_runtime === 'codex-session') {
+            this.embedding_model = null;
+        } else {
+            let embedding_model_profile = null;
+            if (this.profile.embedding) {
+                try {
+                    embedding_model_profile = selectAPI(this.profile.embedding);
+                } catch (e) {
+                    embedding_model_profile = null;
+                }
             }
-        }
-        if (embedding_model_profile) {
-            this.embedding_model = createModel(embedding_model_profile);
-        }
-        else {
-            this.embedding_model = createModel({api: chat_model_profile.api});
+            if (embedding_model_profile) {
+                this.embedding_model = createModel(embedding_model_profile);
+            }
+            else {
+                this.embedding_model = createModel({api: chat_model_profile.api});
+            }
         }
 
         this.skill_libary = new SkillLibrary(agent, this.embedding_model);
@@ -109,6 +113,7 @@ export class Prompter {
     }
 
     async initExamples() {
+        if (settings.agent_runtime === 'codex-session') return;
         try {
             this.convo_examples = new Examples(this.embedding_model, settings.num_examples);
             this.coding_examples = new Examples(this.embedding_model, settings.num_examples);
