@@ -311,6 +311,14 @@
         .footer-left { color: #cccccc; font-style: italic; }
         .agent.selectable { cursor: pointer; }
         .agent.selected { outline: 3px solid #66bb6a; outline-offset: -3px; }
+        .token-btn {
+            background: #505050;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            padding: 5px 8px;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
@@ -318,6 +326,7 @@
         <div class="title-left">
             <h1 style="margin: 0;">Mindcraft</h1>
             <span id="msStatus" class="status-badge offline">mindserver offline</span>
+            <button id="forgetManagementTokenBtn" class="token-btn" type="button" hidden>Forget saved token</button>
         </div>
         <div class="title-spacer"></div>
     </div>
@@ -393,7 +402,15 @@
     </div>
 
     <script>
-        let managementToken = '';
+        const managementTokenKey = `mindcraft.operator-token:${window.location.pathname}`;
+        function readSavedManagementToken() {
+            try { return window.localStorage.getItem(managementTokenKey) || ''; }
+            catch { return ''; }
+        }
+        function updateForgetTokenButton() {
+            document.getElementById('forgetManagementTokenBtn').hidden = !readSavedManagementToken();
+        }
+        let managementToken = readSavedManagementToken();
         const socket = io({ path: window.location.pathname + 'socket.io', autoConnect: false,
             auth: callback => callback(managementToken ? { token: managementToken } : {}) });
         const agentsDiv = document.getElementById('agents');
@@ -407,6 +424,12 @@
         let currentAgents = [];
 
         const statusEl = document.getElementById('msStatus');
+        const forgetManagementTokenBtn = document.getElementById('forgetManagementTokenBtn');
+        updateForgetTokenButton();
+        forgetManagementTokenBtn.addEventListener('click', () => {
+            try { window.localStorage.removeItem(managementTokenKey); } catch {}
+            updateForgetTokenButton();
+        });
         function renderBotOutput(record) {
             const entry = document.createElement('article');
             entry.className = 'bot-output-entry';
@@ -469,7 +492,12 @@
             updateStatus(false);
             if (error?.message?.includes('authentication')) {
                 const token = window.prompt('Enter the operator token from the private MindServer session file');
-                if (token) { managementToken = token.trim(); socket.auth = { token: managementToken }; socket.connect(); }
+                if (token?.trim()) {
+                    managementToken = token.trim();
+                    try { window.localStorage.setItem(managementTokenKey, managementToken); } catch {}
+                    updateForgetTokenButton();
+                    socket.connect();
+                }
             }
         });
         socket.connect();
