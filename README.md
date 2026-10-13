@@ -1,5 +1,15 @@
 <h1 align="center">🧠mindcraft⛏️</h1>
 
+## Change entrypoints
+
+| Change area | Main source | Focused existing check | Final check |
+|---|---|---|---|
+| Native session, thread and context | `src/process/codex_session.js`, `src/agent/codex_runtime.js` | `tests/codex_session.test.cjs` | `tests/run-tests.cjs` |
+| Public native SDK contract | `src/agent/library/native_sdk.js` | `tests/native_sdk.test.cjs` | `tests/run-tests.cjs` |
+| Mining, movement and placement | `src/agent/library/` | Matching existing fixture, such as `tests/block_interaction.test.cjs` or `tests/block_placement.test.cjs` | `tests/run-tests.cjs` |
+
+Run focused fixtures while iterating and the required suite once for final verification. The runner summarizes passing fixtures as `[ok]` and keeps failure detail. See [development instructions](AGENTS.md) for the Node 20 command and boundaries; this README's later sections describe contracts and historical evidence when relevant.
+
 ## Personal development fork
 
 Native gameplay instructions prioritize speed during authorized work, relying on SDK safety and confirmed action results to reduce repeated checks and observation-only round trips. The final outcome check remains required; the authoritative instructions are in [the bot AGENTS.md](src/process/codex/AGENTS.md).
@@ -188,7 +198,7 @@ Minecraft reconnect is reserved for an already lost connection, an old action/pr
 
 Mining sync corrects affected block-instance material data per bot so Mineflayer, Tool, and pathfinder use consistent pickaxe speeds without changing shared registries. It requires a reachable, current target; waits a bounded time for ground contact where applicable; and treats server block updates as authoritative for break completion. Collection requires both target-block air and a server `playerCollect` event for a tracked expected drop near that block. See [the investigation and implementation record](docs/mining-investigation-2026-09-30.md) for offline and isolated live results.
 
-To publish a source update, make the source change on `autonomy`, run the offline test command, and push the reviewed commit to this fork. Then update the eval manifest to that exact full SHA and run the eval tests and isolated live smoke against the pin. Review and commit/push the eval change after those checks, then prepare a new play bundle. Keep the eval dependency tree read-only; do not reinstall packages as part of a source-only update. Activate a bundle only through the explicitly authorized bot-only cutover, which leaves the Minecraft server, world, and Ollama process running.
+To publish a source update, make the source change on `autonomy`, run the offline test command, and push the reviewed commit to this fork. Then update the eval manifest to that exact full SHA and run the eval tests and isolated live smoke against the pin. Review and commit/push the eval change after those checks, then prepare a new play bundle. Keep the eval dependency tree read-only; do not reinstall packages as part of a source-only update. Bot-only activation follows the applicable project instructions. For changes originating in this parent project, its continuing instruction authorizes apply after the required checks and push; it preserves the Minecraft server, world and saved memory/thread, and keeps Ollama stopped while `codex-session` is selected.
 
 ### Group operator instructions
 
