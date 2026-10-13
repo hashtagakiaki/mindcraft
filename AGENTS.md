@@ -4,7 +4,7 @@
 
 - `hashtagakiaki/mindcraft` の `autonomy` branchが開発source。`origin` のみpushし、upstream `mindcraft-bots/mindcraft` はread-only。
 - upstream stable base `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`、履歴、`LICENSE` を保つ。`develop`へ切替・依存更新・upstream checkoutのコピーをしない。
-- 開発者向け入口はこのrepoの [`README.md`](README.md)。bot共通指示の正本は [`src/process/codex/AGENTS.md`](src/process/codex/AGENTS.md) で、開発用root `AGENTS.md` はbot bundleへコピーしない。
+- 開発者向け入口はこのrepoの [`README.md`](README.md)。bot共通指示の正本は [`src/process/codex/AGENTS.md`](src/process/codex/AGENTS.md) で、開発用root `AGENTS.md` はbot専用Codex cwdへコピーしない。
 
 ## よく使う確認
 
