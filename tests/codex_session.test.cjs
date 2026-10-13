@@ -1131,34 +1131,6 @@ for (let batch = 0; batch < 10; batch++) {
     repairAgent.codexRuntime = repairRuntime
     assert.equal(await repairRuntime.run('operator', () => true, 'distinct-repairs'), true)
 
-    // Fractional target and observed-position changes within one local area do not evade the navigation no-path guard.
-    const navigationRetryAgent = makeAgent('NavigationRetry')
-    let navigationAttempts = 0
-    navigationRetryAgent.actions.runAction = async () => {
-      navigationAttempts++
-      navigationRetryAgent.bot.entity.position.x = 70.1 + navigationAttempts * 0.2
-      return { success: false, message: 'Pathfinding stopped: No path to the goal', progressObserved: false,
-        skillResults: [
-          { id: `generated-${navigationAttempts}`, skill: 'generated_code', parentCallId: null, status: 'returned' },
-          { id: `position-${navigationAttempts}`, skill: 'skills.goToPosition', parentCallId: `generated-${navigationAttempts}`, status: 'returned_false' },
-          { id: `goal-${navigationAttempts}`, skill: 'skills.goToGoal', parentCallId: `position-${navigationAttempts}`, status: 'error', error: 'NoPath: No path to the goal' }
-        ] }
-    }
-    const navigationRetryRuntime = new CodexRuntime(navigationRetryAgent, { makeSession: ({ execute }) => {
-      let decision = 0
-      return { open: async () => {}, close: async () => {}, runTurn: async () => {
-        while (decision < 3) {
-          await execute(`await skills.goToPosition({position:{x:${70.5 + decision++ * 0.37},y:69,z:-287.5}});`)
-        }
-        await assert.rejects(execute('retry nearby route'), /Repeated no-path navigation failures/)
-        return { messages: ['reported navigation blocker'] }
-      } }
-    } })
-    navigationRetryAgent.codexRuntime = navigationRetryRuntime
-    assert.equal(await navigationRetryRuntime.run('operator', () => true, 'navigation-retry'), true)
-    assert.equal(navigationAttempts, 3, 'nearby no-path failures stop at the existing three-failure limit')
-    assert.equal((await eventsFor('NavigationRetry')).find(event => event.type === 'operation_retry_blocked').failureKind, 'navigation-no-path')
-
     // An isolated successful wait closes an active Goal while preserving one final report turn.
     settings.codex_session = { ...unlimitedSettings, goals: true }
     const waitGoalAgent = makeAgent('StandaloneWaitGoal')

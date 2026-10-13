@@ -15,11 +15,6 @@ const DEFAULTS = { stall_timeout_ms: 30000, action_timeout_ms: 600000, output_li
     execution_window_ms: NATIVE_EXECUTION_WINDOW_MS };
 const OPTIONAL_TASK_LIMITS = new Set(['task_budget_ms', 'max_operations', 'max_turns']);
 const MAX_UNCHANGED_OPERATION_FAILURES = 3;
-const NAVIGATION_RETRY_REGION_XZ = 8;
-const NAVIGATION_RETRY_REGION_Y = 4;
-const NAVIGATION_FAILURE_SKILLS = new Set(['skills.goToGoal', 'skills.goToPosition', 'skills.goToSurface',
-    'skills.goToNearestBlock', 'skills.goToNearestEntity', 'skills.goToPlayer', 'skills.reachPosition', 'skills.approachBlock']);
-const NO_PATH_ERROR = /(?:NoPath|no path|path search timed out|pathfinding stopped)/i;
 const MAX_NATIVE_INBOX_MESSAGES = 32;
 const MAX_NATIVE_DEDUPE_IDS = 256;
 const MAX_OPERATION_IMAGES = 4;
@@ -68,17 +63,6 @@ export function modelObservation({ items = [], equipment = [], ...state }) {
         ...(Number.isFinite(item.maxDurability) ? { maxDurability: item.maxDurability,
             remaining: Number.isFinite(item.durabilityUsed) ? item.maxDurability - item.durabilityUsed : null } : {}) });
     return { ...state, inventory, tools: tools.map(durability), equipment: equipment.map(durability) };
-}
-
-function navigationFailureKey(result, failures, observed) {
-    const navigationFailures = failures.filter(failure => NAVIGATION_FAILURE_SKILLS.has(failure.skill));
-    if (!navigationFailures.length || !NO_PATH_ERROR.test(String(result.message ?? '') + ' ' + navigationFailures.map(failure => failure.error ?? '').join(' '))) return null;
-    const position = observed.position;
-    const region = position && [position.x, position.y, position.z].every(Number.isFinite)
-        ? [Math.floor(position.x / NAVIGATION_RETRY_REGION_XZ), Math.floor(position.y / NAVIGATION_RETRY_REGION_Y), Math.floor(position.z / NAVIGATION_RETRY_REGION_XZ)]
-        : null;
-    return { family: 'navigation-no-path', dimension: observed.dimension ?? null, region,
-        items: observed.items ?? [], equipment: observed.equipment ?? [], inventoryUnconfirmed: !!observed.inventoryUnconfirmed };
 }
 
 function isStandaloneSuccessfulStay(result) {
@@ -220,7 +204,6 @@ export class CodexRuntime {
         let turnCount = 0;
         let budgetReason = null;
         let lastFailureKey = null;
-        let lastFailureKind = null;
         let unchangedFailures = 0;
         let completion = 'unknown';
         let saveSucceeded = null;
@@ -296,11 +279,8 @@ export class CodexRuntime {
         const execute = async code => {
             if (!current()) throw new Error('Stale task');
             if (unchangedFailures >= MAX_UNCHANGED_OPERATION_FAILURES) {
-                record('operation_retry_blocked', { unchangedFailures, failureKind: lastFailureKind });
-                const detail = lastFailureKind === 'navigation-no-path'
-                    ? 'Repeated no-path navigation failures in the same local area without observed progress; stop retrying and report the blocker or request a new route instruction.'
-                    : 'Repeated unchanged operation failure; inspect the blocker and provide a new instruction.';
-                throw new Error(detail);
+                record('operation_retry_blocked', { unchangedFailures });
+                throw new Error('Repeated unchanged operation failure; inspect the blocker and provide a new instruction.');
             }
             if (config.max_operations !== null && operationCount >= config.max_operations) {
                 reachBudget('accepted-operations');
@@ -323,21 +303,15 @@ export class CodexRuntime {
                 .map(call => ({ skill: call.skill, status: call.status, error: call.error }));
             if (result.progressObserved || result.confirmedChanges?.length) {
                 lastFailureKey = null;
-                lastFailureKind = null;
                 unchangedFailures = 0;
             } else if (result.success === false || result.domainReturn === false || failures.length) {
                 const state = observed.observed;
                 const { position, dimension, items, equipment, inventoryUnconfirmed } = state;
                 const error = result.error ?? result.message?.split('!!Code threw exception!!\n')[1]?.split('\n')[0];
-                const navigationKey = navigationFailureKey(result, failures, state);
-                const failure = navigationKey
-                    ? { kind: navigationKey.family, key: navigationKey }
-                    : { kind: 'operation', key: { code: code.trim(), error, reason: result.reason, failures,
-                        position, dimension, items, equipment, inventoryUnconfirmed } };
-                const key = createHash('sha256').update(JSON.stringify(failure.key)).digest('hex');
+                const key = createHash('sha256').update(JSON.stringify({ code: code.trim(), error,
+                    reason: result.reason, failures, position, dimension, items, equipment, inventoryUnconfirmed })).digest('hex');
                 unchangedFailures = key === lastFailureKey ? unchangedFailures + 1 : 1;
                 lastFailureKey = key;
-                lastFailureKind = failure.kind;
             }
             if (config.goals && isStandaloneSuccessfulStay(result) && await this.session?.completeGoalAfterWait?.()) {
                 record('goal_wait_completed', { reason: 'standalone-stay' });
