@@ -8,7 +8,17 @@
 | Public native SDK contract | `src/agent/library/native_sdk.js` | `tests/native_sdk.test.cjs` | `tests/run-tests.cjs` |
 | Mining, movement and placement | `src/agent/library/` | Matching existing fixture, such as `tests/block_interaction.test.cjs` or `tests/block_placement.test.cjs` | `tests/run-tests.cjs` |
 
-Run focused fixtures while iterating and the required suite once for final verification. The runner summarizes passing fixtures as `[ok]` and keeps failure detail. See [development instructions](AGENTS.md) for the Node 20 command and boundaries; this README's later sections describe contracts and historical evidence when relevant.
+From the `mindcraft/` repository root, set the existing Node 20 binary once in the current shell, then copy the relevant fixture command:
+
+```sh
+MINDCRAFT_NODE=/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node
+"$MINDCRAFT_NODE" tests/codex_session.test.cjs
+"$MINDCRAFT_NODE" tests/native_sdk.test.cjs
+"$MINDCRAFT_NODE" tests/block_interaction.test.cjs
+"$MINDCRAFT_NODE" tests/block_placement.test.cjs
+```
+
+Run focused fixtures while iterating and the required suite once for final verification. The runner summarizes passing fixtures as `[ok]` and keeps failure detail. See [development instructions](AGENTS.md) for command boundaries; this README's later sections describe contracts and historical evidence when relevant.
 
 ## Personal development fork
 
