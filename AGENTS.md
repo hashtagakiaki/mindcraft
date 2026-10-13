@@ -4,7 +4,7 @@
 
 - `hashtagakiaki/mindcraft` の `autonomy` branchが開発source。`origin` のみpushし、upstream `mindcraft-bots/mindcraft` はread-only。
 - upstream stable base `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`、履歴、`LICENSE` を保つ。`develop`へ切替・依存更新・upstream checkoutのコピーをしない。
-- 開発者向け入口はこのrepoの [`README.md`](README.md)。botへの指示の正本は [`src/process/codex/AGENTS.md`](src/process/codex/AGENTS.md)。今回の開発文書整理でも後者を変更しない。
+- 開発者向け入口はこのrepoの [`README.md`](README.md)。bot共通指示の正本は [`src/process/codex/AGENTS.md`](src/process/codex/AGENTS.md) で、開発用root `AGENTS.md` はbot bundleへコピーしない。
 
 ## よく使う確認
 
@@ -22,7 +22,7 @@ Runnerはdisposable fixtureを使いMinecraft serverを起動しない。fixture
 ## パスと保護境界
 
 - sourceはこのrepo。`../mindcraft-eval/` はbenchmarkとread-only第三者入力、`../mindcraft-tools/` はplay運用code/tests、`../play/` は稼働設定・保存dataのowner。
-- OAuth、keys、`.env`、profiles、logs、conversation、memory、world、server jar、runtime module、生成resultを読取・追加・stageしない。`mindcraft-eval/runtime/upstream/codex-oauth.json` は開かない。
+- OAuth credentials、keys、`.env` は読取・コピーしない。`mindcraft-eval/runtime/upstream/codex-oauth.json` も開かない。既存profiles、bot logs/conversations/memory、worlds、server jars、runtime modules、生成resultsは必要ならread-onlyで調査できるが、Gitへ追加・stageしない。
 - `runtime/upstream/` のdependency/jar/EULAとuser world template/saveはread-only。fixture/live smokeでtemplateを生成・変更しない。
 - 通常確認では稼働play server `40973`、UI `8098`、tmux、4 bots、Ollamaを操作せず、play起動scriptをtestで実行しない。isolated Minecraft確認はCaseServerのloopback `25569`/`25570`のみ。`25566`は禁止。production/system serviceも変更しない。
 - PlaceStore scopeはroot `settings.js` の `place_state_dir` と `place_world_id` に限る。絶対pathとUUIDを両方設定するか両方null。Protected MindServerのsessionはprivate 0700 dir/0600 file、tokenを保存・複製せず、crash後のfileは再利用しない。PlaceStore lockはwriter不在を確認せず削除しない。
