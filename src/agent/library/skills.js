@@ -2532,20 +2532,34 @@ export async function reachPosition(bot, options = {}) {
             if (pathResult.status === 'unavailable') { status = 'blocked'; reason = 'Bounded path search is unavailable.'; break; }
             const path = Array.isArray(pathResult.path) ? pathResult.path : [];
             const endpoint = path.at(-1);
+            const searchDiagnostic = {
+                segment, start: { x: start.x, y: start.y, z: start.z },
+                searchStatus: pathResult.status, pathNodeCount: path.length,
+                path: path.slice(0, 128).map(node => ({ x: node.x, y: node.y, z: node.z })),
+                omittedPathNodeCount: Math.max(0, path.length - 128),
+                endpoint: endpoint ? { x: endpoint.x, y: endpoint.y, z: endpoint.z } : null,
+            };
             if (!endpoint || endpoint.x === start.x && endpoint.y === start.y && endpoint.z === start.z) {
-                if (reachPositionHasUnknownNeighbor(bot, bot.entity.position)) {
+                const unknownNeighbor = reachPositionHasUnknownNeighbor(bot, bot.entity.position);
+                searchDiagnostic.unknownNeighbor = unknownNeighbor;
+                if (unknownNeighbor) {
                     if (++chunkWaitCount > REACH_POSITION_MAX_SEGMENTS) { status = 'stalled'; reason = 'Chunk loading retry limit reached.'; break; }
                     const loaded = await waitForReachPositionChunk(bot, context, REACH_POSITION_CHUNK_WAIT_MS);
+                    searchDiagnostic.chunkWaitOutcome = loaded ? 'chunk_loaded' : 'deadline';
                     active();
+                    log(bot, `[reachPosition-route] ${JSON.stringify(searchDiagnostic)}`);
                     if (loaded) continue;
                     status = 'blocked'; reason = 'No newly loaded safe route segment appeared before the chunk wait deadline.'; break;
                 }
+                log(bot, `[reachPosition-route] ${JSON.stringify(searchDiagnostic)}`);
                 status = 'blocked'; reason = `Path search ended ${pathResult.status} without a safe next segment.`; break;
             }
 
             const routeKey = `${start.x},${start.y},${start.z}>${endpoint.x},${endpoint.y},${endpoint.z}:${pathResult.status}`;
             const attempts = (routeAttempts.get(routeKey) ?? 0) + 1;
             routeAttempts.set(routeKey, attempts);
+            searchDiagnostic.attempt = attempts;
+            log(bot, `[reachPosition-route] ${JSON.stringify(searchDiagnostic)}`);
             if (attempts >= REACH_POSITION_NO_PROGRESS_LIMIT) {
                 status = 'stalled'; reason = 'The same route segment failed repeatedly without progress.'; break;
             }
@@ -3515,6 +3529,23 @@ function isAtSurfaceCandidate(bot, candidate, minY, maxY, movements) {
     return bot.entity.onGround === true && hasLoadedSurfaceNeighbor(bot, candidate, minY, maxY, movements);
 }
 
+function surfaceCandidateArrivalChecks(bot, candidate, minY, maxY, movements) {
+    const position = bot.entity.position;
+    const support = bot.blockAt(new Vec3(candidate.x, candidate.y - 1, candidate.z));
+    const feet = bot.blockAt(new Vec3(candidate.x, candidate.y, candidate.z));
+    const head = bot.blockAt(new Vec3(candidate.x, candidate.y + 1, candidate.z));
+    return {
+        candidate: { x: candidate.x, y: candidate.y, z: candidate.z },
+        sameColumn: Math.floor(position.x) === candidate.x && Math.floor(position.z) === candidate.z,
+        yWithinTolerance: Math.abs(position.y - candidate.y) <= SURFACE_ARRIVAL_Y_TOLERANCE,
+        fullCubeSupport: isFullCubeSurfaceSupport(support, movements),
+        clearFeetSpace: isClearStandingSpace(feet, movements),
+        clearHeadSpace: isClearStandingSpace(head, movements),
+        onGround: bot.entity.onGround === true,
+        connectedLoadedNeighbor: hasLoadedSurfaceNeighbor(bot, candidate, minY, maxY, movements),
+    };
+}
+
 export async function goToSurface(bot) {
     /**
      * Navigate to a loaded, safe surface within a small radius of the current position.
@@ -3557,8 +3588,9 @@ export async function goToSurface(bot) {
     requireActiveTarget(bot);
     const goal = new pf.goals.GoalCompositeAny(surfaceCandidates.map(candidate =>
         new pf.goals.GoalBlock(candidate.x, candidate.y, candidate.z)));
+    let moved = false;
     try {
-        const moved = await goToGoal(bot, goal, movements);
+        moved = await goToGoal(bot, goal, movements);
         requireActiveTarget(bot);
         if (moved && bot.entity.onGround !== true && typeof bot.waitForTicks === 'function') {
             await bot.waitForTicks(SURFACE_SETTLE_TICKS);
@@ -3569,10 +3601,24 @@ export async function goToSurface(bot) {
             return true;
         }
     } catch (error) {
-        if (!isActionCancelled(bot, context)) log(bot, `Surface navigation failed: ${error.message}.`);
+        if (!isActionCancelled(bot, context)) log(bot, `Surface navigation failed: ${error.message}. Diagnostic: ${JSON.stringify({
+            finalPosition: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
+            onGround: bot.entity.onGround === true, safeCandidateCount: surfaceCandidates.length,
+        })}`);
         return false;
     }
-    log(bot, 'Surface navigation ended without confirmed arrival at a safe surface.');
+    const nearestCandidate = surfaceCandidates
+        .map(candidate => ({
+            distance: Math.hypot(candidate.x + 0.5 - bot.entity.position.x,
+                candidate.y - bot.entity.position.y, candidate.z + 0.5 - bot.entity.position.z),
+            checks: surfaceCandidateArrivalChecks(bot, candidate, minY, minY + height, movements),
+        }))
+        .sort((a, b) => a.distance - b.distance)[0] ?? null;
+    log(bot, `Surface navigation ended without confirmed arrival at a safe surface. Diagnostic: ${JSON.stringify({
+        moved, finalPosition: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
+        onGround: bot.entity.onGround === true,
+        safeCandidateCount: surfaceCandidates.length, nearestCandidate,
+    })}`);
     return false;
 }
 

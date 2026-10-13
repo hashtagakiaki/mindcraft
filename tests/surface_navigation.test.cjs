@@ -101,6 +101,9 @@ async function main() {
     bot.fillSurface()
     bot.leavePosition = true
     assert.equal(await runSurface(bot), false, 'a settled path without actual arrival is not success')
+    assert.match(bot.output, /Surface navigation ended without confirmed arrival.*Diagnostic:/)
+    assert.match(bot.output, /"sameColumn":true/)
+    assert.match(bot.output, /"onGround":false/)
 
     bot = makeBot()
     bot.fillSurface()

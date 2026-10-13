@@ -212,6 +212,7 @@ async function main() {
     assert.equal(openResult.status, 'reached', JSON.stringify(openResult))
     assert.equal(openResult.ok, true)
     assert.deepEqual(openResult.edits, [])
+    assert.match(open.output, /\[reachPosition-route\].*"searchStatus":"success"/)
     assert.equal(open.pathfinder.movements, openMovements, 'original movements are restored')
 
     const serialized = makeBot({ navigationDelay: 50 })
@@ -229,6 +230,7 @@ async function main() {
     const blockedMovements = blocked.pathfinder.movements
     const blockedResult = await reachPosition(blocked, { position: { x: 6.5, y: 64, z: 0.5 } })
     assert.equal(blockedResult.status, 'blocked', JSON.stringify(blockedResult))
+    assert.match(blocked.output, /\[reachPosition-route\].*"searchStatus":/)
     assert.equal(blocked.testState.edits.length, 0, 'default permissions do not edit the wall')
     assert.equal(blocked.pathfinder.movements, blockedMovements)
 
