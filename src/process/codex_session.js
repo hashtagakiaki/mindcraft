@@ -9,6 +9,7 @@ import { authorizeAndStart, getCodexEnvironment } from '../models/codex.js';
 
 const REQUEST_TIMEOUT_MS = 120000;
 const BOT_SKILL_CATALOG_TOKEN_LIMIT = 1;
+const AUTO_COMPACT_TOKEN_LIMIT = 180000;
 const instructionsPath = new URL('./codex/AGENTS.md', import.meta.url);
 const helperPath = fileURLToPath(new URL('./owned_cli.js', import.meta.url));
 
@@ -35,6 +36,7 @@ export class CodexSession {
         await writeFile(path.join(this.cwd, 'AGENTS.md'), instructions + (this.catalog ? '\n' + this.catalog + '\n' : ''));
         if (signal?.aborted) throw new Error('Session cancelled');
         const args = ['app-server', '--strict-config', '--listen', 'stdio://', '--disable', 'shell_tool', '-c', 'web_search="disabled"',
+            '-c', `model_auto_compact_token_limit=${AUTO_COMPACT_TOKEN_LIMIT}`,
             '-c', 'features.code_mode.direct_only_tool_namespaces=["functions"]',
             '-c', 'features.apps=false', '-c', 'features.plugins=false', '-c', 'features.multi_agent=false',
             '-c', 'agents.enabled=false', '-c', 'cli_auth_credentials_store="file"',

@@ -486,6 +486,8 @@ native入力は既知の定型shutdown通知だけを除く。未送信のraw se
 
 world scope（root `place_world_id`）がある場合、同じbot/world/model/effort/SDK仕様のthreadをoperator request間で再開する。既存 `memory.json` の `codex_thread` にversion・thread ID・scope・ローカル履歴cursorを保存し、会話・画像と標準compactionはCodexのCODEX_HOME側が所有する。再開時は未送信のローカルcontext（最新依頼・recipient context・behavior logなど）だけを渡し、過去会話全量を再注入しない。bot/world/model/SDK・vision設定の不一致、history clear、再起動時の `load_memory: false` は新しいthreadにする。world scopeがない場合はtask限定のephemeral threadを使う。保存threadがCodex側にない場合は明示的なtask errorとなり、ゲーム操作は自動replayしない。
 
+Codex app-serverには `model_auto_compact_token_limit=180000` を指定し、モデル既定のしきい値より前に標準自動compactionを開始する。値はtoken使用量通知が示すcontext windowの範囲内で設定し、大きなtool結果が続く長時間threadでも上限まで余裕を保つ。
+
 native taskのvisionはJPEGをtool resultの `inputImage` として判断中のCodexへ直接返す。`allow_vision` と画像対応のnative modelが必要で、別の `vision_model` は不要。既存vision SDKの戻り値・`analysis` は画像添付markerと観測metadataになり、画像はモデルが解釈する。上限は1操作4枚、各2 MiB。失敗前に取得できた画像は部分結果として保持し、取消後の画像は次taskへ渡さない。Mindcraft JSONL/diagnosticsにはmetadataだけを残しbase64を入れない。legacyの画像解釈・自然言語memory要約は従来どおり。
 
 `codex_session` の既定値は、`execution_window_ms: 45000`、`stall_timeout_ms: 30000`、`action_timeout_ms: 600000`、`output_limit: 16000`、`max_search_radius: 64`、`task_budget_ms: null`、`max_operations: null`、`max_turns: null`。この3つだけは`null`で上限を無効化でき、既定では長時間taskを時間・操作・判断回数で打ち切らない。有限の上限を使う場合は正の数（操作・判断回数は整数）を設定する。各判断の残りbudgetも無制限は`null`を返す。
