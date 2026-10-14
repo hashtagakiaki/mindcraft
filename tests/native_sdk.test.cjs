@@ -100,6 +100,26 @@ async function main() {
   }
   assert.deepEqual(sdk.skills.putInChest({ itemName: 'oak_log', quantity: 2, chestPosition: input.position }), [botA, 'oak_log', 2, { chestPosition: input.position }])
   assert.deepEqual(sdk.skills.goToPlayer({ username: 'Steve' }), [botA, 'Steve', 3])
+  const policyCall = await sdk.skills.goToNearestBlock({ blockType: 'chest', navigation: { allowDig: true, scaffold: 'forbid' } })
+  assert.deepEqual(policyCall.result, [botA, 'chest', 2, 64])
+  assert.equal(policyCall.ok, true)
+  assert.deepEqual(policyCall.edits, [])
+  const craftPolicyCall = await sdk.skills.craftRecipe({ itemName: 'stick', navigation: { allowDig: true, scaffold: 'forbid' } })
+  assert.deepEqual(craftPolicyCall.result, [botA, 'stick', 1])
+  assert.equal(craftPolicyCall.ok, true, 'implicit movement skill receives an explicit policy without losing its work result')
+  invalid(sdk.skills.goToNearestBlock, [{ blockType: 'chest', navigation: { dig: true } }], 'navigation.dig')
+  invalid(sdk.skills.followPlayer, [{ username: 'Steve', navigation: { scaffold: 'temporary' } }], 'navigation.scaffold')
+  assert.deepEqual(sdk.skills.goToPosition({ position: input.position }), [botA, {
+    position: input.position, tolerance: 1, allowDig: false, scaffold: 'forbid',
+    scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false,
+  }])
+  assert.deepEqual(sdk.skills.goToPosition({ position: input.position, minDistance: 2, allowDig: true, scaffold: 'leave' }), [botA, {
+    position: input.position, tolerance: 2, allowDig: true, scaffold: 'leave',
+    scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false,
+  }])
+  invalid(sdk.skills.goToPosition, [{ position: input.position, tolerance: 0.5 }], 'tolerance')
+  invalid(sdk.skills.goToPosition, [{ position: input.position, scaffold: 'sometimes' }], 'scaffold')
+  invalid(sdk.skills.goToPosition, [{ position: input.position, scaffoldBlocks: ['stone'] }], 'scaffoldBlocks')
   assert.deepEqual(sdk.skills.reachPosition({ position: input.position }), [botA, {
     position: input.position, tolerance: 1, allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false,
   }])

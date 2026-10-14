@@ -22,6 +22,7 @@ async function setup(root) {
   await write(root, 'src/agent/library/block_interaction.js', await readFile(path.join(repo, 'src/agent/library/block_interaction.js')))
   await write(root, 'src/agent/library/block_placement.js', await readFile(path.join(repo, 'src/agent/library/block_placement.js')))
   await write(root, 'src/agent/library/operation_context.js', await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
+  await write(root, 'src/agent/library/navigation_policy.js', await readFile(path.join(repo, 'src/agent/library/navigation_policy.js')))
   await write(root, 'src/agent/library/world.js', `
 export function getNearestBlock(_bot, kind) { return kind === 'farmland' ? globalThis.farmFixture?.soil ?? null : globalThis.farmFixture?.nearestChest ?? null }
 export function getNearestBlocks(_bot, kind) { return kind === 'farmland' ? (globalThis.farmFixture?.soil ? [globalThis.farmFixture.soil] : []) : [] }

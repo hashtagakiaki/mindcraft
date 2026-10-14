@@ -28,7 +28,7 @@ async function setup(root) {
   await writeFile(path.join(root, 'settings.js'), 'export default { navigation_stall_timeout_ms: 300, navigation_check_interval_ms: 25 };')
   await mkdir(path.join(root, 'src/agent/library'), { recursive: true })
   await writeFile(path.join(root, 'src/agent/settings.js'), 'export default {};')
-  for(const name of ['block_interaction', 'mining_sync', 'skills', 'block_placement', 'crafting_sync', 'operation_context', 'world']) {
+  for(const name of ['block_interaction', 'mining_sync', 'skills', 'block_placement', 'crafting_sync', 'operation_context', 'navigation_policy', 'world']) {
     await writeFile(path.join(root, `src/agent/library/${name}.js`), await readFile(path.join(repo, `src/agent/library/${name}.js`)))
   }
   await mkdir(path.join(root, 'src/utils'), { recursive: true })

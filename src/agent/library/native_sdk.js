@@ -1,3 +1,5 @@
+import { normalizeNavigationPolicy, runWithNavigationPolicy } from './navigation_policy.js';
+
 // Native model-facing contracts. Internal/legacy SDKs retain their bot-first APIs.
 // No function-source or arity inference: each adapter states its argument mapping.
 const has = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
@@ -15,6 +17,8 @@ const optional = descriptor => Object.freeze({ ...descriptor, optional: true });
 const enumeration = (values, options = {}) => field('enum', { values, ...options });
 const quantity = options => field('quantity', options);
 const placeKinds = ['base', 'farm', 'storage', 'forest', 'village', 'mine', 'resource', 'other'];
+const navigationField = optional(field('navigationPolicy', { description: 'Route edits for implicit movement in this skill; defaults to no digging or scaffolding.' }));
+const navigationFields = Object.freeze({ navigation: navigationField });
 const farmFields = Object.freeze({
     scope: enumeration(['connected', 'radius'], { default: 'connected' }),
     searchRadius: optional(radius(undefined, { positive: true, description: 'Connected-plot search radius; effective default 32.' })),
@@ -36,7 +40,19 @@ function define(namespace, name, fields, description, args, options = {}) {
     definitions.push(Object.freeze({ namespace, name, fields: Object.freeze(fields), description, args,
         bindBot: namespace === 'skills' || namespace === 'world', ...options }));
 }
-const s = (name, fields, description, args, options) => define('skills', name, fields, description, args, options);
+const navigationSkills = new Set([
+    'craftRecipe', 'smeltItem', 'clearNearestFurnace', 'attackNearest', 'attackEntity', 'defendSelf', 'collectBlock', 'pickupNearbyItems',
+    'breakBlockAt', 'approachBlock', 'inspectChestAt', 'putInChest', 'takeFromChest', 'viewChest', 'giveToPlayer',
+    'goToGoal', 'goToNearestBlock', 'goToNearestEntity', 'goToPlayer', 'followPlayer', 'moveAway',
+    'moveAwayFromEntity', 'avoidEnemies', 'goToBed', 'useDoor', 'tillAndSow', 'activateNearestBlock',
+    'showVillagerTrades', 'tradeWithVillager', 'goToSurface', 'tendNearbyFarm', 'fellTree', 'placeBlock', 'useToolOn', 'useToolOnBlock',
+]);
+const s = (name, fields, description, args, options) => define('skills', name,
+    navigationSkills.has(name) ? { ...fields, ...navigationFields } : fields,
+    navigationSkills.has(name)
+        ? `${description} An optional navigation field applies route digging/scaffolding policy to this skill's implicit movement for the entire skill call; its work target remains governed by the skill's own contract. When supplied, the result is {ok,status,result,arrival,edits,cleanupRequired,reason}; temporary scaffolds are removed after the work finishes and any remaining position makes ok:false.`
+        : description,
+    args, { ...options, navigationPolicy: navigationSkills.has(name) });
 const w = (name, fields, description, args, options) => define('world', name, fields, description, args, options);
 const p = (name, fields, description, args, options) => define('places', name, fields, description, args, { bindBot: false, ...options });
 const coords = input => [input.position.x, input.position.y, input.position.z];
@@ -81,7 +97,25 @@ s('viewChest', {}, 'Read the nearest chest and log contents; close on success/fa
 s('consume', { itemName: field('stringValue', { default: '', description: 'Empty string selects available food.' }) }, 'Consume food or a potion. Returns boolean.', a => [a.itemName]);
 s('giveToPlayer', { itemName: text(), playerName: text(), quantity: positiveInt({ default: 1 }) }, 'Give quantity items to the visible player. Returns boolean.', a => [a.itemName, a.playerName, a.quantity]);
 s('goToGoal', { goal: field('goal'), movementOverride: optional(field('movements')) }, 'Navigate using an existing pathfinder Goal reference. Optional Movements reference disables destructive fallback. Returns boolean.', a => [a.goal, a.movementOverride ?? null]);
-s('goToPosition', { position: position(), minDistance: distance({ default: 2 }) }, 'Navigate to absolute position with the given arrival tolerance. In minecraft_execute, navigation never digs, places scaffolding or opens doors; the same policy covers implicit navigation inside other skills. A blocked route stops execution. Clear an obstruction with an explicit authorized edit in a later operation. Returns true on success.', a => [...coords(a), a.minDistance]);
+s('goToPosition', {
+    position: position(), tolerance: distance({ default: 1, max: 8 }),
+    allowDig: field('boolean', { default: false }),
+    scaffold: enumeration(['forbid', 'temporary', 'leave'], { default: 'forbid' }),
+    scaffoldBlocks: field('strings', { default: Object.freeze(['dirt', 'cobblestone']) }),
+    safeWater: field('boolean', { default: false }),
+    minDistance: optional(distance({ max: 8, description: 'Compatibility alias for tolerance; takes precedence when both fields are supplied.' })),
+}, 'Navigate to an absolute feet position with one explicit route-edit policy. allowDig defaults false. scaffold is forbid (default), temporary (owned scaffolds must be removed before success), or leave (owned scaffolds may remain). Arrival and cleanup are reported separately; only reached with ok:true is success. minDistance is a compatibility alias for tolerance and takes precedence when both are supplied. Legacy bot-first positional calls retain their boolean behavior.', a => [{
+    position: a.position, tolerance: a.minDistance ?? a.tolerance, allowDig: a.allowDig,
+    scaffold: a.scaffold, scaffoldBlocks: a.scaffoldBlocks, safeWater: a.safeWater,
+}], {
+    constraint: (a, fail) => {
+        const tolerance = a.minDistance ?? a.tolerance;
+        if (tolerance < 0.75) fail(has(a, 'minDistance') ? 'minDistance' : 'tolerance', 'between 0.75 and 8 blocks');
+        if (a.scaffold !== 'forbid' && a.scaffoldBlocks.length === 0) fail('scaffoldBlocks', 'a nonempty list when scaffolding is permitted');
+        for (const block of a.scaffoldBlocks) if (!['dirt', 'cobblestone'].includes(block)) fail('scaffoldBlocks', 'dirt and/or cobblestone');
+        if (new Set(a.scaffoldBlocks).size !== a.scaffoldBlocks.length) fail('scaffoldBlocks', 'unique block names');
+    },
+});
 s('reachPosition', {
     position: position(), tolerance: distance({ default: 1, max: 8, description: 'Minimum 0.75 blocks; maximum 8 blocks.' }),
     allowDig: field('boolean', { default: true }), allowScaffold: field('boolean', { default: true }),
@@ -204,6 +238,7 @@ function expected(descriptor, config) {
         block: 'an observed Block with name and Vec3 position', goal: 'a pathfinder Goal with isEnd() and heuristic()',
         movements: 'a Movements reference with blocksCantBreak Set', timestamp: 'an ISO timestamp',
         blockPredicate: 'a Block predicate function, block ID, or array of block IDs',
+        navigationPolicy: '{allowDig?:boolean, scaffold?:"forbid"|"temporary"|"leave", scaffoldBlocks?:["dirt","cobblestone"]}',
         staySeconds: 'finite nonnegative seconds or -1 until interrupted',
     };
     let result = descriptor.type === 'enum' ? descriptor.values.map(value => JSON.stringify(value)).join(' | ')
@@ -225,6 +260,7 @@ function sampleValue(descriptor, config) {
         case 'enum': return JSON.stringify(descriptor.values[0]);
         case 'position': return '{x:10,y:64,z:-3}';
         case 'positions': return '[]';
+        case 'navigationPolicy': return '{allowDig:false,scaffold:"forbid"}';
         case 'strings': return '["chest"]';
         case 'boolean': return 'true';
         case 'function': return 'entity => entity.name === "cow"';
@@ -273,6 +309,15 @@ function validateValue(value, descriptor, fieldName, fail, config) {
         case 'blockPredicate': valid = typeof value === 'function' || integer(value) && value >= 0 || Array.isArray(value) && value.every(id => integer(id) && id >= 0); break;
         case 'strings': valid = Array.isArray(value) && value.every(nonempty); break;
         case 'object': valid = objectLike(value); break;
+        case 'navigationPolicy': {
+            if (!objectLike(value)) return reject();
+            for (const key of Object.keys(value)) if (!['allowDig', 'scaffold', 'scaffoldBlocks'].includes(key)) fail(`${fieldName}.${key}`, 'a recognized navigation field (allowDig, scaffold, scaffoldBlocks)');
+            if (has(value, 'allowDig') && typeof value.allowDig !== 'boolean') fail(`${fieldName}.allowDig`, 'a boolean');
+            if (has(value, 'scaffold') && !['forbid', 'temporary', 'leave'].includes(value.scaffold)) fail(`${fieldName}.scaffold`, 'forbid, temporary, or leave');
+            if (has(value, 'scaffoldBlocks') && (!Array.isArray(value.scaffoldBlocks) || value.scaffoldBlocks.some(name => !['dirt', 'cobblestone'].includes(name)) || new Set(value.scaffoldBlocks).size !== value.scaffoldBlocks.length)) fail(`${fieldName}.scaffoldBlocks`, 'a unique list containing only dirt and/or cobblestone');
+            if ((value.scaffold ?? 'forbid') !== 'forbid' && (value.scaffoldBlocks ?? ['dirt', 'cobblestone']).length === 0) fail(`${fieldName}.scaffoldBlocks`, 'a nonempty list when scaffolding is permitted');
+            valid = true; break;
+        }
         case 'goal': valid = objectLike(value) && typeof value.isEnd === 'function' && typeof value.heuristic === 'function'; break;
         case 'movements': valid = objectLike(value) && typeof value.blocksCantBreak?.add === 'function'; break;
         case 'timestamp': valid = nonempty(value) && /^\d{4}-\d{2}-\d{2}T/.test(value) && Number.isFinite(Date.parse(value)); break;
@@ -313,9 +358,13 @@ function validateInput(definition, callArgs, config) {
             continue;
         }
         validateValue(value, descriptor, key, fail, config);
+        if (descriptor.type === 'navigationPolicy') value = normalizeNavigationPolicy(value);
         normalized[key] = value;
     }
     definition.constraint?.(normalized, fail);
+    if (normalized.navigation?.scaffold === 'temporary' && definition.name === 'followPlayer') {
+        fail('navigation.scaffold', 'forbid or leave for continuous follow');
+    }
     if (definition.name === 'tendNearbyFarm' || definition.name === 'tendFarm') {
         const radiusKey = normalized.scope === 'radius' ? 'radius' : 'searchRadius';
         if (!has(normalized, radiusKey)) normalized[radiusKey] = Math.min(32, searchLimit(config));
@@ -356,10 +405,13 @@ export function createNativeSdk(bindings, config = {}) {
             const input = validateInput(definition, callArgs, config);
             const internal = bindings[definition.namespace]?.[definition.name];
             if (typeof internal !== 'function') throw new Error(`${definition.namespace}.${definition.name} is unavailable in this runtime.`);
-            const args = definition.argsObject ? [definition.args(input)] : definition.args(input);
+            const navigation = definition.navigationPolicy ? input.navigation : null;
+            const forwarded = navigation ? Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'navigation')) : input;
+            const args = definition.argsObject ? [definition.args(forwarded)] : definition.args(forwarded);
             // Internal skills/places/vision already retain their ownership wrappers.
             // Preserve pure synchronous world results by never making this wrapper async.
-            return internal(...(definition.bindBot ? [bindings.bot, ...args] : args));
+            const invoke = () => internal(...(definition.bindBot ? [bindings.bot, ...args] : args));
+            return navigation ? runWithNavigationPolicy(bindings.bot, navigation, invoke) : invoke();
         };
     }
     return Object.freeze(Object.fromEntries(Object.entries(namespaces).map(([key, value]) => [key, Object.freeze(value)])));

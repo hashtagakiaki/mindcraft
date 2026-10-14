@@ -26,7 +26,7 @@ async function main() {
     for (const relative of [
       'src/agent/coder.js', 'src/agent/action_manager.js',
       'src/agent/library/operation_context.js', 'src/agent/library/lockdown.js',
-      'src/agent/library/skill_library.js', 'src/agent/library/sdk_capabilities.js', 'src/agent/library/native_sdk.js',
+      'src/agent/library/skill_library.js', 'src/agent/library/sdk_capabilities.js', 'src/agent/library/navigation_policy.js', 'src/agent/library/native_sdk.js',
       'src/agent/vision/vision_interpreter.js', 'src/agent/connection_handler.js',
       'src/agent/commands/actions.js', 'src/agent/commands/queries.js', 'src/agent/commands/index.js',
       'bots/execTemplate.js', 'bots/lintTemplate.js', 'eslint.config.js',

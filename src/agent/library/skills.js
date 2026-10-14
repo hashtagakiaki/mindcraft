@@ -8,6 +8,7 @@ import craftingSync from "./crafting_sync.js";
 import { placeBlockOriented } from './block_placement.js';
 import { resolveBlockInteraction, makeBlockInteractionGoal, interactionFaceVector, interactionEye } from './block_interaction.js';
 import { trackSkill, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, withSkillPhase, registerOwnedPromise, withNativeNavigationEditScope, nativeNavigationEditScopeActive } from './operation_context.js';
+import { navigationPolicy, recordNavigationArrival, registerNavigationCleanup, trackNavigationSegment } from './navigation_policy.js';
 
 const require = createRequire(import.meta.url);
 
@@ -53,6 +54,41 @@ const CROPS = {
     beetroots: { mature: 3, seed: 'beetroot_seeds', produce: ['beetroot'] },
 };
 
+registerNavigationCleanup(async (bot, context) => {
+    const remaining = [];
+    for (const scaffold of [...context.scaffolds].reverse()) {
+        if (isActionCancelled(bot, getActionContext(bot))) {
+            remaining.push({ ...scaffold.position, block: scaffold.block, reason: 'Action cancelled before owned scaffold cleanup.' });
+            continue;
+        }
+        const position = new Vec3(scaffold.position.x, scaffold.position.y, scaffold.position.z);
+        const block = bot.blockAt(position);
+        if (block?.type === 0) continue;
+        if (!block || block.name !== scaffold.block || scaffold.stateId != null && block.stateId !== scaffold.stateId) {
+            remaining.push({ ...scaffold.position, block: scaffold.block, reason: 'Owned scaffold state changed or became unknown.' });
+            continue;
+        }
+        const feet = bot.entity.position.floored();
+        if (bot.entity.onGround && feet.x === position.x && feet.z === position.z && feet.y - 1 === position.y) {
+            remaining.push({ ...scaffold.position, block: scaffold.block, reason: 'Scaffold supports the bot at its current position.' });
+            continue;
+        }
+        const interaction = resolveBlockInteraction(bot, block, { reach: 4.5 });
+        if (interaction.status !== 'ready') {
+            remaining.push({ ...scaffold.position, block: scaffold.block, reason: `Scaffold is not safely reachable: ${interaction.reason}.` });
+            continue;
+        }
+        try {
+            await registerOwnedPromise(bot.dig(block));
+            if (bot.blockAt(position)?.type !== 0) throw new Error('Server did not confirm scaffold removal.');
+            context.edits.push({ kind: 'scaffold_removed', block: scaffold.block, position: scaffold.position });
+        } catch (error) {
+            if (bot.blockAt(position)?.type !== 0) remaining.push({ ...scaffold.position, block: scaffold.block, reason: String(error.message ?? error) });
+        }
+    }
+    return remaining;
+});
+
 export function log(bot, message) {
     const owner = operationContext();
     if (owner?.closed) { owner.diagnostics.push({ kind: 'late_output', message: String(message) }); return; }
@@ -65,6 +101,23 @@ function getActionContext(bot, context) {
 
 function isActionCancelled(bot, context) {
     return !!bot.interrupt_code || !!context?.signal?.aborted;
+}
+
+function navigationMovements(bot, movementOverride = null) {
+    const supplied = movementOverride && typeof movementOverride === 'object' ? movementOverride : null;
+    if (nativeNavigationEditScopeActive()) return supplied ?? new pf.Movements(bot);
+    const explicitPolicy = navigationPolicy();
+    if (explicitPolicy || operationContext()?.nativeNavigationNoEdits && !nativeNavigationEditScopeActive()) {
+        const policy = explicitPolicy ?? { allowDig: false, scaffold: 'forbid', scaffoldBlocks: [] };
+        const scaffoldBlocks = policy.scaffold === 'forbid' ? [] : policy.scaffoldBlocks.filter(name =>
+            (bot.inventory?.items?.() ?? []).some(item => item.name === name && item.count > 0));
+        return Object.assign(new pf.Movements(bot), supplied ?? {}, {
+            canDig: policy.allowDig === true, canPlaceOn: scaffoldBlocks.length > 0,
+            allow1by1towers: scaffoldBlocks.length > 0,
+            allowFreeMotion: false, scafoldingBlocks: scaffoldBlocks, canOpenDoors: false,
+        });
+    }
+    return supplied ?? new pf.Movements(bot);
 }
 
 function countWindowItems(slots, start, end, itemName) {
@@ -929,15 +982,13 @@ export async function defendSelf(bot, range=9) {
         await equipHighestAttack(bot);
         if (bot.entity.position.distanceTo(enemy.position) >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
             try {
-                bot.pathfinder.setMovements(new pf.Movements(bot));
-                await bot.pathfinder.goto(new pf.goals.GoalFollow(enemy, 3.5), true);
+                await goToGoal(bot, new pf.goals.GoalFollow(enemy, 3.5));
             } catch (err) {/* might error if entity dies, ignore */}
         }
         if (bot.entity.position.distanceTo(enemy.position) <= 2) {
             try {
-                bot.pathfinder.setMovements(new pf.Movements(bot));
                 let inverted_goal = new pf.goals.GoalInvert(new pf.goals.GoalFollow(enemy, 2));
-                await bot.pathfinder.goto(inverted_goal, true);
+                await goToGoal(bot, inverted_goal);
             } catch (err) {/* might error if entity dies, ignore */}
         }
         bot.pvp.attack(enemy);
@@ -992,7 +1043,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
 
     let collected = 0;
 
-    const movements = new pf.Movements(bot);
+    const movements = navigationMovements(bot);
     movements.dontMineUnderFallingBlock = false;
     movements.dontCreateFlow = true;
 
@@ -1072,7 +1123,10 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                 }
             }
             else {
-                await bot.collectBlock.collect(block);
+                const collectionMovements = bot.collectBlock.movements;
+                if (collectionMovements) bot.collectBlock.movements = navigationMovements(bot, movements);
+                try { await trackNavigationSegment(bot, () => bot.collectBlock.collect(block), { workTarget: block.position }); }
+                finally { if (collectionMovements) bot.collectBlock.movements = collectionMovements; }
                 success = true;
             }
             if (success && !isLiquid) {
@@ -1120,7 +1174,7 @@ export async function pickupNearbyItems(bot) {
     let nearestItem = getNearestItem(bot);
     let pickedUp = 0;
     while (nearestItem) {
-        let movements = new pf.Movements(bot);
+        let movements = navigationMovements(bot);
         movements.canDig = false;
         bot.pathfinder.setMovements(movements);
         await goToGoal(bot, new pf.goals.GoalFollow(nearestItem, 1));
@@ -1383,14 +1437,13 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         // too close
         let goal = new pf.goals.GoalNear(targetBlock.position.x, targetBlock.position.y, targetBlock.position.z, 2);
         let inverted_goal = new pf.goals.GoalInvert(goal);
-        bot.pathfinder.setMovements(new pf.Movements(bot));
-        await bot.pathfinder.goto(inverted_goal);
+        await goToGoal(bot, inverted_goal);
     }
     if (bot.entity.position.distanceTo(targetBlock.position) > 4.5) {
         // too far
         let pos = targetBlock.position;
         let movements = new pf.Movements(bot);
-        bot.pathfinder.setMovements(movements);
+        bot.pathfinder.setMovements(navigationMovements(bot, movements));
         await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
     }
 
@@ -2040,17 +2093,13 @@ export async function goToGoal(bot, goal, movementOverride=null) {
 
     // Older callers passed a boolean in this previously unused position.
     if (typeof movementOverride !== 'object') movementOverride = null;
+    const callerRestrictedMovement = !!movementOverride;
+    const nativeNoEditNavigation = operationContext()?.nativeNavigationNoEdits === true && !nativeNavigationEditScopeActive();
 
-    // Native code uses explicit edits for changes; all navigation, including
-    // navigation inside other skills, stays free of digging and scaffolding.
-    if (operationContext()?.nativeNavigationNoEdits && !nativeNavigationEditScopeActive()) {
-        movementOverride = Object.assign(new pf.Movements(bot), movementOverride ?? {}, {
-            canDig: false, canPlaceOn: false, allow1by1towers: false,
-            allowFreeMotion: false, scafoldingBlocks: [], canOpenDoors: false,
-        });
-    }
-
-    const nonDestructiveMovements = movementOverride || new pf.Movements(bot);
+    // Native navigation (including implicit approaches in other skills) uses
+    // the same no-edit movement unless an owned explicit route edit is active.
+    movementOverride = navigationMovements(bot, movementOverride);
+    const nonDestructiveMovements = movementOverride;
     const dontBreakBlocks = ['glass', 'glass_pane'];
     for (let block of dontBreakBlocks) {
         nonDestructiveMovements.blocksCantBreak.add(mc.getBlockId(block));
@@ -2058,7 +2107,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     nonDestructiveMovements.placeCost = 2;
     nonDestructiveMovements.digCost = 10;
 
-    const destructiveMovements = movementOverride || new pf.Movements(bot);
+    const destructiveMovements = movementOverride;
 
     let final_movements = destructiveMovements;
 
@@ -2068,13 +2117,13 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         log(bot, `Found non-destructive path.`);
     }
     else if (await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout).status === 'success') {
-        log(bot, movementOverride ? 'Found a path with the requested movement restrictions.' : 'Found destructive path.');
+        log(bot, callerRestrictedMovement || nativeNoEditNavigation ? 'Found a path with the requested movement restrictions.' : 'Found destructive path.');
     }
     else {
-        log(bot, movementOverride ? 'Path search is incomplete; attempting navigation with the requested movement restrictions.' : 'Path not found, but attempting to navigate anyway using destructive movements.');
+        log(bot, callerRestrictedMovement || nativeNoEditNavigation ? 'Path search is incomplete; attempting navigation with the requested movement restrictions.' : 'Path not found, but attempting navigation anyway using destructive movements.');
     }
 
-    const doorCheckInterval = movementOverride ? null : startDoorInterval(bot);
+    const doorCheckInterval = callerRestrictedMovement || nativeNoEditNavigation ? null : startDoorInterval(bot);
 
     bot.pathfinder.setMovements(final_movements);
     const owner = operationContext();
@@ -2130,7 +2179,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         bot.on?.('path_update', onPathUpdate);
         bot.on?.('path_reset', onPathReset);
         setActionPhase(cancellation, 'navigation');
-        const navigation = bot.pathfinder.goto(goal);
+        const navigation = trackNavigationSegment(bot, () => bot.pathfinder.goto(goal));
         timeoutHandle = setInterval(() => {
             if (owner?.signal.aborted || owner?.closed) {
                 clearInterval(timeoutHandle);
@@ -2155,6 +2204,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             if (!stallError) { navigationError = true; throw err; }
         }
         if (stallError) throw stallError;
+        recordNavigationArrival(bot);
         return true;
     } catch (err) {
         // we need to catch so we can clean up the door check interval, then rethrow the error
@@ -2653,6 +2703,30 @@ export async function reachPositionWithScaffoldCleanup(bot, options = {}) {
     }, { requireScaffoldCleanup: true });
 }
 
+/**
+ * Unified native position navigation. Legacy positional goToPosition remains
+ * boolean-compatible; this public contract reports arrival and route cleanup
+ * separately and keeps temporary scaffolds as a success condition.
+ */
+async function navigateToPosition(bot, options = {}) {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+        return reachPositionResult('blocked', bot?.entity?.position ?? null, 'Options must be an object.');
+    }
+    const { scaffold = 'forbid', allowDig = false, scaffoldBlocks = ['dirt', 'cobblestone'] } = options;
+    if (!['forbid', 'temporary', 'leave'].includes(scaffold)) {
+        return reachPositionResult('blocked', bot?.entity?.position ?? null, 'Scaffold policy must be forbid, temporary, or leave.');
+    }
+    if (typeof allowDig !== 'boolean') {
+        return reachPositionResult('blocked', bot?.entity?.position ?? null, 'allowDig must be a boolean.');
+    }
+    return reachPositionCore(bot, {
+        ...options,
+        allowDig,
+        allowScaffold: scaffold !== 'forbid',
+        scaffoldBlocks,
+    }, { requireScaffoldCleanup: scaffold === 'temporary' });
+}
+
 export async function goToPosition(bot, x, y, z, min_distance=2) {
     /**
      * Navigate to the given position.
@@ -2666,6 +2740,7 @@ export async function goToPosition(bot, x, y, z, min_distance=2) {
      * let position = world.getNearestBlock(bot, "oak_log", 64).position;
      * await skills.goToPosition(bot, position.x, position.y, position.z + 20);
      **/
+    if (x && typeof x === 'object' && y === undefined && z === undefined) return navigateToPosition(bot, x);
     validateTargetCall(bot, x, y, z, 'skills.goToPosition(bot, x, y, z, min_distance = 2)');
     if (!Number.isFinite(min_distance) || min_distance < 0) throw new TypeError('skills.goToPosition(bot, x, y, z, min_distance = 2): min_distance must be finite and nonnegative.');
     if (bot.modes.isOn('cheat')) {
@@ -2818,14 +2893,15 @@ export async function followPlayer(bot, username, distance=4) {
     if (!player)
         return false;
 
-    const move = new pf.Movements(bot);
+    return trackNavigationSegment(bot, async () => {
+    const move = navigationMovements(bot);
     move.digCost = 10;
     bot.pathfinder.setMovements(move);
-    let doorCheckInterval = startDoorInterval(bot);
+    let doorCheckInterval = navigationPolicy() || operationContext()?.nativeNavigationNoEdits
+        ? null : startDoorInterval(bot);
 
     bot.pathfinder.setGoal(new pf.goals.GoalFollow(player, distance), true);
     log(bot, `You are now actively following player ${username}.`);
-
 
     while (!bot.interrupt_code) {
         await new Promise(resolve => setTimeout(resolve, 500));
@@ -2859,13 +2935,15 @@ export async function followPlayer(bot, username, distance=4) {
         }
         else {
             if (!doorCheckInterval) {
-                doorCheckInterval = startDoorInterval(bot);
+            doorCheckInterval = navigationPolicy() || operationContext()?.nativeNavigationNoEdits
+                ? null : startDoorInterval(bot);
             }
             bot.modes.unpause('elbow_room');
         }
     }
     clearInterval(doorCheckInterval);
     return true;
+    });
 }
 
 
@@ -2881,10 +2959,10 @@ export async function moveAway(bot, distance) {
     const pos = bot.entity.position;
     let goal = new pf.goals.GoalNear(pos.x, pos.y, pos.z, distance);
     let inverted_goal = new pf.goals.GoalInvert(goal);
-    bot.pathfinder.setMovements(new pf.Movements(bot));
+    bot.pathfinder.setMovements(navigationMovements(bot));
 
     if (bot.modes.isOn('cheat')) {
-        const move = new pf.Movements(bot);
+        const move = navigationMovements(bot);
         const path = await bot.pathfinder.getPathTo(move, inverted_goal, 10000);
         let last_move = path.path[path.path.length-1];
         if (last_move) {
@@ -2912,8 +2990,7 @@ export async function moveAwayFromEntity(bot, entity, distance=16) {
      **/
     let goal = new pf.goals.GoalFollow(entity, distance);
     let inverted_goal = new pf.goals.GoalInvert(goal);
-    bot.pathfinder.setMovements(new pf.Movements(bot));
-    await bot.pathfinder.goto(inverted_goal);
+    await goToGoal(bot, inverted_goal);
     return true;
 }
 
@@ -2927,11 +3004,12 @@ export async function avoidEnemies(bot, distance=16) {
      * await skills.avoidEnemies(bot, 8);
      **/
     bot.modes.pause('self_preservation'); // prevents damage-on-low-health from interrupting the bot
+    return trackNavigationSegment(bot, async () => {
     let enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), distance);
     while (enemy) {
         const follow = new pf.goals.GoalFollow(enemy, distance+1); // move a little further away
         const inverted_goal = new pf.goals.GoalInvert(follow);
-        bot.pathfinder.setMovements(new pf.Movements(bot));
+        bot.pathfinder.setMovements(navigationMovements(bot));
         bot.pathfinder.setGoal(inverted_goal, true);
         await new Promise(resolve => setTimeout(resolve, 500));
         enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), distance);
@@ -2945,6 +3023,7 @@ export async function avoidEnemies(bot, distance=16) {
     bot.pathfinder.stop();
     log(bot, `Moved ${distance} away from enemies.`);
     return true;
+    });
 }
 
 export async function stay(bot, seconds=30) {
@@ -3133,7 +3212,7 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
     // if distance is too far, move to the block
     if (bot.entity.position.distanceTo(block.position) > 4.5) {
         let pos = block.position;
-        bot.pathfinder.setMovements(new pf.Movements(bot));
+        bot.pathfinder.setMovements(navigationMovements(bot));
         await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
     }
     if (block.name !== 'farmland') {
@@ -3186,7 +3265,7 @@ export async function activateNearestBlock(bot, type) {
     }
     if (bot.entity.position.distanceTo(block.position) > 4.5) {
         let pos = block.position;
-        bot.pathfinder.setMovements(new pf.Movements(bot));
+        bot.pathfinder.setMovements(navigationMovements(bot));
         await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
     }
     await bot.activateBlock(block);

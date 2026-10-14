@@ -26,7 +26,7 @@ async function setup(root) {
   await write(root, 'package.json', '{"type":"module"}')
   await symlink(deps, path.join(root, 'node_modules'))
   await write(root, 'settings.js', 'export default { navigation_stall_timeout_ms: 500, navigation_check_interval_ms: 50 };')
-  for (const name of ['skills', 'block_placement', 'block_interaction', 'operation_context', 'crafting_sync']) {
+  for (const name of ['skills', 'block_placement', 'block_interaction', 'operation_context', 'navigation_policy', 'crafting_sync']) {
     await write(root, `src/agent/library/${name}.js`, await readFile(path.join(repo, `src/agent/library/${name}.js`)))
   }
   await write(root, 'src/utils/mcdata.js', 'export const getBlockId = () => 1;')

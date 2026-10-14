@@ -43,6 +43,7 @@ async function loadRuntime() {
     ['src/agent/library/block_interaction.js', 'src/agent/library/block_interaction.js'],
     ['src/agent/library/block_placement.js', 'src/agent/library/block_placement.js'],
     ['src/agent/library/operation_context.js', 'src/agent/library/operation_context.js'],
+    ['src/agent/library/navigation_policy.js', 'src/agent/library/navigation_policy.js'],
     ['src/agent/library/world.js', 'src/agent/library/world.js'],
     ['src/agent/library/crafting_sync.js', 'src/agent/library/crafting_sync.js'],
     ['src/agent/library/mining_sync.js', 'src/agent/library/mining_sync.js'],

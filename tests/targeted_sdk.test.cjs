@@ -50,7 +50,7 @@ export function mustCollectManually() { return false; }
   for (const relative of [
     'src/agent/library/skills.js', 'src/agent/library/block_interaction.js', 'src/agent/library/block_placement.js',
     'src/agent/library/crafting_sync.js', 'src/agent/library/mining_sync.js',
-    'src/agent/library/operation_context.js', 'src/agent/library/world.js',
+    'src/agent/library/operation_context.js', 'src/agent/library/navigation_policy.js', 'src/agent/library/world.js',
     'src/agent/library/index.js', 'src/agent/library/skill_library.js',
     'src/agent/library/sdk_capabilities.js', 'src/agent/library/lockdown.js', 'src/agent/library/native_sdk.js',
     'src/agent/commands/actions.js', 'src/agent/commands/queries.js',
@@ -90,6 +90,11 @@ function makeBot() {
   bot.lookAt=async point=>{state.lastAim=point}
   bot.pathfinder = { movements: { original: true },
     setMovements(m) { this.movements = m }, getPathTo: () => ({ status: 'success' }),
+    getPathFromTo(_movements, start) {
+      const result = state.route === 'unreachable' ? { status: 'noPath', path: [] }
+        : { status: 'success', path: [{ x: Math.floor(start.x), y: Math.floor(start.y), z: Math.floor(start.z) }, { x: 0, y: 64, z: 0 }] }
+      return (function* () { yield { result } })()
+    },
     async goto(goal) {
       state.moves.push({ goal, movements: this.movements })
       if (state.route === 'unreachable') throw new Error('No path to target')
@@ -286,16 +291,13 @@ async function main() {
     assert.equal(scans,2)
     assert.equal(world.getPosition(bot).x,bot.entity.position.x,'internal bot-first API still works')
     agent.places.sdk.verify=async()=>({ok:false,status:'missing'})
-    const observationFalse=await run('await Promise.resolve(); log(bot,JSON.stringify({entity:world.isEntityType({name:"dirt"})})); log(bot,JSON.stringify(await places.verify({placeId:"missing"}))); await skills.goToPosition({position:{x:0,y:64,z:0}});')
+    const movesBeforeAlreadyArrived=bot.state.moves.length
+    const observationFalse=await run('await Promise.resolve(); log(bot,JSON.stringify({entity:world.isEntityType({name:"dirt"})})); log(bot,JSON.stringify(await places.verify({placeId:"missing"}))); log(bot,JSON.stringify(await skills.goToPosition({position:{x:0,y:64,z:0}})));')
     assert.equal(observationFalse.success,true,'a false observation does not stop subsequent actions')
     assert.match(observationFalse.message,/"entity":false/)
-    const restricted=bot.state.moves.at(-1).movements
-    assert.equal(restricted.canDig,false)
-    assert.equal(restricted.canPlaceOn,false)
-    assert.equal(restricted.allow1by1towers,false)
-    assert.equal(restricted.canOpenDoors,false)
-    assert.deepEqual(restricted.scafoldingBlocks,[])
+    assert.equal(bot.state.moves.length,movesBeforeAlreadyArrived,'an already satisfied destination does not start pathfinding')
     bot.state.route='unreachable'
+    bot.entity.position = new Vec3(10.5,64,0.5)
     const blocked=await run('await skills.goToPosition({position:{x:0,y:64,z:0}}); await skills.breakBlockAt({position:{x:1,y:64,z:0}});')
     assert.equal(blocked.success,false)
     assert.equal(blocked.sdkFailure.method,'skills.goToPosition')
