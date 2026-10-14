@@ -67,7 +67,7 @@ function makeBot({ gap = [], wall = [], hazards = [], platform = false, corridor
   let placementMode = 'accept'
   let placementDelay = 0
   const paths = []
-  bot.testState = { edits, inventory, paths, get placementMode() { return placementMode }, set placementMode(value) { placementMode = value }, set placementDelay(value) { placementDelay = value } }
+  bot.testState = { edits, inventory, paths, equippedForBlocks: [], get placementMode() { return placementMode }, set placementMode(value) { placementMode = value }, set placementDelay(value) { placementDelay = value } }
   bot.registry = registry
   bot.version = '1.21.1'
   bot.output = ''
@@ -113,6 +113,7 @@ function makeBot({ gap = [], wall = [], hazards = [], platform = false, corridor
   bot.world.getBlock = blockAt
   bot.world.raycast = WorldSync.prototype.raycast
   bot.inventory = { slots: [], items: () => Object.entries(inventory).filter(([, count]) => count > 0).map(([name, count]) => ({ name, count, type: registry.itemsByName[name].id })) }
+  bot.tool = { equipForBlock: async block => { bot.testState.equippedForBlocks.push(block.name) } }
   bot.heldItem = null
   bot.equip = async item => { bot.heldItem = item }
   bot.setControlState = () => {}
@@ -228,10 +229,10 @@ async function main() {
     for (let z = -4; z <= 4; z++) for (const y of [64, 65]) wall.push({ x: 3, y, z, name: 'dirt' })
     const blocked = makeBot({ wall })
     const blockedMovements = blocked.pathfinder.movements
-    const blockedResult = await reachPosition(blocked, { position: { x: 6.5, y: 64, z: 0.5 } })
+    const blockedResult = await reachPosition(blocked, { position: { x: 6.5, y: 64, z: 0.5 }, allowDig: false, allowScaffold: false })
     assert.equal(blockedResult.status, 'blocked', JSON.stringify(blockedResult))
     assert.match(blocked.output, /\[reachPosition-route\].*"searchStatus":/)
-    assert.equal(blocked.testState.edits.length, 0, 'default permissions do not edit the wall')
+    assert.equal(blocked.testState.edits.length, 0, 'explicitly disabled edits leave the wall untouched')
     assert.equal(blocked.pathfinder.movements, blockedMovements)
 
     const mined = makeBot({ wall })
@@ -239,6 +240,12 @@ async function main() {
     assert.equal(minedResult.status, 'reached', JSON.stringify(minedResult))
     assert.ok(minedResult.edits.some(edit => edit.kind === 'dug'))
     assert.ok(mined.testState.edits.some(edit => edit.kind === 'server_dig'))
+    assert.ok(mined.testState.equippedForBlocks.length > 0, 'the suitable tool is equipped before route mining')
+
+    const defaultMined = makeBot({ wall })
+    const defaultMinedResult = await reachPosition(defaultMined, { position: { x: 6.5, y: 64, z: 0.5 } })
+    assert.equal(defaultMinedResult.status, 'reached', JSON.stringify(defaultMinedResult))
+    assert.ok(defaultMinedResult.edits.some(edit => edit.kind === 'dug'))
 
     const bridge = makeBot({ gap: [2, 3, 4], corridor: true })
     const bridgeResult = await reachPosition(bridge, {
@@ -250,6 +257,11 @@ async function main() {
     assert.ok(bridge.testState.edits.filter(edit => edit.kind === 'server_place').length >= 2)
     assert.equal(bridgeResult.cleanupRequired.length, 0)
     assert.equal(bridge.pathfinder.movements.original, true)
+
+    const defaultBridge = makeBot({ gap: [2, 3, 4], corridor: true })
+    const defaultBridgeResult = await reachPosition(defaultBridge, { position: { x: 6.5, y: 64, z: 0.5 } })
+    assert.equal(defaultBridgeResult.status, 'reached', JSON.stringify(defaultBridgeResult))
+    assert.ok(defaultBridgeResult.edits.some(edit => edit.kind === 'scaffold_placed'))
 
     const partialInventory = makeBot({ gap: [2, 3, 4], corridor: true })
     partialInventory.testState.inventory.cobblestone = 0
@@ -344,7 +356,7 @@ async function main() {
     assert.equal(noInventory.testState.edits.length, 0, 'missing scaffold materials fail before edits')
 
     const unsupportedDrop = makeBot({ gap: [2, 3, 4], corridor: true })
-    const dropResult = await reachPosition(unsupportedDrop, { position: { x: 6.5, y: 64, z: 0.5 } })
+    const dropResult = await reachPosition(unsupportedDrop, { position: { x: 6.5, y: 64, z: 0.5 }, allowDig: false, allowScaffold: false })
     assert.equal(dropResult.status, 'blocked', JSON.stringify(dropResult))
     assert.equal(unsupportedDrop.testState.edits.length, 0)
 
@@ -363,7 +375,7 @@ async function main() {
     const lava = makeBot({ corridor: true, hazards: [{ x: 2, y: 64, z: 0, name: 'lava' }] })
     const lavaBlocked = await reachPosition(lava, { position: { x: 6.5, y: 64, z: 0.5 }, allowDig: true, safeWater: true })
     assert.equal(lavaBlocked.status, 'blocked', JSON.stringify(lavaBlocked))
-    assert.equal(lava.testState.edits.length, 0)
+    assert.equal(lava.testState.edits.some(edit => edit.block === 'lava'), false, 'hazard blocks are never excavated')
 
     console.log('reachPosition real pathfinder movement/A* fixtures passed (open, mining, scaffolded routes, hazards, server confirmation, cancellation, chunk progression, native scope and restoration)')
   } finally {

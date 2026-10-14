@@ -84,15 +84,14 @@ s('goToGoal', { goal: field('goal'), movementOverride: optional(field('movements
 s('goToPosition', { position: position(), minDistance: distance({ default: 2 }) }, 'Navigate to absolute position with the given arrival tolerance. In minecraft_execute, navigation never digs, places scaffolding or opens doors; the same policy covers implicit navigation inside other skills. A blocked route stops execution. Clear an obstruction with an explicit authorized edit in a later operation. Returns true on success.', a => [...coords(a), a.minDistance]);
 s('reachPosition', {
     position: position(), tolerance: distance({ default: 1, max: 8, description: 'Minimum 0.75 blocks; maximum 8 blocks.' }),
-    allowDig: field('boolean', { default: false }), allowScaffold: field('boolean', { default: false }),
-    scaffoldBlocks: field('strings', { default: Object.freeze([]), description: 'When allowScaffold is true, choose from dirt and cobblestone actually in inventory.' }),
+    allowDig: field('boolean', { default: true }), allowScaffold: field('boolean', { default: true }),
+    scaffoldBlocks: field('strings', { default: Object.freeze(['dirt', 'cobblestone']), description: 'Allowed scaffold types; only types actually in inventory are used.' }),
     safeWater: field('boolean', { default: false }),
-}, 'Prioritize reaching an exact feet position using bounded replanning. Digging, scaffold placement, and water traversal each require explicit permission; scaffolds use only the listed dirt/cobblestone types and are cleaned up when safe. Returns {ok,status,finalPosition,reason,edits,cleanupRequired}; only reached is success, and every other status stops this execution.', a => a, {
+}, 'Reach an exact feet position using bounded replanning. By default, dig with the suitable equipped tool and scaffold with listed dirt/cobblestone types that are in inventory; pass allowDig:false and/or allowScaffold:false to prohibit those edits. Water traversal remains disabled unless safeWater:true. Scaffolds are cleaned up when safe. Returns {ok,status,finalPosition,reason,edits,cleanupRequired}; only reached is success, and every other status stops this execution.', a => a, {
     argsObject: true,
     constraint: (a, fail) => {
         if (a.tolerance < 0.75) fail('tolerance', 'between 0.75 and 8 blocks');
         if (a.allowScaffold && a.scaffoldBlocks.length === 0) fail('scaffoldBlocks', 'a nonempty list when allowScaffold is true');
-        if (!a.allowScaffold && a.scaffoldBlocks.length > 0) fail('scaffoldBlocks', 'omitted or empty unless allowScaffold is true');
         for (const block of a.scaffoldBlocks) if (!['dirt', 'cobblestone'].includes(block)) fail('scaffoldBlocks', 'dirt and/or cobblestone');
         if (new Set(a.scaffoldBlocks).size !== a.scaffoldBlocks.length) fail('scaffoldBlocks', 'unique block names');
     },

@@ -2382,7 +2382,7 @@ export async function reachPosition(bot, options = {}) {
      * @param {{position:{x:number,y:number,z:number}, tolerance?:number, allowDig?:boolean, allowScaffold?:boolean, scaffoldBlocks?:string[], safeWater?:boolean}} options
      * @returns {Promise<{ok:boolean,status:'reached'|'blocked'|'stalled'|'cancelled',finalPosition:{x:number,y:number,z:number}|null,reason:string,edits:Array,cleanupRequired:Array}>}
      * @example
-     * const result = await skills.reachPosition(bot, { position: {x: 10.5, y: 64, z: -3.5}, allowDig: true });
+     * const result = await skills.reachPosition(bot, { position: {x: 10.5, y: 64, z: -3.5} });
      **/
     const snapshotPosition = () => bot.entity?.position
         ? { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z } : null;
@@ -2390,14 +2390,13 @@ export async function reachPosition(bot, options = {}) {
     const cleanupRequired = [];
     const early = reason => reachPositionResult('blocked', snapshotPosition(), reason, edits, cleanupRequired);
     if (!bot?.entity?.position || !bot.pathfinder || !options || typeof options !== 'object' || Array.isArray(options)) return early('Bot, position, or pathfinder is unavailable.');
-    const { position, tolerance = 1, allowDig = false, allowScaffold = false, scaffoldBlocks = [], safeWater = false } = options;
+    const { position, tolerance = 1, allowDig = true, allowScaffold = true, scaffoldBlocks = ['dirt', 'cobblestone'], safeWater = false } = options;
     if (!position || ![position.x, position.y, position.z].every(Number.isFinite)) return early('Position must contain finite x, y, and z coordinates.');
     if (!Number.isFinite(tolerance) || tolerance < 0.75 || tolerance > 8) return early('Tolerance must be between 0.75 and 8 blocks.');
     if (![allowDig, allowScaffold, safeWater].every(value => typeof value === 'boolean')) return early('Edit and water permissions must be booleans.');
     if (!Array.isArray(scaffoldBlocks) || new Set(scaffoldBlocks).size !== scaffoldBlocks.length ||
-        scaffoldBlocks.some(name => !['dirt', 'cobblestone'].includes(name)) ||
-        (allowScaffold && scaffoldBlocks.length === 0) || (!allowScaffold && scaffoldBlocks.length > 0)) {
-        return early('Scaffold permission requires a unique, nonempty dirt/cobblestone allowlist; omit it when scaffolding is disabled.');
+        scaffoldBlocks.some(name => !['dirt', 'cobblestone'].includes(name)) || (allowScaffold && scaffoldBlocks.length === 0)) {
+        return early('Scaffolding requires a unique, nonempty dirt/cobblestone allowlist.');
     }
 
     const operation = operationContext();
@@ -2439,6 +2438,8 @@ export async function reachPosition(bot, options = {}) {
     const goal = reachPositionGoal(target, tolerance);
 
     const digWrapper = async function (block, ...args) {
+        active();
+        if (typeof bot.tool?.equipForBlock === 'function') await bot.tool.equipForBlock(block);
         active();
         const result = await registerOwnedPromise(originalDig.call(this, block, ...args));
         const observed = bot.blockAt(block.position);
