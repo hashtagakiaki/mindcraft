@@ -13,6 +13,7 @@ Node 20と既存read-only dependenciesを使う。install/ciやpackage postinsta
 | 目的 | コマンド |
 |---|---|
 | 必須offline regression suite | `/home/akito/.cache/mindcraft-play/node-npm-cache/_npx/337e068089ca04e3/node_modules/node-linux-x64/bin/node tests/run-tests.cjs` |
+| Shared CLI fast fixtures | `/home/akito/workspace/project/test-manager/bin/codex-test run --scope fast --project mindcraft` |
 | 関連fixtureを単独実行 | 同じNodeで `tests/<fixture>.test.cjs` |
 | Syntax | 同じNodeで `--check main.js` |
 | 差分 | `git diff --check`、`git status --short` |
