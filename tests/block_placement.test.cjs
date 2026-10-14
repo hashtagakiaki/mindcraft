@@ -10,6 +10,7 @@ const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { createRequire } = require('node:module')
 const { moduleRoot } = require('./dependency_root.cjs')
+const { withAcceleratedClock } = require('./accelerated_clock.cjs')
 const repo = path.resolve(__dirname, '..')
 const dependencies = moduleRoot()
 const requireDependency = createRequire(path.join(dependencies, 'package.json'))
@@ -307,7 +308,7 @@ async function main() {
     const timeoutWriter = bot._client.write
     bot.lookAt = async () => {}
     bot.look = async () => {}
-    assert.equal(await invoke(bot), false, 'untransmitted yaw/pitch cannot permit a placement packet')
+    assert.equal(await withAcceleratedClock(() => invoke(bot)), false, 'untransmitted yaw/pitch cannot permit a placement packet')
     assert.equal(bot.state.pluginCalls, 0)
     assert.equal(bot._client.write, timeoutWriter, 'physics writer restored after look timeout')
     assert.equal(bot.getControlState('sneak'), false)
@@ -362,7 +363,7 @@ async function main() {
     assert.ok(ownedResult.result.unconfirmedChanges.length)
 
     bot = makeBot({ cheat: true, update: 'absent' })
-    assert.equal(await invoke(bot), false, 'missing server updates time out')
+    assert.equal(await withAcceleratedClock(() => invoke(bot)), false, 'missing server updates time out')
     assert.equal(bot.listenerCount('blockUpdate'), 0)
     bot = makeBot({ update: 'absent' })
     const controller = new AbortController()

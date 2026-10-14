@@ -11,6 +11,7 @@ const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { createRequire } = require('node:module')
 const { moduleRoot } = require('./dependency_root.cjs')
+const { withAcceleratedClock } = require('./accelerated_clock.cjs')
 
 const root = path.resolve(__dirname, '..')
 const sharedNodeModules = moduleRoot()
@@ -269,7 +270,7 @@ async function main() {
 
   const silentFurnace = makeBot({ ore: 1, coal: 1, autoSmelt: false })
   const quietOperation = createOperationContext({ id: 'silent-smelt', controller: new AbortController() }, { bot: silentFurnace }, { intentEpoch: 1 }, 'smelt-task')
-  assert.equal(await runOwnedOperation(quietOperation, () => skills.smeltItem(silentFurnace, 'raw_iron', 1)), false,
+  assert.equal(await withAcceleratedClock(() => runOwnedOperation(quietOperation, () => skills.smeltItem(silentFurnace, 'raw_iron', 1))), false,
     'silence remains bounded by the existing quiet timeout')
   const quietWait = operationResult(quietOperation).skillResults[0].waits[0]
   assert.equal(quietWait.timeoutMs, 11_000)
