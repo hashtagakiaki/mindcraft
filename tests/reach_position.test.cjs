@@ -57,7 +57,9 @@ export function mustCollectManually() { return false; }
 `)
 }
 
-function makeBot({ gap = [], wall = [], hazards = [], platform = false, corridor = false, loadedMaxX = 16, rejectScaffoldRemoval = false, navigationDelay = 0 } = {}) {
+function makeBot({ gap = [], wall = [], hazards = [], unknown = [], solidBlocks = [], platform = false, corridor = false,
+  loadedMaxX = 16, floorY = 63, startY = floorY + 1, rejectScaffoldRemoval = false, navigationDelay = 0,
+  airborneArrival = false } = {}) {
   const bot = new EventEmitter()
   const world = new EventEmitter()
   const states = new Map()
@@ -66,30 +68,36 @@ function makeBot({ gap = [], wall = [], hazards = [], platform = false, corridor
   let loadedThroughX = loadedMaxX
   let placementMode = 'accept'
   let placementDelay = 0
+  let placementAttempts = 0
+  let pendingPlacementActions = 0
+  let pathAdvancedWhilePlacementPending = false
   const paths = []
-  bot.testState = { edits, inventory, paths, equippedForBlocks: [], get placementMode() { return placementMode }, set placementMode(value) { placementMode = value }, set placementDelay(value) { placementDelay = value } }
+  bot.testState = { edits, inventory, paths, equippedForBlocks: [], get placementMode() { return placementMode }, set placementMode(value) { placementMode = value }, set placementDelay(value) { placementDelay = value }, get placementAttempts() { return placementAttempts }, get pendingPlacementActions() { return pendingPlacementActions }, get pathAdvancedWhilePlacementPending() { return pathAdvancedWhilePlacementPending } }
   bot.registry = registry
   bot.version = '1.21.1'
   bot.output = ''
   bot.interrupt_code = false
-  bot.game = { minY: 60, height: 20, dimension: 'overworld', gameMode: 'survival' }
-  bot.entity = { id: 1, position: new Vec3(0.5, 64, 0.5), onGround: true, eyeHeight: 1.62, effects: {}, velocity: { x: 0, z: 0 } }
+  bot.game = { minY: 60, height: 60, dimension: 'overworld', gameMode: 'survival' }
+  bot.entity = { id: 1, position: new Vec3(0.5, startY, 0.5), onGround: true, eyeHeight: 1.62, effects: {}, velocity: { x: 0, z: 0 } }
   bot.entities = {}
   bot.world = world
   const loaded = (x, z) => x >= -8 && x <= loadedThroughX && z >= -4 && z <= 4
   bot.testState.loadThrough = x => { loadedThroughX = x; world.emit('chunkColumnLoad', new Vec3(x, 0, 0)) }
   const getName = p => {
     const cell = p.floored()
-    if (!loaded(cell.x, cell.z) || cell.y < 60 || cell.y > 76) return null
+    if (!loaded(cell.x, cell.z) || cell.y < 60 || cell.y > 110) return null
+    if (unknown.some(point => point.x === cell.x && point.y === cell.y && point.z === cell.z)) return null
     const explicit = states.get(key(cell))
     if (explicit) return explicit.name
     const hazard = hazards.find(point => point.x === cell.x && point.y === cell.y && point.z === cell.z)
     if (hazard) return hazard.name
-    if (corridor && cell.z !== 0 && (cell.y === 64 || cell.y === 65)) return 'stone'
-    if (platform && cell.x >= 4 && cell.x <= 10 && cell.y === 65) return 'stone'
-    if (gap.includes(cell.x) && cell.y <= 63) return 'air'
-    if (cell.y < 63) return 'stone'
-    if (cell.y === 63 && !gap.includes(cell.x)) return 'stone'
+    const solid = solidBlocks.find(point => point.x === cell.x && point.y === cell.y && point.z === cell.z)
+    if (solid) return solid.name ?? 'stone'
+    if (corridor && cell.z !== 0 && cell.y >= floorY + 1 && cell.y <= Math.max(floorY + 2, startY + 4)) return 'stone'
+    if (platform && cell.x >= 4 && cell.x <= 10 && cell.y === floorY + 2) return 'stone'
+    if (gap.includes(cell.x) && cell.y <= floorY) return 'air'
+    if (cell.y < floorY) return 'stone'
+    if (cell.y === floorY) return 'stone'
     const obstruction = wall.find(point => point.x === cell.x && point.y === cell.y && point.z === cell.z)
     if (obstruction) return obstruction.name ?? 'stone'
     return 'air'
@@ -116,9 +124,15 @@ function makeBot({ gap = [], wall = [], hazards = [], platform = false, corridor
   bot.tool = { equipForBlock: async block => { bot.testState.equippedForBlocks.push(block.name) } }
   bot.heldItem = null
   bot.equip = async item => { bot.heldItem = item }
-  bot.setControlState = () => {}
+  const controls = new Map()
+  bot.setControlState = (name, value) => {
+    controls.set(name, value)
+    if (name === 'jump' && value) setTimeout(() => {
+      if (controls.get('jump')) bot.entity.position = bot.entity.position.offset(0, 1.2, 0)
+    }, 30)
+  }
   bot.clearControlStates = () => {}
-  bot.getControlState = () => false
+  bot.getControlState = name => !!controls.get(name)
   bot.dig = async block => {
     const p = block.position.floored()
     const oldBlock = blockAt(p)
@@ -132,10 +146,64 @@ function makeBot({ gap = [], wall = [], hazards = [], platform = false, corridor
   }
   bot.placeBlock = async (support, face) => {
     const p = support.position.plus(face).floored()
+    placementAttempts++
     if (placementDelay) await delay(placementDelay)
     if (placementMode === 'reject') return
+    if (placementMode === 'no-ack') return
     const oldBlock = blockAt(p)
     if (oldBlock?.type !== 0) return
+    if (placementMode === 'late-confirm') {
+      return new Promise(resolve => {
+        let resolved = false
+        const resolveOnStaleAir = (_old, current) => {
+          if (current?.position && key(current.position) === key(p) && current.name === 'air' && !resolved) {
+            resolved = true
+            bot.removeListener('blockUpdate', resolveOnStaleAir)
+            resolve()
+          }
+        }
+        bot.on('blockUpdate', resolveOnStaleAir)
+        states.set(key(p), { name: 'stone' })
+        const predictedStone = blockAt(p)
+        states.set(key(p), { name: 'air' })
+        const staleAir = blockAt(p)
+        bot.emit('blockUpdate', predictedStone, staleAir)
+        bot.emit(`blockUpdate:${p}`, predictedStone, staleAir)
+        setTimeout(() => {
+          const stale = blockAt(p)
+          states.set(key(p), { name: bot.heldItem.name })
+          inventory[bot.heldItem.name]--
+          const confirmed = blockAt(p)
+          edits.push({ kind: 'server_place', block: bot.heldItem.name, position: { x: p.x, y: p.y, z: p.z } })
+          bot.emit('blockUpdate', stale, confirmed)
+          bot.emit(`blockUpdate:${p}`, stale, confirmed)
+        }, 80)
+      })
+    }
+    if (placementMode === 'late-confirm-delayed-reject') {
+      pendingPlacementActions++
+      return new Promise((_resolve, reject) => {
+        states.set(key(p), { name: 'stone' })
+        const predictedStone = blockAt(p)
+        states.set(key(p), { name: 'air' })
+        const staleAir = blockAt(p)
+        bot.emit('blockUpdate', predictedStone, staleAir)
+        bot.emit(`blockUpdate:${p}`, predictedStone, staleAir)
+        setTimeout(() => {
+          const stale = blockAt(p)
+          states.set(key(p), { name: bot.heldItem.name })
+          inventory[bot.heldItem.name]--
+          const confirmed = blockAt(p)
+          edits.push({ kind: 'server_place', block: bot.heldItem.name, position: { x: p.x, y: p.y, z: p.z } })
+          bot.emit('blockUpdate', stale, confirmed)
+          bot.emit(`blockUpdate:${p}`, stale, confirmed)
+          setTimeout(() => {
+            pendingPlacementActions--
+            reject(new Error('Place promise rejected after the authoritative block update.'))
+          }, 120)
+        }, 80)
+      })
+    }
     states.set(key(p), { name: bot.heldItem.name })
     inventory[bot.heldItem.name]--
     const newBlock = blockAt(p)
@@ -177,6 +245,7 @@ function makeBot({ gap = [], wall = [], hazards = [], platform = false, corridor
       if (result.status !== 'success') throw Object.assign(new Error(`No path to the goal (${result.status})`), { name: result.status === 'timeout' ? 'Timeout' : 'NoPath' })
       for (const node of result.path) {
         if (bot.interrupt_code) throw new Error('Action cancelled')
+        if (pendingPlacementActions > 0) pathAdvancedWhilePlacementPending = true
         for (const point of node.toBreak ?? []) {
           const block = blockAt(point)
           if (!block) throw new Error('Unknown block in dig route')
@@ -193,7 +262,12 @@ function makeBot({ gap = [], wall = [], hazards = [], platform = false, corridor
         }
         bot.entity.position = new Vec3(node.x + 0.5, node.y, node.z + 0.5)
       }
-      bot.entity.onGround = true
+      if (airborneArrival) {
+        bot.entity.position = bot.entity.position.offset(0, 0.25, 0)
+        bot.entity.onGround = false
+      } else {
+        bot.entity.onGround = true
+      }
       bot.emit('goal_reached', goal)
     },
   }
@@ -210,6 +284,8 @@ async function main() {
     const { createNativeSdk } = await import(pathToFileURL(path.join(root, 'src/agent/library/native_sdk.js')))
     const { registerNavigationCleanup } = await import(pathToFileURL(path.join(root, 'src/agent/library/navigation_policy.js')))
     const { runWithNavigationPolicy } = await import(pathToFileURL(path.join(root, 'src/agent/library/navigation_policy.js')))
+    const { placeAndConfirmNavigationScaffold } = await import(pathToFileURL(path.join(root, 'src/agent/library/navigation_policy.js')))
+    const { beginNavigationEdit, navigationScaffoldPlacementPending, withNavigationScaffoldTickGate } = await import(pathToFileURL(path.join(root, 'src/agent/library/navigation_policy.js')))
     const wall = []
     for (let z = -4; z <= 4; z++) for (const y of [64, 65]) wall.push({ x: 3, y, z, name: 'dirt' })
 
@@ -301,14 +377,14 @@ async function main() {
     assert.equal(blocked.pathfinder.movements, blockedMovements)
 
     const mined = makeBot({ wall })
-    const minedResult = await reachPosition(mined, { position: { x: 6.5, y: 64, z: 0.5 }, allowDig: true })
+    const minedResult = await reachPosition(mined, { position: { x: 6.5, y: 64, z: 0.5 }, allowDig: true, allowScaffold: false })
     assert.equal(minedResult.status, 'reached', JSON.stringify(minedResult))
     assert.ok(minedResult.edits.some(edit => edit.kind === 'dug'))
     assert.ok(mined.testState.edits.some(edit => edit.kind === 'server_dig'))
     assert.ok(mined.testState.equippedForBlocks.length > 0, 'the suitable tool is equipped before route mining')
 
     const defaultMined = makeBot({ wall })
-    const defaultMinedResult = await reachPosition(defaultMined, { position: { x: 6.5, y: 64, z: 0.5 } })
+    const defaultMinedResult = await reachPosition(defaultMined, { position: { x: 6.5, y: 64, z: 0.5 }, allowScaffold: false })
     assert.equal(defaultMinedResult.status, 'reached', JSON.stringify(defaultMinedResult))
     assert.ok(defaultMinedResult.edits.some(edit => edit.kind === 'dug'))
 
@@ -379,6 +455,40 @@ async function main() {
     assert.ok(climbed.cleanupRequired.length > 0, JSON.stringify(climbed))
     assert.match(climbed.reason, /optional cleanup/)
 
+    const threeBlockWall = []
+    for (const y of [81, 82, 83]) threeBlockWall.push({ x: 3, y, z: 0, name: 'dirt' })
+    const safeThreeBlockDrop = makeBot({ wall: threeBlockWall, corridor: true, floorY: 80, startY: 81 })
+    const safeThreeBlockDropResult = await reachPosition(safeThreeBlockDrop, {
+      position: { x: 6.5, y: 81, z: 0.5 }, allowDig: false, allowScaffold: true, scaffoldBlocks: ['dirt'],
+    })
+    assert.equal(safeThreeBlockDropResult.status, 'reached', JSON.stringify({ result: safeThreeBlockDropResult, paths: safeThreeBlockDrop.testState.paths }))
+    assert.ok(Math.abs(safeThreeBlockDrop.entity.position.y - 81) <= 1, JSON.stringify(safeThreeBlockDropResult))
+    assert.ok(safeThreeBlockDropResult.edits.some(edit => edit.kind === 'scaffold_placed'))
+    assert.ok(safeThreeBlockDropResult.cleanupRequired.length > 0, 'safe arrival remains distinct from unreachable optional scaffold cleanup')
+
+    const fourBlockDrop = makeBot({ corridor: true, floorY: 80, startY: 85,
+      solidBlocks: [0, 1, 2].map(x => ({ x, y: 84, z: 0, name: 'stone' })) })
+    const fourBlockDropResult = await reachPosition(fourBlockDrop, {
+      position: { x: 6.5, y: 81, z: 0.5 }, allowDig: false, allowScaffold: false,
+    })
+    assert.notEqual(fourBlockDropResult.status, 'reached', JSON.stringify(fourBlockDropResult))
+    assert.equal(fourBlockDrop.testState.edits.length, 0, 'four-block fall remains refused without route edits')
+
+    for (const [label, blockedCell, safeWater] of [
+      ['unknown', null, false], ['water', { x: 6, y: 80, z: 0, name: 'water' }, true],
+      ['lava', { x: 6, y: 80, z: 0, name: 'lava' }, true],
+      ['magma', { x: 6, y: 80, z: 0, name: 'magma_block' }, true],
+    ]) {
+      const options = { wall: threeBlockWall, corridor: true, floorY: 80, startY: 81, safeWater }
+      if (label === 'unknown') options.unknown = [{ x: 6, y: 80, z: 0 }]
+      else options.hazards = [blockedCell]
+      const blockedLanding = makeBot(options)
+      const blockedLandingResult = await reachPosition(blockedLanding, {
+        position: { x: 6.5, y: 81, z: 0.5 }, tolerance: 0.75, allowDig: false, allowScaffold: true, scaffoldBlocks: ['dirt'],
+      })
+      assert.notEqual(blockedLandingResult.status, 'reached', `${label}: ${JSON.stringify(blockedLandingResult)}`)
+    }
+
     const finalSupport = makeBot({ gap: [6], corridor: true })
     const supportedArrival = await reachPosition(finalSupport, {
       position: { x: 6.5, y: 64, z: 0.5 }, allowScaffold: true, scaffoldBlocks: ['dirt'],
@@ -388,6 +498,62 @@ async function main() {
     assert.ok(supportedArrival.cleanupRequired.length > 0, JSON.stringify(supportedArrival))
     assert.ok(supportedArrival.cleanupRequired.every(item => item.reason === 'Scaffold supports the bot at its current position.'), JSON.stringify(supportedArrival))
     assert.match(supportedArrival.reason, /optional cleanup/)
+
+    const makeRepeatedScaffoldBot = () => {
+      const bot = makeBot()
+      bot.entity.position = new Vec3(-1.5, 64, 0.5)
+      bot.pathfinder.getPathFromTo = function* () {
+        yield { result: { status: 'success', path: [{ x: 0, y: 64, z: 0 }] } }
+      }
+      bot.pathfinder.goto = async function (goal) {
+        this.goal = goal
+        const support = bot.blockAt(new Vec3(0, 63, 0))
+        const dirt = bot.inventory.items().find(item => item.name === 'dirt')
+        await bot.equip(dirt)
+        await bot.placeBlock(support, new Vec3(0, 1, 0))
+        await bot.dig(bot.blockAt(new Vec3(0, 64, 0)))
+        await bot.equip(dirt)
+        await bot.placeBlock(support, new Vec3(0, 1, 0))
+        bot.entity.position = new Vec3(0.5, 64.25, 0.5)
+        bot.entity.onGround = false
+        this.goal = null
+        return true
+      }
+      return bot
+    }
+    const repeatedScaffold = makeRepeatedScaffoldBot()
+    const repeatedScaffoldResult = await reachPosition(repeatedScaffold, {
+      position: { x: 0.5, y: 64, z: 0.5 }, allowScaffold: true, scaffoldBlocks: ['dirt'],
+    })
+    assert.equal(repeatedScaffoldResult.status, 'reached', JSON.stringify(repeatedScaffoldResult))
+    assert.equal(repeatedScaffoldResult.edits.filter(edit => edit.kind === 'scaffold_placed').length, 2,
+      'placement edit history retains both confirmed placements at one position')
+    assert.equal(repeatedScaffoldResult.cleanupRequired.filter(item => item.x === 0 && item.y === 64 && item.z === 0).length, 1,
+      `owned scaffold cleanup state is upserted by coordinate: ${JSON.stringify(repeatedScaffoldResult)}`)
+    const strictRepeatedScaffold = makeRepeatedScaffoldBot()
+    const strictRepeatedScaffoldResult = await skills.reachPositionWithScaffoldCleanup(strictRepeatedScaffold, {
+      position: { x: 0.5, y: 64, z: 0.5 }, scaffoldBlocks: ['dirt'],
+    })
+    assert.equal(strictRepeatedScaffoldResult.arrivalReached, true)
+    assert.equal(strictRepeatedScaffoldResult.status, 'blocked')
+    assert.equal(strictRepeatedScaffoldResult.cleanupRequired.filter(item => item.x === 0 && item.y === 64 && item.z === 0).length, 1)
+
+    const airborneSupport = makeBot({ gap: [2, 3, 4], corridor: true, airborneArrival: true })
+    const airborneSupportResult = await reachPosition(airborneSupport, {
+      position: { x: 4.5, y: 64, z: 0.5 }, allowScaffold: true, scaffoldBlocks: ['dirt'],
+    })
+    assert.equal(airborneSupportResult.status, 'reached', JSON.stringify(airborneSupportResult))
+    assert.equal(airborneSupport.entity.onGround, false)
+    assert.ok(airborneSupportResult.cleanupRequired.some(item => item.reason === 'Scaffold supports the bot at its current position.'), JSON.stringify(airborneSupportResult))
+    assert.equal(airborneSupport.blockAt(new Vec3(4, 63, 0)).name, 'dirt', 'cleanup leaves the airborne bot’s owned support block intact')
+
+    const strictAirborneSupport = makeBot({ gap: [2, 3, 4], corridor: true, airborneArrival: true })
+    const strictAirborneSupportResult = await skills.reachPositionWithScaffoldCleanup(strictAirborneSupport, {
+      position: { x: 4.5, y: 64, z: 0.5 }, scaffoldBlocks: ['dirt'],
+    })
+    assert.equal(strictAirborneSupportResult.arrivalReached, true, JSON.stringify(strictAirborneSupportResult))
+    assert.equal(strictAirborneSupportResult.status, 'blocked', JSON.stringify(strictAirborneSupportResult))
+    assert.ok(strictAirborneSupportResult.cleanupRequired.length > 0)
 
     const streaming = makeBot({ loadedMaxX: 16 })
     setTimeout(() => streaming.testState.loadThrough(32), 50)
@@ -437,6 +603,46 @@ async function main() {
     assert.ok(outerScaffoldResult.edits.some(edit => edit.kind === 'scaffold_placed'), JSON.stringify(outerScaffoldResult))
     assert.ok(outerScaffoldResult.edits.some(edit => edit.kind === 'scaffold_removed'))
     assert.equal(outerScaffoldResult.cleanupRequired.length, 0)
+
+    const earlyNoPathBot = makeBot()
+    earlyNoPathBot.testState.placementDelay = 80
+    const earlyNoPathResult = await runWithNavigationPolicy(earlyNoPathBot,
+      { allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt'] },
+      () => trackNavigationSegment(earlyNoPathBot, async () => {
+        await earlyNoPathBot.equip(earlyNoPathBot.inventory.items().find(item => item.name === 'dirt'))
+        void earlyNoPathBot.placeBlock(earlyNoPathBot.blockAt(new Vec3(1, 63, 0)), new Vec3(0, 1, 0))
+        throw new Error('Pathfinder returned NoPath before the pending scaffold call settled.')
+      }))
+    assert.equal(earlyNoPathResult.ok, false)
+    assert.match(earlyNoPathResult.result.error, /NoPath/)
+    assert.ok(earlyNoPathResult.edits.some(edit => edit.kind === 'scaffold_placed'), JSON.stringify(earlyNoPathResult))
+    assert.ok(earlyNoPathResult.edits.some(edit => edit.kind === 'scaffold_removed'), JSON.stringify(earlyNoPathResult))
+    assert.equal(earlyNoPathResult.cleanupRequired.length, 0, JSON.stringify(earlyNoPathResult))
+
+    const latePolicyBot = makeBot({ gap: [2, 3, 4], corridor: true })
+    latePolicyBot.testState.placementMode = 'late-confirm'
+    const latePolicyMovements = new pathfinder.Movements(latePolicyBot)
+    latePolicyMovements.allowParkour = false
+    latePolicyMovements.allowFreeMotion = false
+    const latePolicyResult = await runWithNavigationPolicy(latePolicyBot,
+      { allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt'] },
+      () => skills.goToGoal(latePolicyBot, new pathfinder.goals.GoalBlock(6, 64, 0), latePolicyMovements))
+    assert.equal(latePolicyResult.ok, true, JSON.stringify(latePolicyResult))
+    assert.ok(latePolicyResult.edits.some(edit => edit.kind === 'scaffold_placed'), JSON.stringify(latePolicyResult))
+    assert.ok(latePolicyResult.edits.some(edit => edit.kind === 'scaffold_removed'), JSON.stringify(latePolicyResult))
+    assert.equal(latePolicyResult.cleanupRequired.length, 0)
+
+    const noAckPolicyBot = makeBot({ gap: [2, 3, 4], corridor: true })
+    noAckPolicyBot.testState.placementMode = 'no-ack'
+    const noAckPolicyMovements = new pathfinder.Movements(noAckPolicyBot)
+    noAckPolicyMovements.allowParkour = false
+    noAckPolicyMovements.allowFreeMotion = false
+    const noAckPolicyResult = await runWithNavigationPolicy(noAckPolicyBot,
+      { allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt'] },
+      () => skills.goToGoal(noAckPolicyBot, new pathfinder.goals.GoalBlock(6, 64, 0), noAckPolicyMovements))
+    assert.equal(noAckPolicyResult.ok, false, JSON.stringify(noAckPolicyResult))
+    assert.ok(noAckPolicyResult.cleanupRequired.some(item => item.reason.includes('not server-confirmed')), JSON.stringify(noAckPolicyResult))
+    assert.equal(noAckPolicyResult.edits.some(edit => edit.kind === 'scaffold_placed'), false)
 
     const workTargetPolicyBot = makeBot({ wall: [{ x: 2, y: 64, z: 0, name: 'dirt' }] })
     const workTarget = { x: 2, y: 64, z: 0 }
@@ -488,6 +694,203 @@ async function main() {
     assert.equal(delayed.status, 'reached', JSON.stringify(delayed))
     assert.ok(delayed.edits.some(edit => edit.kind === 'scaffold_placed'))
 
+    const latePlacement = makeBot({ gap: [2, 3, 4], corridor: true })
+    latePlacement.testState.placementMode = 'late-confirm'
+    const lateConfirmed = await skills.reachPositionWithScaffoldCleanup(latePlacement, {
+      position: { x: 6.5, y: 64, z: 0.5 }, scaffoldBlocks: ['dirt'],
+    })
+    assert.equal(lateConfirmed.status, 'reached', JSON.stringify(lateConfirmed))
+    assert.ok(lateConfirmed.edits.some(edit => edit.kind === 'scaffold_placed'), JSON.stringify(lateConfirmed))
+    assert.ok(lateConfirmed.edits.some(edit => edit.kind === 'scaffold_removed'), JSON.stringify(lateConfirmed))
+    assert.equal(lateConfirmed.cleanupRequired.length, 0)
+
+    const confirmationBeforeReject = makeBot({ gap: [2, 3, 4], corridor: true })
+    confirmationBeforeReject.testState.placementMode = 'late-confirm-delayed-reject'
+    const confirmedBeforeRejectResult = await skills.reachPositionWithScaffoldCleanup(confirmationBeforeReject, {
+      position: { x: 6.5, y: 64, z: 0.5 }, scaffoldBlocks: ['dirt'],
+    })
+    assert.equal(confirmedBeforeRejectResult.status, 'reached', JSON.stringify(confirmedBeforeRejectResult))
+    assert.equal(confirmationBeforeReject.testState.pendingPlacementActions, 0, 'the raw place promise settles before the navigation caller resumes')
+    assert.equal(confirmationBeforeReject.testState.pathAdvancedWhilePlacementPending, false, 'pathfinder never advances while the raw place promise is pending')
+    assert.ok(confirmedBeforeRejectResult.edits.some(edit => edit.kind === 'scaffold_removed'))
+
+    const noAckPlacement = makeBot({ gap: [2, 3, 4], corridor: true })
+    noAckPlacement.testState.placementMode = 'no-ack'
+    const noAck = await skills.reachPositionWithScaffoldCleanup(noAckPlacement, {
+      position: { x: 6.5, y: 64, z: 0.5 }, scaffoldBlocks: ['dirt'],
+    })
+    assert.notEqual(noAck.status, 'reached', JSON.stringify(noAck))
+    assert.ok(noAck.cleanupRequired.some(item => item.reason.includes('not server-confirmed')), JSON.stringify(noAck))
+    assert.equal(noAck.cleanupRequired.filter(item => item.reason.includes('not server-confirmed')).length, 1)
+    assert.equal(noAckPlacement.testState.placementAttempts, 1, 'an unconfirmed placement stops further route edits and replans')
+    assert.equal(noAck.edits.some(edit => edit.kind === 'scaffold_placed'), false)
+
+    const serializedPlacement = makeBot()
+    serializedPlacement.entity.position = new Vec3(1.5, 64, 0.5)
+    const placementTrace = []
+    const firstSupport = serializedPlacement.blockAt(new Vec3(0, 63, 0))
+    const firstTarget = firstSupport.position.offset(0, 1, 0)
+    const secondTarget = firstTarget.offset(0, 1, 0)
+    serializedPlacement.heldItem = serializedPlacement.inventory.items().find(item => item.name === 'dirt')
+    const firstQueuedPlacement = placeAndConfirmNavigationScaffold(serializedPlacement, firstTarget, 'dirt', async () => {
+      placementTrace.push({ event: 'raw-start', target: key(firstTarget), reference: firstSupport.name })
+      setTimeout(() => serializedPlacement.placeBlock(firstSupport, new Vec3(0, 1, 0)), 60)
+      return 'raw-promise-settled-before-server-update'
+    })
+    const secondQueuedPlacement = placeAndConfirmNavigationScaffold(serializedPlacement, secondTarget, 'dirt', async () => {
+      const freshReference = serializedPlacement.blockAt(firstTarget)
+      placementTrace.push({ event: 'raw-start', target: key(secondTarget), reference: freshReference?.name })
+      assert.equal(freshReference?.name, 'dirt', 'a later placement starts only after the prior support is server-confirmed and is re-read')
+      return serializedPlacement.placeBlock(freshReference, new Vec3(0, 1, 0))
+    })
+    await Promise.all([firstQueuedPlacement, secondQueuedPlacement])
+    assert.deepEqual(placementTrace.map(entry => entry.event), ['raw-start', 'raw-start'])
+    assert.equal(placementTrace[1].reference, 'dirt')
+
+    const clearancePlacement = makeBot()
+    const clearanceSupport = clearancePlacement.blockAt(new Vec3(0, 63, 0))
+    const clearanceTarget = clearanceSupport.position.offset(0, 1, 0)
+    clearancePlacement.heldItem = clearancePlacement.inventory.items().find(item => item.name === 'dirt')
+    let pathfinderJumpResets = 0
+    clearancePlacement.on('physicsTick', () => {
+      pathfinderJumpResets++
+      clearancePlacement.setControlState('jump', false)
+    })
+    const resetJumpTimer = setTimeout(() => clearancePlacement.emit('physicsTick'), 10)
+    const clearedPlacement = await placeAndConfirmNavigationScaffold(clearancePlacement, clearanceTarget, 'dirt', async () => {
+      assert.ok(clearancePlacement.entity.position.y >= clearanceTarget.y + 1.1,
+        'a tower placement waits until the player clears the target block top')
+      assert.equal(clearancePlacement.getControlState('jump'), false, 'the helper restores the prior jump state after clearance')
+      return clearancePlacement.placeBlock(clearanceSupport, new Vec3(0, 1, 0))
+    })
+    clearTimeout(resetJumpTimer)
+    assert.equal(pathfinderJumpResets, 1, 'the fixture simulates pathfinder clearing jump on physicsTick')
+    assert.equal(clearedPlacement.block.name, 'dirt')
+
+    const cancelledQueuedPlacement = makeBot()
+    cancelledQueuedPlacement.entity.position = new Vec3(1.5, 64, 0.5)
+    const cancelSupport = cancelledQueuedPlacement.blockAt(new Vec3(0, 63, 0))
+    const cancelTarget = cancelSupport.position.offset(0, 1, 0)
+    cancelledQueuedPlacement.heldItem = cancelledQueuedPlacement.inventory.items().find(item => item.name === 'dirt')
+    let queuedRawStarts = 0
+    const firstCancelPlacement = placeAndConfirmNavigationScaffold(cancelledQueuedPlacement, cancelTarget, 'dirt', async () => {
+      setTimeout(() => cancelledQueuedPlacement.placeBlock(cancelSupport, new Vec3(0, 1, 0)), 60)
+      return true
+    })
+    const secondCancelPlacement = placeAndConfirmNavigationScaffold(cancelledQueuedPlacement, cancelTarget.offset(0, 1, 0), 'dirt', async () => {
+      queuedRawStarts++
+      return true
+    })
+    setTimeout(() => { cancelledQueuedPlacement.interrupt_code = true }, 10)
+    const cancellationOutcomes = await Promise.allSettled([firstCancelPlacement, secondCancelPlacement])
+    assert.equal(cancellationOutcomes[0].status, 'fulfilled')
+    assert.equal(cancellationOutcomes[1].status, 'rejected')
+    assert.equal(queuedRawStarts, 0, 'a queued placement rechecks cancellation before starting its raw edit')
+
+    const unknownQueuedPlacement = makeBot()
+    unknownQueuedPlacement.entity.position = new Vec3(1.5, 64, 0.5)
+    const unknownSupport = unknownQueuedPlacement.blockAt(new Vec3(0, 63, 0))
+    const unknownTarget = unknownSupport.position.offset(0, 1, 0)
+    let afterUnknownRawStarts = 0
+    const unconfirmedFirst = placeAndConfirmNavigationScaffold(unknownQueuedPlacement, unknownTarget, 'dirt', async () => true)
+    const afterUnknown = placeAndConfirmNavigationScaffold(unknownQueuedPlacement, unknownTarget.offset(0, 1, 0), 'dirt', async () => {
+      afterUnknownRawStarts++
+      return true
+    })
+    const unknownOutcomes = await Promise.allSettled([unconfirmedFirst, afterUnknown])
+    assert.equal(unknownOutcomes[0].status, 'rejected')
+    assert.equal(unknownOutcomes[1].status, 'rejected')
+    assert.equal(afterUnknownRawStarts, 0, 'an unconfirmed placement invalidates already-queued scaffold attempts')
+
+    const gatedPathfinderBot = makeBot()
+    gatedPathfinderBot.entity.position = new Vec3(2.5, 64, 0.5)
+    let pathfinderPhysicsTicks = 0
+    let worldPhysicsTicks = 0
+    const injectPlugin = plugin => setTimeout(() => plugin(gatedPathfinderBot, {}), 0)
+    injectPlugin((pluginBot, pluginOptions) => withNavigationScaffoldTickGate(pluginBot, () => {
+      assert.deepEqual(pluginOptions, {})
+      pluginBot.on('physicsTick', () => pathfinderPhysicsTicks++)
+    }))
+    await delay(5)
+    gatedPathfinderBot.on('physicsTick', () => worldPhysicsTicks++)
+    const gateSupport = gatedPathfinderBot.blockAt(new Vec3(0, 63, 0))
+    const gateTarget = gateSupport.position.offset(0, 1, 0)
+    gatedPathfinderBot.heldItem = gatedPathfinderBot.inventory.items().find(item => item.name === 'dirt')
+    const gatedPlacement = placeAndConfirmNavigationScaffold(gatedPathfinderBot, gateTarget, 'dirt', () => new Promise(resolve => {
+      setTimeout(async () => resolve(await gatedPathfinderBot.placeBlock(gateSupport, new Vec3(0, 1, 0))), 40)
+    }))
+    await delay(5)
+    assert.equal(navigationScaffoldPlacementPending(gatedPathfinderBot), true)
+    gatedPathfinderBot.emit('physicsTick')
+    assert.equal(pathfinderPhysicsTicks, 0, 'pathfinder physics listener is gated while a scaffold attempt is pending')
+    assert.equal(worldPhysicsTicks, 1, 'other physics listeners and Minecraft physics remain active')
+    await gatedPlacement
+    assert.equal(navigationScaffoldPlacementPending(gatedPathfinderBot), false)
+    gatedPathfinderBot.emit('physicsTick')
+    assert.equal(pathfinderPhysicsTicks, 1, 'pathfinder resumes after authoritative placement settlement')
+    assert.equal(worldPhysicsTicks, 2)
+
+    const pendingRouteEditBot = makeBot()
+    let pendingRoutePathfinderTicks = 0
+    let pendingRouteWorldTicks = 0
+    withNavigationScaffoldTickGate(pendingRouteEditBot, () => {
+      pendingRouteEditBot.on('physicsTick', () => pendingRoutePathfinderTicks++)
+    })
+    pendingRouteEditBot.on('physicsTick', () => pendingRouteWorldTicks++)
+    const releaseRouteEdit = beginNavigationEdit(pendingRouteEditBot)
+    pendingRouteEditBot.emit('physicsTick')
+    assert.equal(pendingRoutePathfinderTicks, 0, 'pathfinder route planning pauses while an owned route edit is unsettled')
+    assert.equal(pendingRouteWorldTicks, 1, 'route edit gating leaves Minecraft physics listeners active')
+    releaseRouteEdit()
+    pendingRouteEditBot.emit('physicsTick')
+    assert.equal(pendingRoutePathfinderTicks, 1, 'pathfinder resumes after the owned route edit settles')
+
+    const routeDigGateBot = makeBot()
+    let routeDigGateTicks = 0
+    withNavigationScaffoldTickGate(routeDigGateBot, () => routeDigGateBot.on('physicsTick', () => routeDigGateTicks++))
+    let settleRouteDig
+    routeDigGateBot.dig = () => new Promise(resolve => { settleRouteDig = resolve })
+    const routeDigPolicy = runWithNavigationPolicy(routeDigGateBot,
+      { allowDig: true, scaffold: 'forbid', scaffoldBlocks: ['dirt'] },
+      () => trackNavigationSegment(routeDigGateBot, () => routeDigGateBot.dig(routeDigGateBot.blockAt(new Vec3(2, 63, 0)))))
+    await delay(1)
+    routeDigGateBot.emit('physicsTick')
+    assert.equal(routeDigGateTicks, 0, 'an owned route dig suppresses competing pathfinder replans')
+    settleRouteDig()
+    await routeDigPolicy
+    routeDigGateBot.emit('physicsTick')
+    assert.equal(routeDigGateTicks, 1, 'pathfinder route planning resumes after route dig settlement')
+
+    const workDigGateBot = makeBot()
+    let workDigGateTicks = 0
+    withNavigationScaffoldTickGate(workDigGateBot, () => workDigGateBot.on('physicsTick', () => workDigGateTicks++))
+    let settleWorkDig
+    const workTargetBlock = workDigGateBot.blockAt(new Vec3(2, 63, 0))
+    workDigGateBot.dig = () => new Promise(resolve => { settleWorkDig = resolve })
+    const workDigPolicy = runWithNavigationPolicy(workDigGateBot,
+      { allowDig: false, scaffold: 'forbid', scaffoldBlocks: ['dirt'] },
+      () => trackNavigationSegment(workDigGateBot, () => workDigGateBot.dig(workTargetBlock), { workTarget: workTargetBlock.position }))
+    await delay(1)
+    workDigGateBot.emit('physicsTick')
+    assert.equal(workDigGateTicks, 1, 'a selected work-target dig keeps its separate non-route permission and does not gate navigation')
+    settleWorkDig()
+    await workDigPolicy
+
+    const cancelledLatePlacement = makeBot({ gap: [2, 3, 4], corridor: true })
+    cancelledLatePlacement.testState.placementMode = 'late-confirm'
+    const cancelledLatePromise = skills.reachPositionWithScaffoldCleanup(cancelledLatePlacement, {
+      position: { x: 6.5, y: 64, z: 0.5 }, scaffoldBlocks: ['dirt'],
+    })
+    await delay(20)
+    cancelledLatePlacement.interrupt_code = true
+    const cancelledLate = await cancelledLatePromise
+    assert.equal(cancelledLate.status, 'cancelled', JSON.stringify(cancelledLate))
+    assert.ok(cancelledLate.edits.some(edit => edit.kind === 'scaffold_placed'), JSON.stringify(cancelledLate))
+    assert.ok(cancelledLate.cleanupRequired.length > 0, JSON.stringify(cancelledLate))
+    const editCountAfterCancellation = cancelledLatePlacement.testState.edits.length
+    await delay(100)
+    assert.equal(cancelledLatePlacement.testState.edits.length, editCountAfterCancellation, 'no cleanup or new route edit starts after cancellation')
+
     const cancelledPlacement = makeBot({ gap: [2, 3, 4], corridor: true })
     cancelledPlacement.testState.placementDelay = 100
     const cancelPromise = reachPosition(cancelledPlacement, {
@@ -515,7 +918,8 @@ async function main() {
 
     const unsafeWater = makeBot({ corridor: true, hazards: [{ x: 2, y: 64, z: 0, name: 'water' }] })
     const waterBlocked = await reachPosition(unsafeWater, { position: { x: 6.5, y: 64, z: 0.5 } })
-    assert.notEqual(waterBlocked.status, 'reached', JSON.stringify(waterBlocked))
+    assert.equal(unsafeWater.testState.paths.flatMap(path => path.path ?? []).some(node => node.x === 2 && node.y === 64 && node.z === 0), false,
+      `safeWater:false does not enter the water cell: ${JSON.stringify(waterBlocked)}`)
     const shallowWater = makeBot({ corridor: true, hazards: [{ x: 2, y: 64, z: 0, name: 'water' }] })
     const waterCrossed = await reachPosition(shallowWater, { position: { x: 6.5, y: 64, z: 0.5 }, safeWater: true })
     assert.equal(waterCrossed.status, 'reached', JSON.stringify(waterCrossed))

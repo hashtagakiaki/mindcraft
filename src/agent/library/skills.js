@@ -8,7 +8,7 @@ import craftingSync from "./crafting_sync.js";
 import { placeBlockOriented } from './block_placement.js';
 import { resolveBlockInteraction, makeBlockInteractionGoal, interactionFaceVector, interactionEye } from './block_interaction.js';
 import { trackSkill, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, withSkillPhase, registerOwnedPromise, withNativeNavigationEditScope, nativeNavigationEditScopeActive } from './operation_context.js';
-import { navigationPolicy, recordNavigationArrival, registerNavigationCleanup, trackNavigationSegment } from './navigation_policy.js';
+import { awaitNavigationPlacementSettled, beginNavigationEdit, navigationPolicy, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, placeAndConfirmNavigationScaffold, recordNavigationArrival, registerNavigationCleanup, trackNavigationSegment } from './navigation_policy.js';
 
 const require = createRequire(import.meta.url);
 
@@ -36,6 +36,7 @@ const REACH_POSITION_SEARCH_TICK_MS = 60;
 const REACH_POSITION_SEARCH_STEPS = 12;
 const REACH_POSITION_CHUNK_WAIT_MS = 5_000;
 const REACH_POSITION_NO_PROGRESS_LIMIT = 3;
+const REACH_POSITION_MAX_SAFE_FEET_DROP = 3;
 const reachPositionMovementOwners = new WeakMap();
 const SURFACE_SEARCH_RADIUS = 6;
 const SURFACE_ARRIVAL_Y_TOLERANCE = 0.25;
@@ -54,6 +55,18 @@ const CROPS = {
     beetroots: { mature: 3, seed: 'beetroot_seeds', produce: ['beetroot'] },
 };
 
+function isOwnedScaffoldUnderBot(bot, position) {
+    const feet = bot.entity?.position;
+    return !!feet && Math.floor(feet.x) === position.x && Math.floor(feet.z) === position.z && position.y < feet.y;
+}
+
+function upsertOwnedScaffold(records, record) {
+    const index = records.findIndex(entry => entry.position.x === record.position.x
+        && entry.position.y === record.position.y && entry.position.z === record.position.z);
+    if (index >= 0) records.splice(index, 1);
+    records.push(record);
+}
+
 registerNavigationCleanup(async (bot, context) => {
     const remaining = [];
     for (const scaffold of [...context.scaffolds].reverse()) {
@@ -68,8 +81,7 @@ registerNavigationCleanup(async (bot, context) => {
             remaining.push({ ...scaffold.position, block: scaffold.block, reason: 'Owned scaffold state changed or became unknown.' });
             continue;
         }
-        const feet = bot.entity.position.floored();
-        if (bot.entity.onGround && feet.x === position.x && feet.z === position.z && feet.y - 1 === position.y) {
+        if (isOwnedScaffoldUnderBot(bot, position)) {
             remaining.push({ ...scaffold.position, block: scaffold.block, reason: 'Scaffold supports the bot at its current position.' });
             continue;
         }
@@ -2307,7 +2319,10 @@ function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safe
     movements.canOpenDoors = false;
     movements.allowFreeMotion = false;
     movements.allowParkour = false;
-    movements.maxDropDown = 1;
+    // Pathfinder measures the vertical distance to the support block, one
+    // block below the bot's feet. A support delta of four means a three-block
+    // fall in feet coordinates; its landing scan still rejects unknown/unsafe.
+    movements.maxDropDown = REACH_POSITION_MAX_SAFE_FEET_DROP + 1;
     movements.infiniteLiquidDropdownDistance = false;
 
     const avoidNames = [
@@ -2328,6 +2343,29 @@ function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safe
         const id = bot.registry.blocksByName[name]?.id;
         if (id != null) movements.blocksCantBreak.add(id);
     }
+    // The pathfinder's forward-step planner can treat a solid hazard as a
+    // valid support even when its id is in blocksToAvoid. Make that movement
+    // view unsafe so route nodes cannot bridge the default water/hazard fence.
+    const getMovementBlock = movements.getBlock.bind(movements);
+    movements.getBlock = (position, dx, dy, dz) => {
+        const block = getMovementBlock(position, dx, dy, dz);
+        if (avoidNames.includes(block.name)) {
+            block.safe = false;
+            block.physical = false;
+        }
+        return block;
+    };
+    const getLandingBlock = movements.getLandingBlock.bind(movements);
+    movements.getLandingBlock = (node, direction) => {
+        const landing = getLandingBlock(node, direction);
+        if (!landing || landing.liquid) return null;
+        const supportPosition = landing.position.offset(0, -1, 0);
+        const support = bot.blockAt(supportPosition);
+        if (!support || support.liquid || avoidNames.includes(support.name)) return null;
+        const safeSupport = movements.getBlock(supportPosition, 0, 0, 0);
+        if (!safeSupport.physical || safeSupport.liquid || avoidNames.includes(safeSupport.name)) return null;
+        return landing;
+    };
     // Never destroy gravity blocks while pathing; the pathfinder's default set
     // omits several blocks which can fall in current registries.
     for (const block of bot.registry.blocksArray ?? []) {
@@ -2473,9 +2511,18 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
     const context = operationContext();
     const originalDig = bot.dig;
     const originalPlaceBlock = bot.placeBlock;
+    const originalEquip = bot.equip;
     const originalMovements = bot.pathfinder.movements;
     const ownedMovements = new WeakSet();
     const scaffoldRecords = [];
+    const unconfirmedScaffolds = [];
+    const pendingNavigationEdits = new Set();
+    const ownNavigationEdit = (promise, releaseGate) => {
+        pendingNavigationEdits.add(promise);
+        registerOwnedPromise(promise);
+        promise.then(() => { pendingNavigationEdits.delete(promise); releaseGate(); }, () => { pendingNavigationEdits.delete(promise); releaseGate(); });
+        return promise;
+    };
     const movement = reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks: availableScaffoldBlocks, safeWater });
     ownedMovements.add(movement);
     reachPositionMovementOwners.set(bot.pathfinder, context ?? movement);
@@ -2492,44 +2539,88 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
     const routeAttempts = new Map();
     const finalDistance = () => bot.entity.position.distanceTo(target);
     const goal = reachPositionGoal(target, tolerance);
-
-    const digWrapper = async function (block, ...args) {
-        active();
-        if (typeof bot.tool?.equipForBlock === 'function') await bot.tool.equipForBlock(block);
-        active();
-        const result = await registerOwnedPromise(originalDig.call(this, block, ...args));
-        const observed = bot.blockAt(block.position);
-        if (!observed || observed.type !== 0) throw new Error(`Server did not confirm route excavation at ${block.position}.`);
-        const kind = editPhase === 'cleanup' ? 'scaffold_removed' : 'dug';
-        const change = { kind, block: block.name, position: { x: block.position.x, y: block.position.y, z: block.position.z } };
-        edits.push(change);
-        recordConfirmation({ quantity: 1, unit: 'block', target: { block: block.name, position: change.position },
-            evidence: 'Mineflayer dig promise resolved after server block update' });
-        active();
-        return result;
+    const drainNavigationEdits = async () => {
+        while (pendingNavigationEdits.size) await Promise.allSettled([...pendingNavigationEdits]);
     };
-    const placeWrapper = async function (reference, face, ...args) {
+
+    const digWrapper = function (block, ...args) {
+        const releaseGate = beginNavigationEdit(bot);
+        return ownNavigationEdit((async () => {
+            await awaitNavigationPlacementSettled(bot);
+            active();
+            if (unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
+            if (typeof bot.tool?.equipForBlock === 'function') await bot.tool.equipForBlock(block);
+            active();
+            if (unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
+            const result = await registerOwnedPromise(originalDig.call(this, block, ...args));
+            const observed = bot.blockAt(block.position);
+            if (!observed || observed.type !== 0) throw new Error(`Server did not confirm route excavation at ${block.position}.`);
+            const kind = editPhase === 'cleanup' ? 'scaffold_removed' : 'dug';
+            const change = { kind, block: block.name, position: { x: block.position.x, y: block.position.y, z: block.position.z } };
+            edits.push(change);
+            recordConfirmation({ quantity: 1, unit: 'block', target: { block: block.name, position: change.position },
+                evidence: 'Mineflayer dig promise resolved after server block update' });
+            active();
+            return result;
+        })(), releaseGate);
+    };
+    const equipWrapper = function (...args) {
+        const releaseGate = beginNavigationEdit(bot);
+        return ownNavigationEdit((async () => {
+            await awaitNavigationPlacementSettled(bot);
+            active();
+            if (unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
+            return originalEquip.call(this, ...args);
+        })(), releaseGate);
+    };
+    const placeWrapper = function (reference, face, ...args) {
+        const releaseGate = beginNavigationEdit(bot);
+        return ownNavigationEdit((async () => {
         active();
         const blockName = bot.heldItem?.name;
         if (!allowScaffold || !scaffoldBlocks.includes(blockName)) throw new Error(`Pathfinder attempted an unpermitted scaffold block: ${blockName ?? 'unknown'}.`);
         const targetPosition = reference.position.plus(face).floored();
-        const result = await registerOwnedPromise(originalPlaceBlock.call(this, reference, face, ...args));
-        const observed = bot.blockAt(targetPosition);
-        if (!observed || observed.name !== blockName) throw new Error(`Server did not confirm ${blockName} at ${targetPosition}.`);
+        let placement;
+        try {
+            placement = await placeAndConfirmNavigationScaffold(bot, targetPosition, blockName,
+                () => {
+                    try {
+                        active();
+                        if (unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
+                        const freshReference = bot.blockAt(reference.position);
+                        if (!freshReference || freshReference.type === 0) throw new Error('Scaffold support block is no longer available.');
+                        return registerOwnedPromise(originalPlaceBlock.call(this, freshReference, face, ...args));
+                    } catch (error) {
+                        if (error.navigationPlacementAttempted !== false) error.navigationPlacementAttempted = false;
+                        throw error;
+                    }
+                });
+        } catch (error) {
+            const position = { x: targetPosition.x, y: targetPosition.y, z: targetPosition.z };
+            if (error.navigationPlacementAttempted !== false && !unconfirmedScaffolds.some(entry => entry.position.x === position.x && entry.position.y === position.y && entry.position.z === position.z)) {
+                unconfirmedScaffolds.push({ position, block: blockName });
+                cleanupRequired.push({ ...position, block: blockName,
+                    reason: 'Scaffold placement was attempted but not server-confirmed; target state is unknown.' });
+            }
+            throw error;
+        }
+        const observed = placement.block;
         const positionRecord = { x: targetPosition.x, y: targetPosition.y, z: targetPosition.z };
         const record = { position: positionRecord, block: blockName, stateId: observed.stateId };
-        scaffoldRecords.push(record);
+        upsertOwnedScaffold(scaffoldRecords, record);
         const change = { kind: 'scaffold_placed', block: blockName, position: positionRecord };
         edits.push(change);
         recordConfirmation({ quantity: 1, unit: 'block', target: { block: blockName, position: positionRecord },
-            evidence: 'Mineflayer placement promise resolved after server block update' });
+            evidence: 'Expected server block update confirmed after Mineflayer placement promise' });
         active();
-        return result;
+        return placement.result;
+        })(), releaseGate);
     };
 
     const restoreWrappers = () => {
         if (bot.dig === digWrapper) bot.dig = originalDig;
         if (bot.placeBlock === placeWrapper) bot.placeBlock = originalPlaceBlock;
+        if (bot.equip === equipWrapper) bot.equip = originalEquip;
     };
     const cleanupScaffolds = async () => {
         editPhase = 'cleanup';
@@ -2542,8 +2633,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                 cleanupRequired.push({ ...scaffold.position, block: scaffold.block, reason: 'Owned scaffold state changed or became unknown.' });
                 continue;
             }
-            const feet = bot.entity.position.floored();
-            if (bot.entity.onGround && feet.x === p.x && feet.z === p.z && feet.y - 1 === p.y) {
+            if (isOwnedScaffoldUnderBot(bot, p)) {
                 cleanupRequired.push({ ...scaffold.position, block: scaffold.block, reason: 'Scaffold supports the bot at its current position.' });
                 continue;
             }
@@ -2568,6 +2658,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
         if (!originalDig || (allowScaffold && !originalPlaceBlock) || typeof bot.pathfinder.getPathFromTo !== 'function') throw new Error('The required Mineflayer/pathfinder edit APIs are unavailable.');
         bot.dig = digWrapper;
         if (allowScaffold) bot.placeBlock = placeWrapper;
+        bot.equip = equipWrapper;
         bot.pathfinder.setMovements(movement);
         hardTimer = setTimeout(() => {
             budgetExpired = true;
@@ -2623,11 +2714,23 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
             const checkpoint = pathResult.status === 'success' ? goal : new pf.goals.GoalBlock(endpoint.x, endpoint.y, endpoint.z);
             activeGoal = checkpoint;
             const before = bot.entity.position.clone();
+            let navigationFailure = null;
             try {
                 await withNativeNavigationEditScope(() => goToGoal(bot, checkpoint, movement));
             } catch (error) {
+                navigationFailure = error;
+            } finally {
+                await drainNavigationEdits();
+            }
+            if (navigationFailure) {
+                const error = navigationFailure;
                 lastNavigationError = String(error.message ?? error);
                 if (cancelled()) throw error;
+                if (unconfirmedScaffolds.length) {
+                    status = 'blocked';
+                    reason = 'A scaffold placement was attempted but not server-confirmed.';
+                    break;
+                }
                 if (budgetExpired || error.name === 'NavigationStallTimeoutError' || error.name === 'Timeout') {
                     status = 'stalled'; reason = lastNavigationError; break;
                 }
@@ -2662,6 +2765,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
         if (status !== 'cancelled' && scaffoldRecords.length) await cleanupScaffolds();
         if (cleanupRequired.length && status === 'reached') status = 'blocked';
     } finally {
+        await drainNavigationEdits();
         clearTimeout(hardTimer);
         restoreWrappers();
         if (reachPositionMovementOwners.get(bot.pathfinder) === movementOwner) {
@@ -2681,6 +2785,10 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
         reason = `Reached the target, but ${cleanupRequired.length} owned scaffold(s) could not be removed.`;
     } else if (status === 'reached' && cleanupRequired.length) {
         reason = `Reached the target; ${cleanupRequired.length} owned scaffold(s) remain and are listed in cleanupRequired for optional cleanup.`;
+    }
+    if (status === 'reached' && unconfirmedScaffolds.length) {
+        status = 'blocked';
+        reason = 'A scaffold placement was attempted but not server-confirmed.';
     }
     if (status === 'reached' && finalDistance() <= tolerance) {
         log(bot, `Reached ${target} within ${tolerance} blocks; confirmed ${edits.length} route edits.`);
@@ -4084,7 +4192,6 @@ const TREE_MAX_RADIUS = 6;
 const TREE_MAX_LOGS = 192;
 const TREE_REACH = 4.5;
 const TREE_PHYSICS_TIMEOUT_MS = 5000;
-const TREE_JUMP_PLACE_HEIGHT = 1.1;
 const TREE_PILLAR_PACKET_DELAY_MS = 50;
 const TREE_PICKUP_TIMEOUT_MS = 30000;
 const TREE_SOILS = new Set(['grass_block', 'dirt', 'coarse_dirt', 'podzol', 'rooted_dirt', 'mud', 'moss_block']);
@@ -4467,7 +4574,7 @@ export async function fellTree(bot, options = {}) {
                 scaffolds.push(entry);
                 bot.setControlState('jump', true);
                 try {
-                    await waitState(() => bot.entity.position.y >= feet.y + TREE_JUMP_PLACE_HEIGHT);
+                    await waitState(() => bot.entity.position.y >= feet.y + NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT);
                     await waitForActionOrTimeout(bot, context, TREE_PILLAR_PACKET_DELAY_MS);
                     active();
                     await bot.placeBlock(support, new Vec3(0, 1, 0));
