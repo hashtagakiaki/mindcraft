@@ -329,9 +329,10 @@ async function main() {
     assert.equal(sdkRouteResult.ok, true, JSON.stringify(sdkRouteResult))
     assert.equal(sdkRouteResult.result.result.harvested, 2, 'native wrapper retains the underlying work result')
     assert.equal(workObservedScaffold, true, `the work phase sees the route scaffold before outer cleanup; paths=${JSON.stringify(sdkTemporary.testState.paths)} result=${JSON.stringify(sdkRouteResult)}`)
-    assert.ok(sdkRouteResult.edits.some(edit => edit.kind === 'scaffold_placed'))
-    assert.ok(sdkRouteResult.edits.some(edit => edit.kind === 'scaffold_removed'))
-    assert.equal(sdkRouteResult.cleanupRequired.length, 0)
+    assert.equal(Object.hasOwn(sdkRouteResult, 'edits'), false)
+    assert.equal(Object.hasOwn(sdkRouteResult, 'cleanupRequired'), false)
+    assert.ok(sdkTemporary.testState.edits.some(edit => edit.kind === 'server_dig' && edit.block === 'dirt'),
+      'public result omits scaffold details after confirmed internal cleanup')
 
     const nativeLeave = makeBot({ gap: [2, 3, 4], corridor: true, rejectScaffoldRemoval: true })
     const nativeLeaveResult = await skills.goToPosition(nativeLeave, {

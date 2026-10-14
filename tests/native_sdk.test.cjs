@@ -103,7 +103,8 @@ async function main() {
   const policyCall = await sdk.skills.goToNearestBlock({ blockType: 'chest', navigation: { allowDig: true, scaffold: 'forbid' } })
   assert.deepEqual(policyCall.result, [botA, 'chest', 2, 64])
   assert.equal(policyCall.ok, true)
-  assert.deepEqual(policyCall.edits, [])
+  assert.equal(Object.hasOwn(policyCall, 'edits'), false)
+  assert.equal(Object.hasOwn(policyCall, 'cleanupRequired'), false)
   const craftPolicyCall = await sdk.skills.craftRecipe({ itemName: 'stick', navigation: { allowDig: true, scaffold: 'forbid' } })
   assert.deepEqual(craftPolicyCall.result, [botA, 'stick', 1])
   assert.equal(craftPolicyCall.ok, true, 'implicit movement skill receives an explicit policy without losing its work result')
@@ -138,6 +139,49 @@ async function main() {
     position: input.position, tolerance: 1, allowDig: false, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false, allowScaffold: true,
   }])
   invalid(sdk.skills.reachPositionWithScaffoldCleanup, [{ position: input.position, scaffoldBlocks: ['stone'] }], 'scaffoldBlocks')
+
+  const detailedMove = {
+    ok: true, status: 'reached', arrivalReached: true, finalPosition: input.position,
+    reason: 'Reached the target; 1 scaffold remains in cleanupRequired.',
+    edits: [{ kind: 'scaffold_placed', block: 'dirt', position: input.position }],
+    cleanupRequired: [{ ...input.position, block: 'dirt', reason: 'Supports the bot.' }],
+  }
+  const compactMove = {
+    ok: true, status: 'reached', arrivalReached: true, finalPosition: input.position,
+    reason: 'Reached the requested feet position.',
+  }
+  const movementSdk = createNativeSdk({ bot: botA, skills: {
+    goToPosition: () => detailedMove,
+    reachPosition: async () => detailedMove,
+    reachPositionWithScaffoldCleanup: async () => ({
+      ...detailedMove, ok: false, status: 'blocked', reason: 'Required scaffold cleanup is incomplete.',
+    }),
+    goToGoal: async () => detailedMove,
+  }, places: { goTo: async () => detailedMove } })
+  assert.deepEqual(movementSdk.skills.goToPosition({ position: input.position }), compactMove)
+  assert.deepEqual(await movementSdk.skills.reachPosition({ position: input.position }), compactMove)
+  const incompleteCleanup = await movementSdk.skills.reachPositionWithScaffoldCleanup({ position: input.position })
+  assert.equal(incompleteCleanup.ok, false)
+  assert.equal(incompleteCleanup.status, 'blocked')
+  assert.equal(incompleteCleanup.arrivalReached, true)
+  assert.equal(incompleteCleanup.reason, 'Required scaffold cleanup is incomplete.')
+  assert.equal(Object.hasOwn(incompleteCleanup, 'cleanupRequired'), false)
+  assert.equal(Object.hasOwn(incompleteCleanup, 'edits'), false)
+  const policyMovement = await movementSdk.skills.goToGoal({ goal: { isEnd: () => true, heuristic: () => 0 }, navigation: { scaffold: 'leave' } })
+  assert.deepEqual(policyMovement.result, compactMove, 'nested movement results are compact too')
+  assert.equal(Object.hasOwn(policyMovement, 'edits'), false)
+  assert.equal(Object.hasOwn(policyMovement, 'cleanupRequired'), false)
+  const placeMovement = await movementSdk.places.goTo({ placeId: 'base', navigation: { scaffold: 'leave' } })
+  assert.deepEqual(placeMovement.result, compactMove)
+  assert.equal(detailedMove.edits.length, 1, 'public projection preserves internal tracking')
+  assert.equal(detailedMove.cleanupRequired.length, 1)
+  const strictGuard = createNativeSdk({ bot: botA, skills: { reachPositionWithScaffoldCleanup: async () => detailedMove } })
+  const guardedCleanup = await strictGuard.skills.reachPositionWithScaffoldCleanup({ position: input.position })
+  assert.equal(guardedCleanup.ok, false, 'hiding the list preserves the existing strict-cleanup failure guard')
+  assert.equal(guardedCleanup.status, 'blocked')
+  assert.equal(Object.hasOwn(guardedCleanup, 'cleanupRequired'), false)
+
+
   assert.deepEqual(sdk.skills.stay({ seconds: -1 }), [botA, -1])
   invalid(sdk.skills.stay, [{ seconds: -2 }], 'seconds')
   assert.deepEqual(sdk.skills.tendNearbyFarm(), [botA, { scope: 'connected', seedReserve: 1, searchRadius: 32 }])

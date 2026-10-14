@@ -50,7 +50,7 @@ const navigationSkills = new Set([
 const s = (name, fields, description, args, options) => define('skills', name,
     navigationSkills.has(name) ? { ...fields, ...navigationFields } : fields,
     navigationSkills.has(name)
-        ? `${description} An optional navigation field applies route digging/scaffolding policy to this skill's implicit movement for the entire skill call; its work target remains governed by the skill's own contract. When supplied, the result is {ok,status,result,arrival,edits,cleanupRequired,reason}; temporary scaffolds are removed after the work finishes and any remaining position makes ok:false.`
+        ? `${description} An optional navigation field applies route digging/scaffolding policy to this skill's implicit movement for the entire skill call; its work target remains governed by the skill's own contract. When supplied, the result is {ok,status,result,arrival,reason}; temporary scaffolds are removed after the work finishes and any remaining position makes ok:false.`
         : description,
     args, { ...options, navigationPolicy: navigationSkills.has(name) });
 const w = (name, fields, description, args, options) => define('world', name, fields, description, args, options);
@@ -58,7 +58,7 @@ const navigationPlaces = new Set(['goTo', 'goToAlias', 'tendFarm']);
 const p = (name, fields, description, args, options = {}) => define('places', name,
     navigationPlaces.has(name) ? { ...fields, ...navigationFields } : fields,
     navigationPlaces.has(name)
-        ? `${description} An optional navigation field applies route digging/scaffolding policy to this place action's movement for the entire call. When supplied, the result is {ok,status,result,arrival,edits,cleanupRequired,reason}; temporary scaffolds are removed after the work finishes and any remaining position makes ok:false.`
+        ? `${description} An optional navigation field applies route digging/scaffolding policy to this place action's movement for the entire call. When supplied, the result is {ok,status,result,arrival,reason}; temporary scaffolds are removed after the work finishes and any remaining position makes ok:false.`
         : description,
     args, { bindBot: false, navigationPolicy: navigationPlaces.has(name), ...options });
 const coords = input => [input.position.x, input.position.y, input.position.z];
@@ -110,7 +110,7 @@ s('goToPosition', {
     scaffoldBlocks: field('strings', { default: Object.freeze(['dirt', 'cobblestone']) }),
     safeWater: field('boolean', { default: false }),
     minDistance: optional(distance({ max: 8, description: 'Compatibility alias for tolerance; takes precedence when both fields are supplied.' })),
-}, 'Navigate to an absolute feet position with one explicit route-edit policy. allowDig defaults false. scaffold is forbid (default), temporary (owned scaffolds must be removed before success), or leave (owned scaffolds may remain). Returns arrivalReached separately from status/cleanupRequired; only reached with ok:true is success. minDistance is a compatibility alias for tolerance and takes precedence when both are supplied. Legacy bot-first positional calls retain their boolean behavior.', a => [{
+}, 'Navigate to an absolute feet position with one explicit route-edit policy. allowDig defaults false. scaffold is forbid (default), temporary (owned scaffolds must be removed before success), or leave (owned scaffolds may remain). Returns {ok,status,arrivalReached,finalPosition,reason}, with arrivalReached separate from overall success; only reached with ok:true is success. minDistance is a compatibility alias for tolerance and takes precedence when both are supplied. Legacy bot-first positional calls retain their boolean behavior.', a => [{
     position: a.position, tolerance: a.minDistance ?? a.tolerance, allowDig: a.allowDig,
     scaffold: a.scaffold, scaffoldBlocks: a.scaffoldBlocks, safeWater: a.safeWater,
 }], {
@@ -127,7 +127,7 @@ s('reachPosition', {
     allowDig: field('boolean', { default: true }), allowScaffold: field('boolean', { default: true }),
     scaffoldBlocks: field('strings', { default: Object.freeze(['dirt', 'cobblestone']), description: 'Allowed scaffold types; only types actually in inventory are used.' }),
     safeWater: field('boolean', { default: false }),
-}, 'Reach an exact feet position using bounded replanning. By default, dig with the suitable equipped tool and scaffold with listed dirt/cobblestone types that are in inventory; pass allowDig:false and/or allowScaffold:false to prohibit those edits. Water traversal remains disabled unless safeWater:true. A pathfinder scaffold is recorded only after a matching block update is observed; an intermediate update or missing confirmation never counts as placement. Loaded safe drops are limited to three blocks of feet-height onto a known solid, non-liquid support; deeper, unknown, liquid and hazardous landings remain blocked. Owned scaffolds are removed when safe; cleanup is best-effort and never invalidates an arrival within tolerance. Any remaining or unconfirmed scaffold positions are listed in cleanupRequired. Returns {ok,status,arrivalReached,finalPosition,reason,edits,cleanupRequired}; only reached is success, and every other status stops this execution.', a => a, {
+}, 'Reach an exact feet position using bounded replanning. By default, dig with the suitable equipped tool and scaffold with listed dirt/cobblestone types that are in inventory; pass allowDig:false and/or allowScaffold:false to prohibit those edits. Water traversal remains disabled unless safeWater:true. A pathfinder scaffold is recorded only after a matching block update is observed; an intermediate update or missing confirmation never counts as placement. Loaded safe drops are limited to three blocks of feet-height onto a known solid, non-liquid support; deeper, unknown, liquid and hazardous landings remain blocked. Owned scaffolds are removed when safe; cleanup is best-effort and never invalidates an arrival within tolerance. Scaffold edit history and position lists stay internal; failures retain their reason. Returns {ok,status,arrivalReached,finalPosition,reason}; only reached is success, and every other status stops this execution.', a => a, {
     argsObject: true,
     constraint: (a, fail) => {
         if (a.tolerance < 0.75) fail('tolerance', 'between 0.75 and 8 blocks');
@@ -141,7 +141,7 @@ s('reachPositionWithScaffoldCleanup', {
     allowDig: field('boolean', { default: false }),
     scaffoldBlocks: field('strings', { default: Object.freeze(['dirt', 'cobblestone']), description: 'Allowed scaffold types; only types actually in inventory are used.' }),
     safeWater: field('boolean', { default: false }),
-}, 'Navigate using temporary scaffolds and require every scaffold placed by this call to be removed before success. Placement must receive a matching block update; missing or ambiguous confirmation returns a non-success result with the attempted position in cleanupRequired. By default, route digging is disabled to preserve built terrain; allowDig:true explicitly permits it. Loaded safe drops are limited to three blocks of feet-height onto a known solid, non-liquid support; deeper, unknown, liquid and hazardous landings remain blocked. If cleanup is incomplete, returns a non-success status with remaining positions in cleanupRequired, and minecraft_execute stops with that result preserved. Water traversal remains disabled unless safeWater:true.', a => ({
+}, 'Navigate using temporary scaffolds and require every scaffold placed by this call to be removed before success. Placement must receive a matching block update; missing or ambiguous confirmation returns a non-success result with a failure reason. By default, route digging is disabled to preserve built terrain; allowDig:true explicitly permits it. Loaded safe drops are limited to three blocks of feet-height onto a known solid, non-liquid support; deeper, unknown, liquid and hazardous landings remain blocked. If cleanup is incomplete, returns a non-success status with a cleanup failure reason, and minecraft_execute stops with that result preserved. Water traversal remains disabled unless safeWater:true.', a => ({
     ...a, allowScaffold: true,
 }), {
     argsObject: true,
@@ -402,6 +402,26 @@ export function getNativeSdkMethodNames() {
     return definitions.map(definition => `${definition.namespace}.${definition.name}`);
 }
 
+const movementResultMethods = new Set(['goToPosition', 'reachPosition', 'reachPositionWithScaffoldCleanup']);
+
+function compactNavigationResult(value, requireCleanup = false) {
+    if (!objectLike(value)) return value;
+    const result = { ...value };
+    if (Array.isArray(value.edits)) delete result.edits;
+    if (Array.isArray(value.cleanupRequired)) delete result.cleanupRequired;
+    if (objectLike(value.result) && (Array.isArray(value.result.edits) || Array.isArray(value.result.cleanupRequired))) {
+        result.result = compactNavigationResult(value.result);
+    }
+    if (requireCleanup && value.cleanupRequired?.length && value.ok === true) {
+        result.ok = false;
+        result.status = 'blocked';
+        result.reason = 'Required scaffold cleanup is incomplete.';
+    } else if (value.ok === true && value.status === 'reached' && typeof value.arrivalReached === 'boolean') {
+        result.reason = 'Reached the requested feet position.';
+    }
+    return result;
+}
+
 export function createNativeSdk(bindings, config = {}) {
     searchLimit(config);
     const namespaces = {};
@@ -417,7 +437,13 @@ export function createNativeSdk(bindings, config = {}) {
             // Internal skills/places/vision already retain their ownership wrappers.
             // Preserve pure synchronous world results by never making this wrapper async.
             const invoke = () => internal(...(definition.bindBot ? [bindings.bot, ...args] : args));
-            return navigation ? runWithNavigationPolicy(bindings.bot, navigation, invoke) : invoke();
+            const result = navigation ? runWithNavigationPolicy(bindings.bot, navigation, invoke) : invoke();
+            if (!navigation && !(definition.namespace === 'skills' && movementResultMethods.has(definition.name))) return result;
+            const requireCleanup = navigation?.scaffold === 'temporary'
+                || definition.namespace === 'skills' && (definition.name === 'reachPositionWithScaffoldCleanup'
+                    || definition.name === 'goToPosition' && input.scaffold === 'temporary');
+            const compact = value => compactNavigationResult(value, requireCleanup);
+            return result?.then ? result.then(compact) : compact(result);
         };
     }
     return Object.freeze(Object.fromEntries(Object.entries(namespaces).map(([key, value]) => [key, Object.freeze(value)])));
