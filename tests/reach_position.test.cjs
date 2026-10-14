@@ -33,7 +33,7 @@ async function setup(root) {
   await write(root, 'package.json', '{"type":"module"}')
   await symlink(deps, path.join(root, 'node_modules'))
   await write(root, 'settings.js', 'export default { navigation_stall_timeout_ms: 500, navigation_check_interval_ms: 25 };')
-  for (const name of ['skills', 'block_placement', 'block_interaction', 'operation_context', 'navigation_policy', 'crafting_sync']) {
+  for (const name of ['skills', 'block_placement', 'block_interaction', 'operation_context', 'navigation_policy', 'crafting_sync', 'native_sdk']) {
     await write(root, `src/agent/library/${name}.js`, await readFile(path.join(repo, `src/agent/library/${name}.js`)))
   }
   await write(root, 'src/agent/library/world.js', `
@@ -207,6 +207,9 @@ async function main() {
     globalThis.mcRegistry = registry
     const skills = await import(pathToFileURL(path.join(root, 'src/agent/library/skills.js')))
     const { reachPosition } = skills
+    const { createNativeSdk } = await import(pathToFileURL(path.join(root, 'src/agent/library/native_sdk.js')))
+    const { registerNavigationCleanup } = await import(pathToFileURL(path.join(root, 'src/agent/library/navigation_policy.js')))
+    const { runWithNavigationPolicy } = await import(pathToFileURL(path.join(root, 'src/agent/library/navigation_policy.js')))
     const wall = []
     for (let z = -4; z <= 4; z++) for (const y of [64, 65]) wall.push({ x: 3, y, z, name: 'dirt' })
 
@@ -228,6 +231,32 @@ async function main() {
     assert.ok(nativeTemporaryResult.edits.some(edit => edit.kind === 'scaffold_placed'))
     assert.ok(nativeTemporaryResult.edits.some(edit => edit.kind === 'scaffold_removed'))
 
+    const sdkTemporary = makeBot({ gap: [2, 3, 4], corridor: true })
+    let workObservedScaffold = false
+    const sdk = createNativeSdk({ bot: sdkTemporary, skills: {
+      goToGoal: async (bot, goal, override) => {
+        const arrived = await skills.goToGoal(bot, goal, override)
+        workObservedScaffold = bot.testState.edits.some(edit => edit.kind === 'server_place')
+          && bot.testState.edits.some(edit => edit.kind === 'server_place' && bot.blockAt(new Vec3(edit.position.x, edit.position.y, edit.position.z))?.name === 'dirt')
+        return { status: arrived ? 'complete' : 'partial', result: { harvested: 2 } }
+      },
+    }})
+    const scaffoldMovements = new pathfinder.Movements(sdkTemporary)
+    scaffoldMovements.allowParkour = false
+    scaffoldMovements.allowFreeMotion = false
+    scaffoldMovements.maxDropDown = 1
+    const sdkRouteResult = await sdk.skills.goToGoal({
+      goal: new pathfinder.goals.GoalNear(6, 64, 0, 1),
+      movementOverride: scaffoldMovements,
+      navigation: { allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt'] },
+    })
+    assert.equal(sdkRouteResult.ok, true, JSON.stringify(sdkRouteResult))
+    assert.equal(sdkRouteResult.result.result.harvested, 2, 'native wrapper retains the underlying work result')
+    assert.equal(workObservedScaffold, true, `the work phase sees the route scaffold before outer cleanup; paths=${JSON.stringify(sdkTemporary.testState.paths)} result=${JSON.stringify(sdkRouteResult)}`)
+    assert.ok(sdkRouteResult.edits.some(edit => edit.kind === 'scaffold_placed'))
+    assert.ok(sdkRouteResult.edits.some(edit => edit.kind === 'scaffold_removed'))
+    assert.equal(sdkRouteResult.cleanupRequired.length, 0)
+
     const nativeLeave = makeBot({ gap: [2, 3, 4], corridor: true, rejectScaffoldRemoval: true })
     const nativeLeaveResult = await skills.goToPosition(nativeLeave, {
       position: { x: 6.5, y: 64, z: 0.5 }, scaffold: 'leave', scaffoldBlocks: ['dirt'],
@@ -243,6 +272,7 @@ async function main() {
     assert.equal(nativeTemporaryIncompleteResult.status, 'blocked', JSON.stringify(nativeTemporaryIncompleteResult))
     assert.equal(nativeTemporaryIncompleteResult.ok, false)
     assert.ok(nativeTemporaryIncompleteResult.cleanupRequired.length > 0)
+    assert.equal(nativeTemporaryIncompleteResult.arrivalReached, true, 'arrival remains recorded independently from failed cleanup')
 
     const open = makeBot()
     const openMovements = open.pathfinder.movements
@@ -387,7 +417,7 @@ async function main() {
     const policyMovement = makeBot({ wall })
     const policyOwner = createOperationContext({ id: 'route-policy-owner', controller: new AbortController() }, { bot: policyMovement }, { intentEpoch: 1 })
     policyOwner.nativeNavigationNoEdits = true
-    const { runWithNavigationPolicy, trackNavigationSegment } = await import(pathToFileURL(path.join(root, 'src/agent/library/navigation_policy.js')))
+    const { trackNavigationSegment } = await import(pathToFileURL(path.join(root, 'src/agent/library/navigation_policy.js')))
     const policyResult = await runOwnedOperation(policyOwner, () => runWithNavigationPolicy(policyMovement,
       { allowDig: true, scaffold: 'forbid', scaffoldBlocks: ['dirt', 'cobblestone'] },
       () => skills.goToGoal(policyMovement, new pathfinder.goals.GoalNear(6, 64, 0, 1))));
@@ -398,11 +428,11 @@ async function main() {
     const outerScaffoldBot = makeBot({ gap: [2, 3, 4], corridor: true })
     const outerScaffoldResult = await runWithNavigationPolicy(outerScaffoldBot,
       { allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt'] },
-      () => trackNavigationSegment(outerScaffoldBot, async () => {
+      () => trackNavigationSegment(outerScaffoldBot, () => trackNavigationSegment(outerScaffoldBot, async () => {
         await outerScaffoldBot.equip(outerScaffoldBot.inventory.items().find(item => item.name === 'dirt'))
         await outerScaffoldBot.placeBlock(outerScaffoldBot.blockAt(new Vec3(1, 63, 0)), new Vec3(0, 1, 0))
         return true
-      }))
+      })))
     assert.equal(outerScaffoldResult.ok, true, JSON.stringify(outerScaffoldResult))
     assert.ok(outerScaffoldResult.edits.some(edit => edit.kind === 'scaffold_placed'), JSON.stringify(outerScaffoldResult))
     assert.ok(outerScaffoldResult.edits.some(edit => edit.kind === 'scaffold_removed'))
@@ -420,6 +450,25 @@ async function main() {
     assert.equal(workTargetPolicy.ok, true, JSON.stringify(workTargetPolicy))
     assert.deepEqual(workTargetPolicy.edits, [], 'work-target destruction is separate from route edit reporting')
     assert.equal(workTargetPolicyBot.testState.edits.filter(edit => edit.kind === 'server_dig').length, 1)
+
+    const cancelledPolicyBot = makeBot()
+    const cancelledPolicy = await runWithNavigationPolicy(cancelledPolicyBot,
+      { allowDig: false, scaffold: 'forbid', scaffoldBlocks: ['dirt'] }, async () => {
+        cancelledPolicyBot.interrupt_code = true
+        return true
+      })
+    assert.equal(cancelledPolicy.ok, false, 'a successful callback cannot override cancellation')
+    assert.equal(cancelledPolicy.status, 'cancelled')
+
+    const restoreCleanup = registerNavigationCleanup(async () => { throw new Error('cleanup fixture failure') })
+    try {
+      const cleanupFailureBot = makeBot()
+      const cleanupFailure = await runWithNavigationPolicy(cleanupFailureBot,
+        { allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt'] }, async () => ({ status: 'complete', count: 3 }))
+      assert.equal(cleanupFailure.ok, false)
+      assert.equal(cleanupFailure.result.count, 3, 'cleanup exceptions retain the settled work result')
+      assert.match(cleanupFailure.cleanupFailure, /cleanup fixture failure/)
+    } finally { registerNavigationCleanup(restoreCleanup) }
 
     const rejectedPlacement = makeBot({ gap: [2, 3, 4], corridor: true })
     rejectedPlacement.testState.placementMode = 'reject'

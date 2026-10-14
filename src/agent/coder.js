@@ -372,10 +372,11 @@ function nativeExecutionSafety(windowMs) {
             if (yielded) throw yielded;
         },
         after(method, result) {
+            const workResult = result?.result ?? result;
             const action = !method.startsWith('world.') && !method.startsWith('diagnostics.') && !queries.has(method);
             const failed = action && (result === false || result?.ok === false)
-                || method === 'skills.approachBlock' && result?.status !== 'ready'
-                || method === 'skills.fellTree' && result?.status !== 'complete'
+                || method === 'skills.approachBlock' && workResult?.status !== 'ready'
+                || method === 'skills.fellTree' && workResult?.status !== 'complete'
                 || method === 'skills.goToPosition' && (result?.status !== 'reached' || result?.ok !== true)
                 || method === 'skills.reachPosition' && (result?.status !== 'reached' || result?.ok !== true)
                 || method === 'skills.reachPositionWithScaffoldCleanup' && (result?.status !== 'reached' || result?.ok !== true || result?.cleanupRequired?.length > 0);

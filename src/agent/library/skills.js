@@ -109,8 +109,11 @@ function navigationMovements(bot, movementOverride = null) {
     const explicitPolicy = navigationPolicy();
     if (explicitPolicy || operationContext()?.nativeNavigationNoEdits && !nativeNavigationEditScopeActive()) {
         const policy = explicitPolicy ?? { allowDig: false, scaffold: 'forbid', scaffoldBlocks: [] };
-        const scaffoldBlocks = policy.scaffold === 'forbid' ? [] : policy.scaffoldBlocks.filter(name =>
-            (bot.inventory?.items?.() ?? []).some(item => item.name === name && item.count > 0));
+        const scaffoldBlocks = policy.scaffold === 'forbid' ? [] : policy.scaffoldBlocks.flatMap(name => {
+            const available = (bot.inventory?.items?.() ?? []).some(item => item.name === name && item.count > 0);
+            const id = bot.registry?.itemsByName?.[name]?.id;
+            return available && Number.isInteger(id) ? [id] : [];
+        });
         return Object.assign(new pf.Movements(bot), supplied ?? {}, {
             canDig: policy.allowDig === true, canPlaceOn: scaffoldBlocks.length > 0,
             allow1by1towers: scaffoldBlocks.length > 0,
@@ -2291,8 +2294,8 @@ function startDoorInterval(bot) {
     return doorCheckInterval;
 }
 
-function reachPositionResult(status, finalPosition, reason, edits = [], cleanupRequired = []) {
-    return { ok: status === 'reached', status, finalPosition, reason, edits, cleanupRequired };
+function reachPositionResult(status, finalPosition, reason, edits = [], cleanupRequired = [], arrivalReached = status === 'reached') {
+    return { ok: status === 'reached', status, arrivalReached, finalPosition, reason, edits, cleanupRequired };
 }
 
 function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safeWater }) {
@@ -2681,11 +2684,11 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
     }
     if (status === 'reached' && finalDistance() <= tolerance) {
         log(bot, `Reached ${target} within ${tolerance} blocks; confirmed ${edits.length} route edits.`);
-        return reachPositionResult('reached', finalPosition, reason, edits, cleanupRequired);
+        return reachPositionResult('reached', finalPosition, reason, edits, cleanupRequired, true);
     }
     if (cleanupRequired.length) reason += ` Cleanup required at ${cleanupRequired.map(item => `(${item.x}, ${item.y}, ${item.z})`).join(', ')}.`;
     log(bot, `Could not complete route to ${target}: ${reason}`);
-    return reachPositionResult(status, finalPosition, reason, edits, cleanupRequired);
+    return reachPositionResult(status, finalPosition, reason, edits, cleanupRequired, finalDistance() <= tolerance);
 }
 
 export async function reachPosition(bot, options = {}) {

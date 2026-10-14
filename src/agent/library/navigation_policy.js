@@ -6,19 +6,29 @@ let cleanupOwnedScaffolds = async () => [];
 
 export function navigationPolicy() { return policyStorage.getStore()?.policy ?? null; }
 
-export function registerNavigationCleanup(cleanup) { cleanupOwnedScaffolds = cleanup; }
+export function registerNavigationCleanup(cleanup) {
+    const previous = cleanupOwnedScaffolds;
+    cleanupOwnedScaffolds = cleanup;
+    return previous;
+}
 
 export async function runWithNavigationPolicy(bot, policy, body) {
     if (policy.scaffold !== 'forbid' && !policy.scaffoldBlocks.some(name =>
         (bot.inventory?.items?.() ?? []).some(item => item.name === name && item.count > 0))) {
         throw new Error('Navigation scaffold policy requires an allowed block in inventory.');
     }
-    const context = { bot, policy, edits: [], scaffolds: [], arrivals: [] };
+    const context = { bot, policy, edits: [], scaffolds: [], arrivals: [], segment: null };
     let result, failure;
     try { result = await policyStorage.run(context, body); }
     catch (error) { failure = error; }
+    let cleanupFailure = null;
     if (policy.scaffold === 'temporary' && !navigationCancelled(bot) && result?.status !== 'cancelled') {
-        context.cleanupRequired = await cleanupOwnedScaffolds(bot, context);
+        try { context.cleanupRequired = await cleanupOwnedScaffolds(bot, context); }
+        catch (error) {
+            cleanupFailure = String(error?.message ?? error);
+            context.cleanupRequired = inspectRemainingScaffolds(bot, context.scaffolds, `Cleanup failed: ${cleanupFailure}`);
+            if (!context.cleanupRequired.length) context.cleanupRequired.push({ reason: `Cleanup failed: ${cleanupFailure}` });
+        }
     } else {
         context.cleanupRequired = inspectRemainingScaffolds(bot, context.scaffolds,
             policy.scaffold === 'temporary' ? 'Action cancelled before cleanup began.' : 'Scaffold policy allows this placement to remain.');
@@ -26,13 +36,14 @@ export async function runWithNavigationPolicy(bot, policy, body) {
     const reached = context.arrivals.at(-1) ?? null;
     const workResult = failure ? { error: String(failure.message ?? failure) } : result;
     const workSucceeded = !failure && result !== false && result?.ok !== false
-        && (result?.status === undefined || ['reached', 'complete', 'ready'].includes(result.status));
+        && (result?.status === undefined || result?.ok === true || ['reached', 'complete', 'ready'].includes(result.status));
     const cancelled = navigationCancelled(bot) || result?.status === 'cancelled';
-    const ok = workSucceeded
+    const ok = workSucceeded && !cancelled
         && !(policy.scaffold === 'temporary' && context.cleanupRequired.length);
     return {
         ok, status: ok ? 'reached' : cancelled ? 'cancelled' : 'blocked',
         result: workResult, arrival: reached, edits: context.edits, cleanupRequired: context.cleanupRequired,
+        ...(cleanupFailure ? { cleanupFailure } : {}),
         reason: ok ? 'Navigation policy settled with the requested work result.'
             : policy.scaffold === 'temporary' && context.cleanupRequired.length
                 ? `Work settled, but ${context.cleanupRequired.length} temporary scaffold(s) remain.`
@@ -51,11 +62,19 @@ export function normalizeNavigationPolicy(value = {}) {
 export async function trackNavigationSegment(bot, body, { workTarget = null } = {}) {
     const context = policyStorage.getStore();
     if (!context || context.bot !== bot) return body();
+    if (context.segment) {
+        if (workTarget) context.segment.workTargets.push(workTarget);
+        try { return await body(); }
+        finally {
+            if (workTarget) context.segment.workTargets.pop();
+        }
+    }
     const originalDig = bot.dig;
     const originalPlace = bot.placeBlock;
+    const segment = context.segment = { workTargets: workTarget ? [workTarget] : [] };
     const dig = async function (block, ...args) {
         if (navigationCancelled(bot)) throw new Error('Action cancelled before the next navigation edit.');
-        if (workTarget && ['x', 'y', 'z'].every(axis => block.position[axis] === workTarget[axis])) {
+        if (segment.workTargets.some(target => ['x', 'y', 'z'].every(axis => block.position[axis] === target[axis]))) {
             return originalDig.call(this, block, ...args);
         }
         if (context.policy.allowDig !== true) throw new Error('Navigation policy forbids digging route blocks.');
@@ -85,6 +104,7 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
     finally {
         if (bot.dig === dig) bot.dig = originalDig;
         if (bot.placeBlock === place) bot.placeBlock = originalPlace;
+        context.segment = null;
     }
 }
 

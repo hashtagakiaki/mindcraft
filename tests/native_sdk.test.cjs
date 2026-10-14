@@ -20,7 +20,7 @@ async function main() {
       return args
     }
   }
-  const botA = { username: 'A' }
+  const botA = { username: 'A', inventory: { items: () => [{ name: 'dirt', count: 1 }] } }
   const botB = { username: 'B' }
   const sdk = createNativeSdk({ ...namespaces, bot: botA })
   const second = createNativeSdk({ ...namespaces, bot: botB })
@@ -150,6 +150,21 @@ async function main() {
   assert.deepEqual(sdk.skills.placeBlock({ blockType: 'stone', position: input.position }), [botA, 'stone', 10, 64, -3, 'bottom', false])
 
   assert.deepEqual(sdk.places.find({ text: 'chest' }), ['chest', { limit: 20 }])
+  for (const method of ['goTo', 'goToAlias', 'tendFarm']) {
+    const doc = docs.find(value => value.startsWith(`places.${method}\n`))
+    assert.ok(doc.includes('navigation: {allowDig?:boolean, scaffold?:"forbid"|"temporary"|"leave"'), `${method} documents its navigation policy`)
+  }
+  const placeGo = await sdk.places.goTo({ placeId: 'place-1', navigation: { allowDig: false, scaffold: 'forbid' } })
+  assert.deepEqual(placeGo.result, ['place-1'])
+  assert.equal(placeGo.ok, true, 'saved place navigation is wrapped by the shared policy')
+  const visitedPlaces = createNativeSdk({ bot: botA, places: { goTo: () => ({ ok: true, status: 'visited' }) } })
+  const visitedPlace = await visitedPlaces.places.goTo({ placeId: 'place-1', navigation: { scaffold: 'forbid' } })
+  assert.equal(visitedPlace.ok, true, 'a place action status is accepted when its own contract confirms ok:true')
+  assert.equal(visitedPlace.result.status, 'visited')
+  const aliasGo = await sdk.places.goToAlias({ alias: 'home', navigation: { scaffold: 'leave' } })
+  assert.deepEqual(aliasGo.result, ['home'])
+  const farmTend = await sdk.places.tendFarm({ farmId: 'farm-1', seedReserve: 2, navigation: { allowDig: true, scaffold: 'forbid' } })
+  assert.deepEqual(farmTend.result, ['farm-1', { scope: 'connected', searchRadius: 32, seedReserve: 2 }])
   invalid(sdk.places.find, ['chest'], 'arguments')
   invalid(sdk.places.find, [{ query: 'chest' }], 'query')
   invalid(sdk.places.find, [{ text: 'chest', limit: 101 }], 'limit')

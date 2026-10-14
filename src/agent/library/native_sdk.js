@@ -17,7 +17,7 @@ const optional = descriptor => Object.freeze({ ...descriptor, optional: true });
 const enumeration = (values, options = {}) => field('enum', { values, ...options });
 const quantity = options => field('quantity', options);
 const placeKinds = ['base', 'farm', 'storage', 'forest', 'village', 'mine', 'resource', 'other'];
-const navigationField = optional(field('navigationPolicy', { description: 'Route edits for implicit movement in this skill; defaults to no digging or scaffolding.' }));
+const navigationField = optional(field('navigationPolicy', { description: 'Route edit policy for implicit movement; {allowDig?:boolean, scaffold?:"forbid"|"temporary"|"leave", scaffoldBlocks?:["dirt","cobblestone"]}. Defaults to no digging or scaffolding.' }));
 const navigationFields = Object.freeze({ navigation: navigationField });
 const farmFields = Object.freeze({
     scope: enumeration(['connected', 'radius'], { default: 'connected' }),
@@ -54,7 +54,13 @@ const s = (name, fields, description, args, options) => define('skills', name,
         : description,
     args, { ...options, navigationPolicy: navigationSkills.has(name) });
 const w = (name, fields, description, args, options) => define('world', name, fields, description, args, options);
-const p = (name, fields, description, args, options) => define('places', name, fields, description, args, { bindBot: false, ...options });
+const navigationPlaces = new Set(['goTo', 'goToAlias', 'tendFarm']);
+const p = (name, fields, description, args, options = {}) => define('places', name,
+    navigationPlaces.has(name) ? { ...fields, ...navigationFields } : fields,
+    navigationPlaces.has(name)
+        ? `${description} An optional navigation field applies route digging/scaffolding policy to this place action's movement for the entire call. When supplied, the result is {ok,status,result,arrival,edits,cleanupRequired,reason}; temporary scaffolds are removed after the work finishes and any remaining position makes ok:false.`
+        : description,
+    args, { bindBot: false, navigationPolicy: navigationPlaces.has(name), ...options });
 const coords = input => [input.position.x, input.position.y, input.position.z];
 const allQuantity = value => value === 'all' ? -1 : value;
 
@@ -104,7 +110,7 @@ s('goToPosition', {
     scaffoldBlocks: field('strings', { default: Object.freeze(['dirt', 'cobblestone']) }),
     safeWater: field('boolean', { default: false }),
     minDistance: optional(distance({ max: 8, description: 'Compatibility alias for tolerance; takes precedence when both fields are supplied.' })),
-}, 'Navigate to an absolute feet position with one explicit route-edit policy. allowDig defaults false. scaffold is forbid (default), temporary (owned scaffolds must be removed before success), or leave (owned scaffolds may remain). Arrival and cleanup are reported separately; only reached with ok:true is success. minDistance is a compatibility alias for tolerance and takes precedence when both are supplied. Legacy bot-first positional calls retain their boolean behavior.', a => [{
+}, 'Navigate to an absolute feet position with one explicit route-edit policy. allowDig defaults false. scaffold is forbid (default), temporary (owned scaffolds must be removed before success), or leave (owned scaffolds may remain). Returns arrivalReached separately from status/cleanupRequired; only reached with ok:true is success. minDistance is a compatibility alias for tolerance and takes precedence when both are supplied. Legacy bot-first positional calls retain their boolean behavior.', a => [{
     position: a.position, tolerance: a.minDistance ?? a.tolerance, allowDig: a.allowDig,
     scaffold: a.scaffold, scaffoldBlocks: a.scaffoldBlocks, safeWater: a.safeWater,
 }], {
@@ -121,7 +127,7 @@ s('reachPosition', {
     allowDig: field('boolean', { default: true }), allowScaffold: field('boolean', { default: true }),
     scaffoldBlocks: field('strings', { default: Object.freeze(['dirt', 'cobblestone']), description: 'Allowed scaffold types; only types actually in inventory are used.' }),
     safeWater: field('boolean', { default: false }),
-}, 'Reach an exact feet position using bounded replanning. By default, dig with the suitable equipped tool and scaffold with listed dirt/cobblestone types that are in inventory; pass allowDig:false and/or allowScaffold:false to prohibit those edits. Water traversal remains disabled unless safeWater:true. Owned scaffolds are removed when safe; cleanup is best-effort and never invalidates an arrival within tolerance. Any remaining scaffold positions are listed in cleanupRequired for optional later cleanup. Returns {ok,status,finalPosition,reason,edits,cleanupRequired}; only reached is success, and every other status stops this execution.', a => a, {
+}, 'Reach an exact feet position using bounded replanning. By default, dig with the suitable equipped tool and scaffold with listed dirt/cobblestone types that are in inventory; pass allowDig:false and/or allowScaffold:false to prohibit those edits. Water traversal remains disabled unless safeWater:true. Owned scaffolds are removed when safe; cleanup is best-effort and never invalidates an arrival within tolerance. Any remaining scaffold positions are listed in cleanupRequired for optional later cleanup. Returns {ok,status,arrivalReached,finalPosition,reason,edits,cleanupRequired}; only reached is success, and every other status stops this execution.', a => a, {
     argsObject: true,
     constraint: (a, fail) => {
         if (a.tolerance < 0.75) fail('tolerance', 'between 0.75 and 8 blocks');
