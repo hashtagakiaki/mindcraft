@@ -114,6 +114,10 @@ async function main() {
   assert.deepEqual(sdk.skills.reachPosition({ position: input.position, allowScaffold: false }), [botA, {
     position: input.position, tolerance: 1, allowDig: true, allowScaffold: false, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false,
   }])
+  assert.deepEqual(sdk.skills.reachPositionWithScaffoldCleanup({ position: input.position }), [botA, {
+    position: input.position, tolerance: 1, allowDig: false, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false, allowScaffold: true,
+  }])
+  invalid(sdk.skills.reachPositionWithScaffoldCleanup, [{ position: input.position, scaffoldBlocks: ['stone'] }], 'scaffoldBlocks')
   assert.deepEqual(sdk.skills.stay({ seconds: -1 }), [botA, -1])
   invalid(sdk.skills.stay, [{ seconds: -2 }], 'seconds')
   assert.deepEqual(sdk.skills.tendNearbyFarm(), [botA, { scope: 'connected', seedReserve: 1, searchRadius: 32 }])

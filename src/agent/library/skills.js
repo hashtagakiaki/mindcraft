@@ -2374,7 +2374,7 @@ function reachPositionPath(bot, movements, goal) {
     return result;
 }
 
-export async function reachPosition(bot, options = {}) {
+async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = false } = {}) {
     /**
      * Reach an absolute bot-feet position using explicitly permitted digging
      * and/or pathfinder scaffolding. Only server-confirmed edits are reported.
@@ -2412,6 +2412,9 @@ export async function reachPosition(bot, options = {}) {
         : [];
     if (allowScaffold && availableScaffoldBlocks.length === 0) {
         return early('None of the permitted scaffold blocks are available in inventory.');
+    }
+    if (reachPositionMovementOwners.has(bot.pathfinder)) {
+        return early('Another reachPosition operation already owns this pathfinder.');
     }
 
     const context = operationContext();
@@ -2620,9 +2623,11 @@ export async function reachPosition(bot, options = {}) {
         }
     }
     const finalPosition = snapshotPosition();
-    if (status === 'reached' && cleanupRequired.length) {
+    if (status === 'reached' && cleanupRequired.length && requireScaffoldCleanup) {
         status = 'blocked';
-        reason = `Reached the target, but ${cleanupRequired.length} owned scaffold(s) could not be safely removed.`;
+        reason = `Reached the target, but ${cleanupRequired.length} owned scaffold(s) could not be removed.`;
+    } else if (status === 'reached' && cleanupRequired.length) {
+        reason = `Reached the target; ${cleanupRequired.length} owned scaffold(s) remain and are listed in cleanupRequired for optional cleanup.`;
     }
     if (status === 'reached' && finalDistance() <= tolerance) {
         log(bot, `Reached ${target} within ${tolerance} blocks; confirmed ${edits.length} route edits.`);
@@ -2631,6 +2636,21 @@ export async function reachPosition(bot, options = {}) {
     if (cleanupRequired.length) reason += ` Cleanup required at ${cleanupRequired.map(item => `(${item.x}, ${item.y}, ${item.z})`).join(', ')}.`;
     log(bot, `Could not complete route to ${target}: ${reason}`);
     return reachPositionResult(status, finalPosition, reason, edits, cleanupRequired);
+}
+
+export async function reachPosition(bot, options = {}) {
+    return reachPositionCore(bot, options);
+}
+
+export async function reachPositionWithScaffoldCleanup(bot, options = {}) {
+    if (!options || typeof options !== 'object' || Array.isArray(options)) {
+        return reachPositionResult('blocked', bot?.entity?.position ?? null, 'Options must be an object.');
+    }
+    return reachPositionCore(bot, {
+        ...options,
+        allowDig: options.allowDig ?? false,
+        allowScaffold: true,
+    }, { requireScaffoldCleanup: true });
 }
 
 export async function goToPosition(bot, x, y, z, min_distance=2) {
@@ -4463,6 +4483,7 @@ giveToPlayer = trackSkill("skills.giveToPlayer", giveToPlayer);
 goToGoal = trackSkill("skills.goToGoal", goToGoal);
 goToPosition = trackSkill("skills.goToPosition", goToPosition);
 reachPosition = trackSkill("skills.reachPosition", reachPosition);
+reachPositionWithScaffoldCleanup = trackSkill("skills.reachPositionWithScaffoldCleanup", reachPositionWithScaffoldCleanup);
 goToNearestBlock = trackSkill("skills.goToNearestBlock", goToNearestBlock);
 goToNearestEntity = trackSkill("skills.goToNearestEntity", goToNearestEntity);
 goToPlayer = trackSkill("skills.goToPlayer", goToPlayer);

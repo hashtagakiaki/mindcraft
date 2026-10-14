@@ -306,6 +306,11 @@ async function main() {
     assert.equal(failedReach.sdkFailure.result.status,'blocked')
     assert.equal(failedReach.sdkFailure.result.ok,false)
     assert.equal(failedReach.skillResults.some(call=>call.skill==='skills.breakBlockAt'),false,'failed reach prevents a later SDK mutation')
+    const failedScaffoldRecovery=await run('await skills.reachPositionWithScaffoldCleanup({position:{x:8.5,y:64,z:0.5}}); await skills.breakBlockAt({position:{x:1,y:64,z:0}});')
+    assert.equal(failedScaffoldRecovery.success,false,'missing scaffold materials fail the recovery movement')
+    assert.equal(failedScaffoldRecovery.sdkFailure.method,'skills.reachPositionWithScaffoldCleanup')
+    assert.equal(failedScaffoldRecovery.sdkFailure.result.ok,false)
+    assert.equal(failedScaffoldRecovery.skillResults.some(call=>call.skill==='skills.breakBlockAt'),false,'failed scaffold recovery prevents later edits')
     bot.state.route='ready'
     settings.agent_runtime='legacy'
     assert.equal((await run('await Promise.resolve(); log(bot,JSON.stringify(world.getPosition(bot)));')).success,true,'legacy generated code retains its original contract')

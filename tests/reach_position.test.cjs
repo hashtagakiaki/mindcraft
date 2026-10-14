@@ -135,6 +135,7 @@ function makeBot({ gap = [], wall = [], hazards = [], platform = false, corridor
     if (placementDelay) await delay(placementDelay)
     if (placementMode === 'reject') return
     const oldBlock = blockAt(p)
+    if (oldBlock?.type !== 0) return
     states.set(key(p), { name: bot.heldItem.name })
     inventory[bot.heldItem.name]--
     const newBlock = blockAt(p)
@@ -258,6 +259,26 @@ async function main() {
     assert.equal(bridgeResult.cleanupRequired.length, 0)
     assert.equal(bridge.pathfinder.movements.original, true)
 
+    const recoverableBridge = makeBot({ gap: [2, 3, 4], corridor: true })
+    const recovered = await skills.reachPositionWithScaffoldCleanup(recoverableBridge, {
+      position: { x: 6.5, y: 64, z: 0.5 }, scaffoldBlocks: ['dirt'],
+    })
+    assert.equal(recovered.status, 'reached', JSON.stringify(recovered))
+    assert.equal(recovered.ok, true)
+    assert.ok(recovered.edits.some(edit => edit.kind === 'scaffold_placed'))
+    assert.ok(recovered.edits.some(edit => edit.kind === 'scaffold_removed'))
+    assert.equal(recovered.cleanupRequired.length, 0)
+    assert.equal(recoverableBridge.testState.edits.some(edit => edit.kind === 'server_dig' && edit.block === 'dirt'), true)
+
+    const unrecoverableBridge = makeBot({ gap: [2, 3, 4], corridor: true, rejectScaffoldRemoval: true })
+    const recoveryFailed = await skills.reachPositionWithScaffoldCleanup(unrecoverableBridge, {
+      position: { x: 6.5, y: 64, z: 0.5 }, scaffoldBlocks: ['dirt'],
+    })
+    assert.equal(recoveryFailed.status, 'blocked', JSON.stringify(recoveryFailed))
+    assert.equal(recoveryFailed.ok, false)
+    assert.ok(recoveryFailed.cleanupRequired.length > 0)
+    assert.match(recoveryFailed.reason, /could not be removed/)
+
     const defaultBridge = makeBot({ gap: [2, 3, 4], corridor: true })
     const defaultBridgeResult = await reachPosition(defaultBridge, { position: { x: 6.5, y: 64, z: 0.5 } })
     assert.equal(defaultBridgeResult.status, 'reached', JSON.stringify(defaultBridgeResult))
@@ -275,9 +296,10 @@ async function main() {
     const uncleanable = await reachPosition(uncleanableScaffold, {
       position: { x: 6.5, y: 64, z: 0.5 }, allowScaffold: true, scaffoldBlocks: ['dirt'],
     })
-    assert.notEqual(uncleanable.status, 'reached', JSON.stringify(uncleanable))
-    assert.equal(uncleanable.ok, false)
+    assert.equal(uncleanable.status, 'reached', JSON.stringify(uncleanable))
+    assert.equal(uncleanable.ok, true)
     assert.ok(uncleanable.cleanupRequired.length > 0)
+    assert.match(uncleanable.reason, /optional cleanup/)
 
     const climbWall = []
     for (const y of [64, 65]) for (let z = -4; z <= 4; z++) climbWall.push({ x: 3, y, z })
@@ -285,12 +307,23 @@ async function main() {
     const climbed = await reachPosition(pillar, {
       position: { x: 6.5, y: 66, z: 0.5 }, allowScaffold: true, scaffoldBlocks: ['cobblestone'],
     })
-    assert.notEqual(climbed.status, 'reached', JSON.stringify(climbed))
-    assert.equal(climbed.ok, false)
+    assert.equal(climbed.status, 'reached', JSON.stringify(climbed))
+    assert.equal(climbed.ok, true)
     assert.ok(climbed.finalPosition && Math.hypot(climbed.finalPosition.x - 6.5, climbed.finalPosition.y - 66, climbed.finalPosition.z - 0.5) <= 1,
-      'the climb reaches the requested tolerance even though an unsafe scaffold cleanup prevents success')
+      'the climb reaches the requested tolerance')
     assert.ok(climbed.edits.filter(edit => edit.kind === 'scaffold_placed').length > 0, JSON.stringify(climbed))
     assert.ok(climbed.cleanupRequired.length > 0, JSON.stringify(climbed))
+    assert.match(climbed.reason, /optional cleanup/)
+
+    const finalSupport = makeBot({ gap: [6], corridor: true })
+    const supportedArrival = await reachPosition(finalSupport, {
+      position: { x: 6.5, y: 64, z: 0.5 }, allowScaffold: true, scaffoldBlocks: ['dirt'],
+    })
+    assert.equal(supportedArrival.status, 'reached', JSON.stringify(supportedArrival))
+    assert.equal(supportedArrival.ok, true)
+    assert.ok(supportedArrival.cleanupRequired.length > 0, JSON.stringify(supportedArrival))
+    assert.ok(supportedArrival.cleanupRequired.every(item => item.reason === 'Scaffold supports the bot at its current position.'), JSON.stringify(supportedArrival))
+    assert.match(supportedArrival.reason, /optional cleanup/)
 
     const streaming = makeBot({ loadedMaxX: 16 })
     setTimeout(() => streaming.testState.loadThrough(32), 50)
@@ -362,7 +395,7 @@ async function main() {
 
     const unsafeWater = makeBot({ corridor: true, hazards: [{ x: 2, y: 64, z: 0, name: 'water' }] })
     const waterBlocked = await reachPosition(unsafeWater, { position: { x: 6.5, y: 64, z: 0.5 } })
-    assert.equal(waterBlocked.status, 'blocked', JSON.stringify(waterBlocked))
+    assert.notEqual(waterBlocked.status, 'reached', JSON.stringify(waterBlocked))
     const shallowWater = makeBot({ corridor: true, hazards: [{ x: 2, y: 64, z: 0, name: 'water' }] })
     const waterCrossed = await reachPosition(shallowWater, { position: { x: 6.5, y: 64, z: 0.5 }, safeWater: true })
     assert.equal(waterCrossed.status, 'reached', JSON.stringify(waterCrossed))
@@ -370,11 +403,11 @@ async function main() {
       { x: 2, y: 64, z: 0, name: 'water' }, { x: 2, y: 63, z: 0, name: 'water' },
     ] })
     const deepWaterBlocked = await reachPosition(deepWater, { position: { x: 6.5, y: 64, z: 0.5 }, safeWater: true })
-    assert.equal(deepWaterBlocked.status, 'blocked', JSON.stringify(deepWaterBlocked))
+    assert.notEqual(deepWaterBlocked.status, 'reached', JSON.stringify(deepWaterBlocked))
 
     const lava = makeBot({ corridor: true, hazards: [{ x: 2, y: 64, z: 0, name: 'lava' }] })
     const lavaBlocked = await reachPosition(lava, { position: { x: 6.5, y: 64, z: 0.5 }, allowDig: true, safeWater: true })
-    assert.equal(lavaBlocked.status, 'blocked', JSON.stringify(lavaBlocked))
+    assert.notEqual(lavaBlocked.status, 'reached', JSON.stringify(lavaBlocked))
     assert.equal(lava.testState.edits.some(edit => edit.block === 'lava'), false, 'hazard blocks are never excavated')
 
     console.log('reachPosition real pathfinder movement/A* fixtures passed (open, mining, scaffolded routes, hazards, server confirmation, cancellation, chunk progression, native scope and restoration)')

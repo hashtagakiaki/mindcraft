@@ -376,7 +376,8 @@ function nativeExecutionSafety(windowMs) {
             const failed = action && (result === false || result?.ok === false)
                 || method === 'skills.approachBlock' && result?.status !== 'ready'
                 || method === 'skills.fellTree' && result?.status !== 'complete'
-                || method === 'skills.reachPosition' && (result?.status !== 'reached' || result?.ok !== true);
+                || method === 'skills.reachPosition' && (result?.status !== 'reached' || result?.ok !== true)
+                || method === 'skills.reachPositionWithScaffoldCleanup' && (result?.status !== 'reached' || result?.ok !== true || result?.cleanupRequired?.length > 0);
             if (failed) throw fail(method, new Error(`${method} failed: ${result === false ? "returned false" : result?.status ?? "ok:false"}`), result);
             return result;
         },

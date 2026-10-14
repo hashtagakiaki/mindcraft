@@ -87,11 +87,27 @@ s('reachPosition', {
     allowDig: field('boolean', { default: true }), allowScaffold: field('boolean', { default: true }),
     scaffoldBlocks: field('strings', { default: Object.freeze(['dirt', 'cobblestone']), description: 'Allowed scaffold types; only types actually in inventory are used.' }),
     safeWater: field('boolean', { default: false }),
-}, 'Reach an exact feet position using bounded replanning. By default, dig with the suitable equipped tool and scaffold with listed dirt/cobblestone types that are in inventory; pass allowDig:false and/or allowScaffold:false to prohibit those edits. Water traversal remains disabled unless safeWater:true. Scaffolds are cleaned up when safe. Returns {ok,status,finalPosition,reason,edits,cleanupRequired}; only reached is success, and every other status stops this execution.', a => a, {
+}, 'Reach an exact feet position using bounded replanning. By default, dig with the suitable equipped tool and scaffold with listed dirt/cobblestone types that are in inventory; pass allowDig:false and/or allowScaffold:false to prohibit those edits. Water traversal remains disabled unless safeWater:true. Owned scaffolds are removed when safe; cleanup is best-effort and never invalidates an arrival within tolerance. Any remaining scaffold positions are listed in cleanupRequired for optional later cleanup. Returns {ok,status,finalPosition,reason,edits,cleanupRequired}; only reached is success, and every other status stops this execution.', a => a, {
     argsObject: true,
     constraint: (a, fail) => {
         if (a.tolerance < 0.75) fail('tolerance', 'between 0.75 and 8 blocks');
         if (a.allowScaffold && a.scaffoldBlocks.length === 0) fail('scaffoldBlocks', 'a nonempty list when allowScaffold is true');
+        for (const block of a.scaffoldBlocks) if (!['dirt', 'cobblestone'].includes(block)) fail('scaffoldBlocks', 'dirt and/or cobblestone');
+        if (new Set(a.scaffoldBlocks).size !== a.scaffoldBlocks.length) fail('scaffoldBlocks', 'unique block names');
+    },
+});
+s('reachPositionWithScaffoldCleanup', {
+    position: position(), tolerance: distance({ default: 1, max: 8, description: 'Minimum 0.75 blocks; maximum 8 blocks.' }),
+    allowDig: field('boolean', { default: false }),
+    scaffoldBlocks: field('strings', { default: Object.freeze(['dirt', 'cobblestone']), description: 'Allowed scaffold types; only types actually in inventory are used.' }),
+    safeWater: field('boolean', { default: false }),
+}, 'Navigate using temporary scaffolds and require every scaffold placed by this call to be removed before success. By default, route digging is disabled to preserve built terrain; allowDig:true explicitly permits it. If cleanup is incomplete, returns a non-success status with remaining positions in cleanupRequired, and minecraft_execute stops with that result preserved. Water traversal remains disabled unless safeWater:true.', a => ({
+    ...a, allowScaffold: true,
+}), {
+    argsObject: true,
+    constraint: (a, fail) => {
+        if (a.tolerance < 0.75) fail('tolerance', 'between 0.75 and 8 blocks');
+        if (a.scaffoldBlocks.length === 0) fail('scaffoldBlocks', 'a nonempty list');
         for (const block of a.scaffoldBlocks) if (!['dirt', 'cobblestone'].includes(block)) fail('scaffoldBlocks', 'dirt and/or cobblestone');
         if (new Set(a.scaffoldBlocks).size !== a.scaffoldBlocks.length) fail('scaffoldBlocks', 'unique block names');
     },
