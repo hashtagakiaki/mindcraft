@@ -1,7 +1,7 @@
 'use strict'
 
 const assert = require('node:assert/strict')
-const { execFileSync } = require('node:child_process')
+const { execFileSync, spawn } = require('node:child_process')
 const { closeSync, mkdtempSync, openSync, readFileSync, rmSync } = require('node:fs')
 const { mkdtemp, mkdir, readFile, rm, writeFile } = require('node:fs/promises')
 const os = require('node:os')
@@ -35,6 +35,44 @@ function runFixture(executable, script, args = [], label = path.basename(script)
     if (captureFd !== undefined) closeSync(captureFd)
     rmSync(captureDir, { recursive: true, force: true })
   }
+}
+
+async function runFixtureAsync(executable, script, args = [], label = path.basename(script)) {
+  const captureDir = mkdtempSync(path.join(os.tmpdir(), 'mindcraft-fixture-output-'))
+  const capturePath = path.join(captureDir, 'combined.log')
+  let captureFd
+  try {
+    captureFd = openSync(capturePath, 'w')
+    const child = spawn(executable, [script, ...args], { stdio: ['inherit', captureFd, captureFd] })
+    const outcome = await new Promise((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', (code, signal) => resolve({ code, signal }))
+    })
+    if (outcome.code === 0 && !outcome.signal) {
+      process.stdout.write(`[ok] ${label}\n`)
+      return
+    }
+    const status = outcome.signal ? `signal ${outcome.signal}` : `exit ${outcome.code ?? 'unknown'}`
+    process.stderr.write(`\n[failed] ${label} (${status})\n`)
+    const output = readFileSync(capturePath)
+    if (output.length > 0) {
+      process.stderr.write(output)
+      if (output.at(-1) !== 0x0a) process.stderr.write('\n')
+    }
+    process.stderr.write(`[end failed fixture: ${label}]\n`)
+    throw new Error(`Fixture ${label} failed (${status})`)
+  } finally {
+    if (captureFd !== undefined) closeSync(captureFd)
+    rmSync(captureDir, { recursive: true, force: true })
+  }
+}
+
+async function runFixturesInParallel(fixtures) {
+  const results = await Promise.allSettled(fixtures.map(fixture =>
+    runFixtureAsync(node, path.join(__dirname, fixture))
+  ))
+  const errors = results.filter(result => result.status === 'rejected').map(result => result.reason)
+  if (errors.length > 0) throw new AggregateError(errors, 'Parallel Mindcraft fixtures failed')
 }
 
 async function write(root, relative, content) {
@@ -667,7 +705,6 @@ async function main() {
   runFixture(node, path.join(__dirname, 'minecraft_protocol_overrides.test.mjs'))
   runFixture(node, path.join(__dirname, 'place_store.test.cjs'))
   runFixture(node, path.join(__dirname, 'place_rpc.test.cjs'))
-  runFixture(node, path.join(__dirname, 'block_placement.test.cjs'))
   runFixture(node, path.join(__dirname, 'targeted_sdk.test.cjs'))
   runFixture(node, path.join(__dirname, 'chest_transfer.test.cjs'))
   runFixture(node, path.join(__dirname, 'place_actions.test.cjs'))
@@ -676,7 +713,7 @@ async function main() {
   runFixture(node, path.join(__dirname, 'operation_context.test.cjs'))
   runFixture(node, path.join(__dirname, 'idle_scheduling.test.cjs'))
   runFixture(node, path.join(__dirname, 'generation_cancellation.test.cjs'))
-  runFixture(node, path.join(__dirname, 'furnace_lifecycle.test.cjs'))
+  await runFixturesInParallel(['block_placement.test.cjs', 'furnace_lifecycle.test.cjs'])
   runFixture(node, path.join(__dirname, 'recovery_replanning.test.cjs'))
   runFixture(node, path.join(__dirname, 'management_reconnect.test.cjs'))
   runFixture(node, path.join(__dirname, 'management_auth.test.cjs'))
