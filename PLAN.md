@@ -70,161 +70,108 @@ Proposed operations (names and exact schemas may be adjusted during implementati
 
 ---
 
-## native SDKの公開面縮小 — 2026-10-16（設計のみ）
+## native SDKの公開面整理 — 2026-10-16（設計のみ）
 
-Goal: 日常の依頼でbotが選ぶ公開メソッドを82件から46件へ減らす。採取・製作・建築・収納・農作業・移動・戦闘・場所記憶・画像確認は短いSDK呼出しで行え、接近手順や派生観測の名前を選ばなくてよい。以下は提案であり未実装。上のdesktop-bot計画とは独立して進める。
+Goal: 日常・専門の目的をそのまま呼べるnative SDKを保ち、同じ観測の派生名と重複出力だけを整理する。専門機能をnativeから外す従前の46件案は撤回する。件数を目標にせず、意味のある引数が少なく自然に使えることを優先する。以下は未実装の設計で、上のdesktop-bot計画とは独立している。
 
-### 根拠と選択
+### 根拠と残す境界
 
-- 調査基準はHEAD `bc18f93c7e032898850bc771030bfa204ceaf345` と既存worktree。[`native_sdk.js`](src/agent/library/native_sdk.js) をimportして実数82件（skills 43 / world 21 / places 13 / vision 3 / diagnostics 1 / communication 1）を確認した。前回の引数・確認契約整理は維持するが、「個別の用途がある」だけでは公開理由にしない。
-- 現行の名前一覧・deferred docs・native facade・lintは同じregistryから作られる。[`coder.js`](src/agent/coder.js) のnative入口を狭めれば、内部/legacy関数を削除せず実際の選択肢を減らせる。common/advancedに表示を分けるだけの82件公開は採用しない。
-- [`world.js`](src/agent/library/world.js) の単体最寄り、predicate検索、player一覧、種類一覧は少数の検索から導ける。一方、座標/属性predicateは保護対象を避ける限定batchに必要なので失わない。`getNearestBlocksWhere` と [`targeted_sdk.test.cjs`](tests/targeted_sdk.test.cjs) には「座標predicateを適用してからlimit」の既存契約がある。取得済み上位N件を後からfilterする代替では不十分。
-- [`skills.js`](src/agent/library/skills.js) の接近、道具装備、操作後確認は目的skillの内部で動く。内部callerや [`commands/actions.js`](src/agent/commands/actions.js) が使う関数まで消さない。固定経路方針、数量の確認・部分完了、取消/所有、inventory gateも変えない。
-- [`places.js`](src/agent/places.js) は現在地点登録と観測地点登録を既に別の小さな内部処理で実現し、登録名を個人aliasにする。伝聞はsource:user / existence:unverifiedとして保存される。alias/home解決、再観測、ID移動も既存処理を再利用できる。永続schemaや新しい場所検索器は不要。
-- native navigationは `canOpenDoors:false` でdoor補助intervalも抑止されるため、`useDoor` は単なる移動の内部処理にできない。出入りを手動の開閉・通過手順へ戻さないため公開に残す。地形保全と経路編集の2つの座標移動も、破壊範囲の意味が違うため残す。
-- 採用する公開面は46件。数の目標を先に決めた最小化ではなく、派生名・内部手順・専門的操作を外した結果である。さらに減らすために製作/収納/農作業を汎用actionへまとめたり、接近・装備・道具操作を長い手順としてcallerへ戻したりしない。使いやすさの改善量や必要十分性を今回の静的調査で実測したとは扱わない。
+- 機能source `bc18f93c7e032898850bc771030bfa204ceaf345`（現在HEAD `29b553cc067b9434db9a4c269d8ffd3d61383ddf` はその後の文書変更）の [`native_sdk.js`](src/agent/library/native_sdk.js) は82件。内訳はskills 43 / world 21 / places 13 / vision 3 / diagnostics 1 / communication 1。名前一覧・deferred docs・facade・lint・完了metadataの正本は同じregistryのままにする。
+- 専門性は非公開にする理由ではない。取引、炉内回収、縦掘り、任意entityからの退避、職業/biome/製作候補、home/alias割当を通常の公開SDKに残す。hidden advanced一覧、追加discovery tool、module loader、mode/action unionは作らない。説明は現行どおり必要なmethodだけ遅延読込する。
+- [`skills.js`](src/agent/library/skills.js) の `wait` は取消可能な有限待機、`stay` はmodeとGoalsに意味のある行動で、置換できない。`approachBlock` は操作面を確保する目的、nearest移動はminDistance付き立位選択であり、目的座標を算術で選ぶ代替にしない。`isClearPath` は編集なしの経路照会で、移動実行と違う。これらはすべて公開に残す。ただし破壊・収納等の通常skillの前に重複して呼ばせない。
+- [`world.js`](src/agent/library/world.js) の `getBlockAtOffset` はメソッドを持つBlock/null、`inspectBlockAt` は時刻・loaded・操作面を持つ観測object。両者を同一視しない。surrounding/頭上照会も用途が明確な入口として残す。`vision.lookAtBlock` のloaded解決・中心照準と `lookAtPlayer` のat/withも、callerの手動確認・照準計算へ戻さない。
+- [`places.js`](src/agent/places.js) の現在地点・実物観測・伝聞は登録根拠が異なる。inspectは保存snapshotの読取、verifyは再観測と永続record更新、resolveAliasは移動なしの解決である。自動再観測やID/aliasを兼用する新引数へまとめず、現在の13入口と信頼区分を維持する。source:user/unverifiedを観測事実なしに昇格させない。
+- 地形保全の `goToPosition` と経路編集の `reachPosition`、各skillの固定経路方針、コンパクトな結果、数量のserver確認、部分完了、取消・owner・inventory gateを保つ。native navigationはdoor自動開放を抑止しているため `useDoor` も残す。内部で使うというだけで公開目的を取り去らない。
 
-### 公開する46件と引数
+### 全82件の対応
 
-以下はschemaの略記。実際は名前付きobjectを1つ渡し、`?` は省略可、無入力は `()`。記載のない引数は追加しない。既定値・単位は現行を維持し、変更点は後述する。top-level fieldは合計90個（schema上必須38 / 任意52、現行138個）。positionのx/y/zは1対象を表す1fieldとして数える。施設登録時のpositionなど条件付き必須は別途検証する。各呼出しで90個を判断する意味ではない。
-
-```text
-skills.craftItem({itemName, quantity?})
-skills.smeltItem({itemName, quantity?, furnacePosition?})
-skills.attackEntity({entity, kill?})
-skills.defendSelf({radius?})
-skills.collectBlock({blockType, count?, exclude?})
-skills.pickupNearbyItems()
-skills.breakBlockAt({position})
-skills.inspectChest({position?})
-skills.placeBlock({blockType, position, facing?, axis?, half?, attachTo?, dontCheat?})
-skills.equip({itemName})
-skills.discard({itemName, quantity})
-skills.putInChest({itemName, quantity, chestPosition?})
-skills.takeFromChest({itemName, quantity, chestPosition?})
-skills.consume({itemName?})
-skills.giveToPlayer({itemName, playerName, quantity?})
-skills.goToPosition({position})
-skills.reachPosition({position})
-skills.goToPlayer({username, minDistance?})
-skills.followPlayer({username, minDistance?})
-skills.avoidEnemies({distance?})
-skills.stay({seconds?})
-skills.useDoor({position?})
-skills.goToBed()
-skills.tillAndSow({position, seedType?})
-skills.goToSurface()
-skills.useToolOn({toolName, targetName})
-skills.useToolOnBlock({position, toolName?})
-skills.useItem({itemName})
-skills.tendNearbyFarm({scope?, searchRadius?, radius?, startPosition?, seedReserve?, chestPosition?})
-skills.fellTree({startPosition?, searchRadius?})
-world.inspectBlockAt({position})
-world.getNearestFreeSpace({size?, radius?})
-world.getNearestBlocks({blockTypes?, predicate?, radius?, limit?})
-world.getNearbyEntities({radius?})
-world.getInventoryCounts()
-world.getPosition()
-places.find({text?, kind?, purpose?, dimension?, existence?, staleBefore?, limit?})
-places.inspect({placeId})
-places.goTo({place})
-places.remember({name, kind?, purpose?, position?})
-places.rememberReported({name, kind, position, purpose?, dimension?})
-places.setOutputStorage({fromId, storageId})
-places.tendFarm({farmId, seedReserve?})
-vision.lookAtPosition({position})
-diagnostics.lastTask()
-communication.sendToBot({recipient, message})
-```
-
-内訳はskills 30 / world 6 / places 7 / vision 1 / diagnostics 1 / communication 1。現行の45名を残して1名 `places.remember` を追加し、現行37名をnativeから外すため、差引36件減る。残す45件もすべて変更するのではなく、変更は次の小さな集約に限定する。
-
-- **block検索を1入口にする。** `getNearestBlocks` に任意のfunction predicateを加える。blockTypesだけなら既存のpalette最適化、predicateがあれば座標付きBlockで判定する。両指定時はAND、無指定時は既存の非air検索。判定後のdistance順にlimitを適用する。predicateはfilterであり編集を含まない。radius上限・同期戻り値・BlockのgetProperties()/position・未知の扱いを保つ。numeric ID指定の専門入口は内部に残し、nativeでは名前とfunctionを使う。
-- **観測済み場所の登録を1入口にする。** 新しい `remember` はkind既定other。position省略は現在の代表点をbase/otherとして登録する場合だけ許可し、storage/farm等は対応するloaded blockのpositionを必須にする。position指定時は既存rememberObservedAtの検証を使う。自動aliasは登録名のまま、施設の範囲や出入口まで観測したとは扱わない。`rememberReported` は別methodとして残し、未ロード地点や他dimensionの伝聞を観測済みにしない。
-- **保存地点への移動を1入口にする。** `goTo({place})` のplaceはstable IDまたは正確な個人alias/home文字列。fuzzy検索や直前のselected状態で移動先を決めない。両方に解決して違うIDになる場合は曖昧さとして拒否し、解決後は既存のdimension/欠落/到着確認を使う。返す結果には確定したplaceIdを含める。findは曖昧な候補選択、goToは確定した1対象への移動のまま。
-- **保存recordの確認を1入口にする。** `inspect({placeId})` は保存snapshotと現在確認を返す。現在dimensionのloaded target、または近傍のbase/other代表点だけ既存verifyで再観測する。未ロード・遠方・別dimensionはhistorical recordと現在unknownの区別を返し、観測時刻/存在状態を更新しない。見た事実なしに伝聞をobservedへ昇格しない。store/RPC失敗をunknownに握りつぶさない。記録更新を伴うqueryであることを説明する。
-- **blockの通常操作を既存入口へ寄せる。** `useToolOnBlock` のtoolName既定をhandにし、lever等の素手activationも表す。item/toolを使うときだけ指定する。現在対象の再解決、内部接近、バケツの確認は現行のまま。開く/通過/閉じるdoor専用手順は残すuseDoorに任せる。
-
-### 外す現行37名の対応（重複なし）
-
-**既存の公開操作または上の集約へ吸収する19件**。下の名前はnative一覧・doc tool・facade・lintから除き、内部/legacyには残す。
+**現行名で継続公開する74件**。後述するblock検索・entity観測の整理以外、名前・引数・既定値・戻り値・確認強度を維持する。取引等もregistry、実facade、lint、deferred doc toolに存在する通常のpublic methodとする。
 
 ```text
-skills.log skills.attackNearest skills.activateNearestBlock
-world.getBlockAtOffset world.getSurroundingBlocks world.getNearestBlocksWhere world.getNearestBlock world.getNearestEntityWhere world.getNearbyPlayers world.getNearbyEntityTypes world.getNearbyPlayerNames world.getNearbyBlockTypes
-places.verify places.resolveAlias places.goToAlias places.rememberHere places.rememberObservedAt
-vision.lookAtBlock vision.lookAtPlayer
-```
-
-logは既存 `log(bot, message)`、最寄りの単体blockは `getNearestBlocks({blockTypes,limit:1})[0]`、entity/playerは近傍配列のfind/filter、種類一覧はその配列のmap/Setで十分。相対block/足元3点は現在位置から `inspectBlockAt` へ渡す短い座標計算で得られる。block/playerを見るときも既知の中心/目の座標を唯一のvision入口へ渡す。lookAtPlayerのwith（視線方向の模倣）はこの置換に含まれず、後述の非対応範囲となる。最寄り攻撃は近傍配列のfindとattackEntity、block activationは座標指定useToolOnBlockが担う。いずれもraw bot/pluginを通常の代替にしない。
-
-**内部手順にする6件**。
-
-```text
-skills.wait skills.approachBlock skills.goToNearestBlock skills.goToNearestEntity
+skills.craftItem skills.wait skills.smeltItem skills.clearNearestFurnace
+skills.attackNearest skills.attackEntity skills.defendSelf skills.collectBlock
+skills.pickupNearbyItems skills.breakBlockAt skills.approachBlock skills.inspectChest
+skills.placeBlock skills.equip skills.discard skills.putInChest
+skills.takeFromChest skills.consume skills.giveToPlayer skills.goToPosition
+skills.reachPosition skills.goToNearestBlock skills.goToNearestEntity skills.goToPlayer
+skills.followPlayer skills.moveAway skills.moveAwayFromEntity skills.avoidEnemies
+skills.stay skills.useDoor skills.goToBed skills.tillAndSow
+skills.activateNearestBlock skills.showVillagerTrades skills.tradeWithVillager skills.digDown
+skills.goToSurface skills.useToolOn skills.useToolOnBlock skills.useItem
+skills.tendNearbyFarm skills.fellTree
+world.inspectBlockAt world.getNearestFreeSpace world.getBlockAtOffset world.getSurroundingBlocks
+world.getFirstBlockAboveHead world.getNearestBlocks world.getNearbyEntities world.getVillagerProfession
+world.getInventoryCounts world.getCraftableItems world.getPosition world.getBiomeName
 world.isEntityType world.isClearPath
+places.find places.inspect places.verify places.setHome
+places.goTo places.resolveAlias places.goToAlias places.rememberHere
+places.rememberObservedAt places.rememberReported places.setOutputStorage places.setAlias
+places.tendFarm
+vision.lookAtPlayer vision.lookAtPosition vision.lookAtBlock
+diagnostics.lastTask
+communication.sendToBot
 ```
 
-目的skillの接近・分類・経路・有限waitを直接選ばせない。製作/収納等はそれ自体を呼び、確認待ちは内部で完結する。playerへの一時接近/追従はそれぞれ専用の残すmethodを使う。waitをstayへ機械変換しない（stayはmodeとGoalsに意味がある）。任意のlandmarkへのcloseness指定まで同等に残す計画ではない。
+**公開名だけを統合する8件**。内部/legacy/chatの関数は削除しない。新method名は追加しない。
 
-**日常公開面から意図的に外す12件**。
+| 現行名 | 公開SDKでの代替・維持する意味 |
+| --- | --- |
+| `skills.log` | 既存の出力helper `log(bot, message)`。同じoperation outputへ書く入口を1つにする。 |
+| `world.getNearestBlocksWhere` | `world.getNearestBlocks({predicate, radius?, limit?})`。座標付きBlockのfunction、numeric ID、ID配列を既存同様に扱う。 |
+| `world.getNearestBlock` | `world.getNearestBlocks({blockTypes:[name], radius, limit:1})[0] ?? null`。単体Block/nullと最寄り選択を保持。 |
+| `world.getNearestEntityWhere` | 距離順 `world.getNearbyEntities({radius}).find(predicate) ?? null`。任意predicateで最寄りの1体を選べる。 |
+| `world.getNearbyPlayers` | `world.getNearbyEntities({radius}).filter(e => e.type === 'player')`。自分以外のloaded playerを距離順に得る。 |
+| `world.getNearbyEntityTypes` | 近傍entity配列のnameをmap/Setで重複除去する。 |
+| `world.getNearbyPlayerNames` | 上のplayer配列のusernameをmap/Setで重複除去する。 |
+| `world.getNearbyBlockTypes` | 近傍block配列のnameをmap/Setで重複除去する。 |
 
-```text
-skills.clearNearestFurnace skills.moveAway skills.moveAwayFromEntity skills.showVillagerTrades skills.tradeWithVillager skills.digDown
-world.getFirstBlockAboveHead world.getVillagerProfession world.getCraftableItems world.getBiomeName
-places.setHome places.setAlias
-```
+集計は **82→74件**（skills 42 / world 14 / places 13 / vision 3 / diagnostics 1 / communication 1）。全82件は継続公開74件と統合8件に重複なく対応し、専門機能の除外・内部化はない。これは設計の集計であり、実装時の自然な使用に必要な調整を妨げる上限ではない。
 
-取引、炉内全回収、任意方向/任意entityからの退避、指定深さの垂直穴、専用の頭上走査、職業/biome/製作可能品の網羅列挙、既存地点へのhome/alias再割当、および先述したplayerの視線方向の模倣は初回のnative公開範囲に含めない。敵からの退避、目的座標への地下移動、要求アイテムの製作、登録名で帰る日常用途は残るが、上記の完全な代替ではない。既存home/aliasと内部/chat機能は壊さない。減らした機能の代わりにrawアクセスや長い手順をbotへ指示しない。
+### 統合部分だけの仕様
 
-### 日常の呼出しが長い手順へ戻らないこと
+1. **block検索。** `getNearestBlocks({blockTypes?, predicate?, radius?, limit?})` のpredicateは現在のblockPredicate型を引き継ぐ。両条件があればAND、predicateを指定してblockTypesを省略した場合はそのpredicate自体を使い、air等の明示検索を勝手に除外しない。両方省略時は現在の非air検索を維持する。filterを適用してから距離順にlimitをかける。取得済み上位N件の後段filterへ置き換えない。numeric ID/名前のみは既存palette最適化、functionは座標付きBlockとgetProperties()/Vec3を使う。同期値・radius上限・未ロードをairと解釈しない境界を保つ。
+2. **entity観測。** `getNearbyEntities({radius?})` は現在の距離順とEntity referenceを保持し、native projectionで自身のentity IDを除く。loaded entityの照会であり、LOSで可視な対象だけとはしない。player/他botも残す。find/filterはこの1回の配列に行い、キャッシュや追加の世界走査を作らない。旧最寄りpredicateの半径端点は他の近傍観測と同じ「半径以内」に揃える。
+3. **半径の意味。** 派生helperの旧既定（entity種16 / player名64 / block種16 / 単体block16）は短い呼出し例のradiusで表し、host設定のmax_search_radius内に収める。特に無引数のentity種/player名が設定上限を迂回していた挙動は維持しない。検索上限を広げず、旧16/64より設定値が小さければ観測範囲も設定値までとなることを記す。deferred docsの例にはhost側で有効半径を数値として埋め込み、callerに設定取得やmin計算を要求しない。entityの既定16、blockの既定8は変えない。
+4. **短い観測の扱い。** 種類/名前の配列は取得済み候補の要約であり、読み込み範囲全体や未ロード領域にその種類が存在しない保証にはしない。block種の旧件数上限10000、順序、null/unknownと空の候補の区別を既存の観測契約に沿って説明する。安全な短いfilter/map/findを代替にできるものだけを統合し、raw bot/pluginや長い手順は代替にしない。
+
+### 呼び方と公開能力の確認例
 
 ```js
-// 採取→製作→配置。接近・道具装備・確認用waitは選ばない。
-await skills.collectBlock({blockType:'oak_log', count:2});
-await skills.craftItem({itemName:'oak_planks', quantity:8});
-await skills.placeBlock({blockType:'oak_planks', position:{x:10,y:64,z:-3}});
-
-// 範囲と成熟度で絞ったbatch。predicateを通った8件を取得してから編集する。
-const crops = world.getNearestBlocks({blockTypes:['wheat'], radius:8, limit:8,
+// 属性・範囲を適用してから8件を選ぶ。接近/装備/確認待ちはskill側。
+const crops = world.getNearestBlocks({blockTypes:['wheat'],radius:8,limit:8,
   predicate:b => b.position.x >= 10 && Number(b.getProperties().age) === 7});
 for (const crop of crops) await skills.breakBlockAt({position:crop.position});
-// 畑全体の収穫・再植付けはtendNearbyFarm/tendFarmを1回呼ぶ。
+// 農地全体なら既存のtendNearbyFarm/tendFarmを使う。
 
-// 明示収納と素手activation。最寄り選択は省略時だけ行う。
-const chest = await skills.inspectChest();
-await skills.putInChest({itemName:'oak_planks', quantity:4, chestPosition:chest.position});
-await skills.useToolOnBlock({position:{x:11,y:64,z:-3}});
+// 観測派生は短い配列操作。半径はhost上限内の有効値を使う。
+const nearby = world.getNearbyEntities();
+const players = nearby.filter(e => e.type === 'player');
+const types = [...new Set(nearby.map(e => e.name))];
+const cow = nearby.find(e => e.name === 'cow') ?? null;
+log(bot, JSON.stringify({players:players.map(e => e.username),types}));
 
-// 観測した施設を保存し、同じ名前で帰る。出力収納の関係も維持できる。
-const store = await places.remember({name:'共有倉庫',kind:'storage',position:chest.position});
-await places.goTo({place:'共有倉庫'});
-const currentStore = await places.inspect({placeId:store.place.id});
-
-// 日常の追従・戦闘・探索を維持。存在しない対象を成功扱いしない。
-await skills.followPlayer({username:'Steve'}); // 追従は取消まで続く独立依頼。
-// 別の依頼で、近傍配列は距離順。対象選択が必要な攻撃だけfindする。
-const zombie = world.getNearbyEntities().find(e => e.name === 'zombie');
-if (zombie) await skills.attackEntity({entity:zombie});
-await skills.reachPosition({position:{x:30,y:50,z:-3}});
-await skills.goToSurface();
-await vision.lookAtPosition({position:{x:10.5,y:64.5,z:-2.5}});
+// 専門操作も通常のdeferred docsを読んで直接呼ぶ。raw操作は不要。
+const trades = await skills.showVillagerTrades({entityId:123});
+const first = trades?.find(t => !t.disabled);
+if (first) await skills.tradeWithVillager({entityId:123,index:first.index,times:1});
+await skills.clearNearestFurnace({furnacePosition:{x:10,y:64,z:-3}});
+await skills.digDown({distance:3});
+await vision.lookAtPlayer({playerName:'Steve',direction:'with'});
 ```
 
-例は別々の短い依頼/batchを示し、全部を1operationに連結する例ではない。API削減を理由に保護領域を推定させたり、predicateで対象を選ぶ責任や最後の成果確認を省いたりしない。block/playerの照準に必要なloaded状態・座標は構造化観測から取得し、画像未取得を確認済みにしない。
+例は独立した目的の抜粋で、全行を1依頼として連結する意味ではない。専門操作の対象・取引選択・作業許可はcallerが決め、SDKは既存の接近・装備・確認・取消を担当する。API整理を理由に既存の結果保証を強く書き換えたり、確認待ちをwaitの連打としてcallerへ戻したりしない。
 
 ### 実装順序と受入確認
 
-- [ ] **公開境界を46件へ変更する。** registry定義と薄いnative adapterだけを中心に、上の全件分類を実装する。世界操作core、内部export、chat、legacy capability docsはそのまま利用できることを確認する。新しいadvanced registry、discovery tool、action/mode unionやglobal設定は作らない。`native_sdk.test.cjs` で提案した公開名・引数・既定値とdocs/facade/metadataの一致を確認する。削除37名はdot/bracket参照のどちらもnative facadeに存在せず、説明toolにも載らない。件数とfield数は設計の集計値であり、使い勝手に必要な修正を妨げる独立した上限にしない。現在の「world exportをすべて公開する」fixtureは明示した公開subsetへ直す。
-- [ ] **少数の集約と通常workflowを完成させる。** blockTypes＋predicateのAND、filter前後のlimit、距離順、palette最適化、座標付きBlockは `targeted_sdk.test.cjs` の既存fixtureで確認する。`place_agent.test.cjs` / `place_actions.test.cjs` / `place_rpc.test.cjs` で現在地点/施設/伝聞の登録、loaded/unknownの再確認、ID/alias衝突拒否、home互換、world/dimension境界、storage linkと保存farmを確認する。位置指定の素手activationは既存interaction fixtureで確認する。別の巨大な探索・場所管理層は追加しない。
-- [ ] **botの実行導線を同じ公開面に揃える。** [`src/process/codex/AGENTS.md`](src/process/codex/AGENTS.md) の推奨predicate検索と施設登録を新入口へ変え、削除methodを前処理/回復策として案内しない。READMEのnative例、動的catalog、deferred docs、lint、native bindingsを揃える。protocol 10を次へ進め、`codex_session.test.cjs` で旧scopeは新threadを1回選び、同じ新scopeは再開することを確認する。既存memory/threadファイルを削除・移行しない。
-- [ ] **短い組合せを実行境界まで確認して完了する。** real Coder/SES/ActionManager fixtureで採取→製作→設置、明示チェスト、保存farm/場所移動、近傍entity選択→攻撃、画像取得の代表コードが削除名なしで通り、各actionのpartial/unknown/取消後は後続SDKが止まることを確認する。query false/null/unknownはdataとして続けられること、catch/未awaitで失敗停止を迂回できないこと、確認数量・内部cleanup記録を失わないことを保つ。fixtureは実ゲームでの使いやすさの測定とは区別する。
+- [ ] **統合8名だけをnative公開面から外し、薄い検索adapterを揃える。** `native_sdk.js` の定義を基準にcatalog・deferred docs・facade・完了metadata・lintを同時更新する。`native_sdk.test.cjs` で継続名、追加predicate、削除名のdot/bracketアクセス不可、2bot分離、sync/asyncと引数検証の保持を確認する。件数だけを通過条件にしない。world export全公開を要求する現fixtureは意図した公開subsetへ修正する。
+- [ ] **派生観測が短く安全に置換できることを確認する。** `targeted_sdk.test.cjs` / `world_observation.test.cjs` で座標predicateがlimit前に作用すること、blockTypesとのAND、ID/ID配列とfunction、airの明示検索、距離順、Blockメソッド、unknown、entity自身の除外とplayer/他bot保持を確認する。小さいmax_search_radiusでは旧16/64を迂回せず、doc例も有効値になることを確認する。内部/legacyの既存helperは変更しない。
+- [ ] **残す専門目的がnativeから使えることを代表workflowで確認する。** real Coder/SES/ActionManager境界の既存fixtureに必要な最小ケースを加え、取引一覧→1始まりindexの取引、明示炉回収、digDown、任意entity退避、nearest block/entityのminDistance、approachBlockとisClearPathの照会を通す。画像fixtureではblock未知時に撮影しないこととplayerのwith、場所fixtureではhome/alias設定→解決/移動、現在地点/実物/伝聞の登録とread-only inspect/verify更新の区別を保持する。wait中の取消とstayのmode/単独Goals完了が混同されないことも既存session/interaction fixtureで確認する。これらはAPI到達性と既存契約の回帰確認であり、新たなゲーム内成功保証ではない。
+- [ ] **botの案内と保存scopeを一致させて完了する。** READMEと [`src/process/codex/AGENTS.md`](src/process/codex/AGENTS.md) の推奨block検索・派生観測・出力を更新する。接近/equipは通常作業の前処理として重複実装させず、必要な専門目的では使えると説明する。places/visionの既存自然な入口は変えない。protocol 10を次へ進め、`codex_session.test.cjs` で旧SDK scopeは一度新threadを選び、新scopeは再開することを確認する。旧履歴は削除しない。queryのfalse/null/unknownはdata、action失敗/部分結果はbatch停止、catch/未awaitでも停止を迂回できない契約を維持する。
 
-実装時は既定Node20の関連fixture後に必須 `tests/run-tests.cjs`、Shared CLI `codex-test run --scope fast --project mindcraft`、full diff/`git diff --check`を行う。今回の中心は公開境界と検索/記憶adapterなので、変更しないゲームcoreの全域live benchmarkは追加しない。実装中にworld操作coreを変える必要が判明した場合だけ、その差分の未確認事項に限って既存templateコピー・許可loopback 25569/25570で直接確認する。公開件数だけで成功率向上を主張しない。
+実装時は既定Node20の関連fixture後、必須 `tests/run-tests.cjs`、Shared CLI `codex-test run --scope fast --project mindcraft`、full diff/`git diff --check`を行う。変更しない専門ゲームcoreまで一律のlive benchmarkは増やさない。実装中にworld操作を変える必要が生じた場合だけ、その具体的な未確認事項を既存templateコピー・許可loopback 25569/25570で確認する。使いやすさや成功率の改善を今回の静的調査から実測値として主張しない。
 
 ### 境界と回復
 
-- 今回はPLAN追記と静的確認だけ。機能実装、suite、依存install、ゲーム起動、live操作、manual pin/applyは行わない。計画文書だけをcommit/pushする。5つの既存dirtyファイルとdesktop-bot計画を保持する。専門用途を公開対象から外す判断は本案の提案であり、実装済み・ユーザー確認済みとは扱わない。
-- 実装が依頼されたら既存user差分を分離してtask差分だけを検証・own originへcommit/pushし、親AGENTSの継続指示に従い検証済sourceをbot-only applyする。対象の正本・bundle/readinessをplay手順で確認し、server/world、memory/thread保存内容、Ollama停止を保持する。
-- rollbackは直前の検証済source/bundleへ戻す。新しい公開面と旧scopeを混在させず、旧履歴を削除しない。作業済みのblock/inventory変更はsource rollbackで戻らないため、曖昧な結果をreplayしない。登録recordの永続形式は変えない。
-- nativeから外した専門機能は需要が具体的に発生した時に、その目的を短く満たす入口として再検討する。最初から全82件を復帰できる裏口や、常用外method一覧を用意しない。
+- 今回は計画修正と静的確認だけ。機能実装、suite、依存install、ゲーム起動、live操作、manual pin/applyを行わない。計画文書だけを通常の規則でcommit/pushし、desktop-bot計画と既存5 dirtyファイルを保持する。
+- 実装が依頼されたらuser差分を分離し、task差分だけを検証・own originへcommit/pushした後、親AGENTSの継続指示とplayの対象確認/readiness/rollback手順に従いbot-only applyする。server/world、memory/thread保存内容、Ollama停止状態を保つ。
+- source/bundleを戻せば公開契約を復元できる。新旧SDK scopeを混在させず、旧履歴を削除しない。実行済みのblock/inventory変更はsource rollbackで戻らないため、不確かな操作をreplayしない。永続record schemaと専門機能の実装は変えない。
