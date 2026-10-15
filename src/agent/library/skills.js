@@ -1690,8 +1690,16 @@ async function resolveChestTransferTarget(bot, chestPosition) {
     const x = chestPosition.x, y = chestPosition.y, z = chestPosition.z;
     let target = world.inspectBlockAt(bot, x, y, z);
     if (!target.loaded) {
-        log(bot, `Chest target at ${target.position.x}, ${target.position.y}, ${target.position.z} is unknown because it is not loaded.`);
-        return null;
+        const reached = await goToPosition(bot, Math.floor(x) + 1.5, Math.floor(y), Math.floor(z) + 0.5, 1);
+        if (!reached) {
+            log(bot, `Chest target at ${target.position.x}, ${target.position.y}, ${target.position.z} is unknown and its exact approach position was not reached.`);
+            return null;
+        }
+        target = world.inspectBlockAt(bot, x, y, z);
+        if (!target.loaded) {
+            log(bot, `Chest target at ${target.position.x}, ${target.position.y}, ${target.position.z} is still unknown after approaching its exact position.`);
+            return null;
+        }
     }
     if (!['chest', 'trapped_chest'].includes(target.name)) {
         log(bot, `Target at ${target.position.x}, ${target.position.y}, ${target.position.z} is ${target.name}, not a chest.`);
