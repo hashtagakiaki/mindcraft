@@ -8,7 +8,7 @@ import craftingSync from "./crafting_sync.js";
 import { placeBlockOriented } from './block_placement.js';
 import { resolveBlockInteraction, makeBlockInteractionGoal, interactionFaceVector, interactionEye } from './block_interaction.js';
 import { trackSkill, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, withSkillPhase, registerOwnedPromise, withNativeNavigationEditScope, nativeNavigationEditScopeActive } from './operation_context.js';
-import { awaitNavigationPlacementSettled, beginNavigationEdit, navigationPolicy, navigationScaffoldsPlaced, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, placeAndConfirmNavigationScaffold, recordNavigationArrival, registerNavigationCleanup, trackNavigationSegment } from './navigation_policy.js';
+import { awaitNavigationPlacementSettled, beginNavigationEdit, navigationPolicy, navigationScaffoldsPlaced, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, placeAndConfirmNavigationScaffold, recordNavigationArrival, registerNavigationCleanup, registerNavigationScaffoldSettledCallback, trackNavigationSegment } from './navigation_policy.js';
 
 const require = createRequire(import.meta.url);
 
@@ -939,8 +939,14 @@ export async function attackEntity(bot, entity, kill=true) {
 
     if (bot.pathfinder) bot.pathfinder.setMovements(navigationMovements(bot));
     const scaffoldsBeforeCombat = navigationScaffoldsPlaced(bot);
+    let combatWeaponRestoredAt = scaffoldsBeforeCombat;
     const restoreCombatWeapon = async () => {
-        if (navigationScaffoldsPlaced(bot) > scaffoldsBeforeCombat) await equipHighestAttack(bot);
+        await awaitNavigationPlacementSettled(bot);
+        const placed = navigationScaffoldsPlaced(bot);
+        if (placed > combatWeaponRestoredAt) {
+            await equipHighestAttack(bot);
+            combatWeaponRestoredAt = placed;
+        }
     };
     let pos = entity.position;
     await equipHighestAttack(bot)
@@ -951,6 +957,7 @@ export async function attackEntity(bot, entity, kill=true) {
             if (!await goToPosition(bot, pos.x, pos.y, pos.z)) return false;
         }
         console.log('attacking mob...')
+        await restoreCombatWeapon();
         await bot.attack(entity);
         await restoreCombatWeapon();
         return true;
@@ -963,6 +970,7 @@ export async function attackEntity(bot, entity, kill=true) {
         bot.on('entityDead', onEntityDead);
         bot.on('entityGone', onEntityGone);
         let pvpStopped = false;
+        const unregisterScaffoldRestore = registerNavigationScaffoldSettledCallback(bot, () => restoreCombatWeapon());
         try {
             await trackNavigationSegment(bot, async () => {
                 try {
@@ -984,6 +992,7 @@ export async function attackEntity(bot, entity, kill=true) {
             log(bot, `Failed to kill ${entity.name}: ${err.message}.`);
             return false;
         } finally {
+            unregisterScaffoldRestore();
             try {
                 if (!pvpStopped) bot.pvp.stop();
             } finally {
@@ -1005,14 +1014,26 @@ export async function defendSelf(bot, range=9) {
      * await skills.defendSelf(bot);
      * **/
     const scaffoldsBeforeCombat = navigationScaffoldsPlaced(bot);
+    let combatWeaponRestoredAt = scaffoldsBeforeCombat;
+    const restoreCombatWeapon = async () => {
+        await awaitNavigationPlacementSettled(bot);
+        const placed = navigationScaffoldsPlaced(bot);
+        if (placed > combatWeaponRestoredAt) {
+            await equipHighestAttack(bot);
+            combatWeaponRestoredAt = placed;
+        }
+    };
     bot.modes.pause('self_defense');
     bot.modes.pause('cowardice');
     let attacked = false;
     let enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
     if (enemy && bot.pathfinder) bot.pathfinder.setMovements(navigationMovements(bot));
     if (enemy) {
-        const completed = await trackNavigationSegment(bot, async () => {
-            try {
+        const unregisterScaffoldRestore = registerNavigationScaffoldSettledCallback(bot, () => restoreCombatWeapon());
+        let completed;
+        try {
+            completed = await trackNavigationSegment(bot, async () => {
+                try {
                 while (enemy) {
                     await equipHighestAttack(bot);
                     if (bot.entity.position.distanceTo(enemy.position) >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
@@ -1025,6 +1046,7 @@ export async function defendSelf(bot, range=9) {
                             await goToGoal(bot, inverted_goal);
                         } catch (err) {/* might error if entity dies, ignore */}
                     }
+                    await restoreCombatWeapon();
                     bot.pvp.attack(enemy);
                     attacked = true;
                     await new Promise(resolve => setTimeout(resolve, 500));
@@ -1032,8 +1054,9 @@ export async function defendSelf(bot, range=9) {
                     if (bot.interrupt_code) return false;
                 }
                 return true;
-            } finally { bot.pvp.stop(); }
-        });
+                } finally { bot.pvp.stop(); }
+            });
+        } finally { unregisterScaffoldRestore(); }
         if (!completed) return false;
     }
     if (navigationScaffoldsPlaced(bot) > scaffoldsBeforeCombat) await equipHighestAttack(bot);

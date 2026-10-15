@@ -226,8 +226,14 @@ async function main() {
     entities: [combatTarget], items: [{ name: 'iron_sword', type: 1, attackDamage: 6 }, { name: 'dirt', type: 2, count: 4 }],
     blockStates: [[scaffoldPosition, makeBlock('air', scaffoldPosition, { type: 0 })], [scaffoldSupport.position, scaffoldSupport]],
     async onAttack(_entity, bot) {
+      combat.attackEquipment ??= []
+      combat.attackEquipment.push(bot.heldItem?.name ?? null)
+      if (combat.attackEquipment.length !== 1) return
       await bot.equip({ name: 'dirt', type: 2 })
       await bot.placeBlock(scaffoldSupport, { x: 1, y: 0, z: 0 })
+      for (let attempt = 0; attempt < 100 && bot.heldItem?.name !== 'iron_sword'; attempt++)
+        await new Promise(resolve => setTimeout(resolve, 10))
+      combat.attackEquipment.push(bot.heldItem?.name ?? null) // simulated next strike during the same fight
       bot.emit('entityDead', combatTarget)
     }
   })
@@ -252,6 +258,36 @@ async function main() {
   assert.equal(movementSettings[0].allow1by1towers, false, 'combat route cannot create tall one-block pillars')
   assert.equal(combat.blockAt(scaffoldPosition).name, 'dirt', 'confirmed combat scaffold may remain')
   assert.deepEqual(equipped, ['iron_sword', 'dirt', 'iron_sword'], 'confirmed route scaffold restores the combat weapon')
+  assert.deepEqual(combat.attackEquipment, ['iron_sword', 'iron_sword'], 'the next strike during the continuing fight uses the combat weapon')
+
+  const defendingTarget = { id: 20, name: 'zombie', type: 'hostile', position: makePosition(1, 0, 0) }
+  const defendingBlockPosition = makePosition(2, 0, 0)
+  const defendingSupport = makeBlock('stone', makePosition(1, 0, 0))
+  const defending = makeBot({
+    entities: [defendingTarget],
+    items: [{ name: 'iron_sword', type: 1, attackDamage: 6 }, { name: 'dirt', type: 2, count: 4 }],
+    blockStates: [[defendingBlockPosition, makeBlock('air', defendingBlockPosition, { type: 0 })], [defendingSupport.position, defendingSupport]],
+    async onAttack(_entity, bot) {
+      await bot.equip({ name: 'dirt', type: 2 })
+      await bot.placeBlock(defendingSupport, { x: 1, y: 0, z: 0 })
+      for (let attempt = 0; attempt < 100 && bot.heldItem?.name !== 'iron_sword'; attempt++)
+        await new Promise(resolve => setTimeout(resolve, 10))
+      bot.followupStrikeWeapon = bot.heldItem?.name ?? null
+      bot.navigation.entities = []
+    }
+  })
+  defending.entity.position.distanceTo = () => 3
+  defending.registry.itemsByName.dirt = { id: 2 }
+  defending.placeBlock = async () => {
+    const old = defending.blockAt(defendingBlockPosition)
+    const placed = makeBlock('dirt', defendingBlockPosition, { type: 2 })
+    placed.stateId = 1
+    defending.blockStates.set(key(defendingBlockPosition), placed)
+    setImmediate(() => defending.emit('blockUpdate', old, placed))
+    return placed
+  }
+  assert.equal(await navigation.runWithNavigationPolicy(defending, combatPolicy, () => skills.defendSelf(defending)), true)
+  assert.equal(defending.followupStrikeWeapon, 'iron_sword', 'defendSelf re-equips before the next strike while combat continues')
 
   const chestBlock = makeBlock('chest', makePosition(1, 0, 0))
   const makeChestTransfer = ({ direction, available, requested, moved = requested, serverUpdates = true }) => {

@@ -347,6 +347,15 @@ async function main() {
     assert.ok(nativeTemporaryIncompleteResult.cleanupRequired.length > 0)
     assert.equal(nativeTemporaryIncompleteResult.arrivalReached, true, 'arrival remains recorded independently from failed cleanup')
 
+    const sdkTemporaryIncomplete = makeBot({ gap: [2, 3, 4], corridor: true, rejectScaffoldRemoval: true })
+    const sdkIncompleteResult = await createNativeSdk({ bot: sdkTemporaryIncomplete, skills }).skills.goToPosition({
+      position: { x: 6.5, y: 64, z: 0.5 },
+    })
+    assert.equal(sdkIncompleteResult.ok, false, JSON.stringify(sdkIncompleteResult))
+    assert.equal(sdkIncompleteResult.status, 'blocked')
+    assert.equal(sdkIncompleteResult.arrivalReached, true,
+      'the public native mapping preserves confirmed arrival while reporting unfinished temporary cleanup')
+
     const open = makeBot()
     const openMovements = open.pathfinder.movements
     const openResult = await reachPosition(open, { position: { x: 5.5, y: 64, z: 0.5 } })
@@ -587,6 +596,23 @@ async function main() {
     assert.equal(policyResult, true, 'navigation scope preserves the skill return value')
     assert.ok(policyMovement.testState.edits.some(edit => edit.kind === 'server_dig'))
     assert.equal(policyMovement.testState.edits.some(edit => edit.kind === 'server_place'), false)
+
+    const goalOwnerBot = makeBot()
+    let finishOldBody
+    const ownedGoal = new pathfinder.goals.GoalBlock(2, 64, 0)
+    const replacementGoal = new pathfinder.goals.GoalBlock(8, 64, 0)
+    const oldPolicy = runWithNavigationPolicy(goalOwnerBot,
+      { allowDig: false, scaffold: 'forbid', scaffoldBlocks: [] }, async () => {
+        goalOwnerBot.pathfinder.setGoal(ownedGoal)
+        await new Promise(resolve => { finishOldBody = resolve })
+        return true
+      })
+    await new Promise(resolve => setImmediate(resolve))
+    goalOwnerBot.pathfinder.setGoal(replacementGoal)
+    finishOldBody()
+    await oldPolicy
+    assert.equal(goalOwnerBot.pathfinder.goal, replacementGoal,
+      'a settled old navigation policy cannot clear a replacement goal it does not own')
 
     const outerScaffoldBot = makeBot({ gap: [2, 3, 4], corridor: true })
     const outerScaffoldResult = await runWithNavigationPolicy(outerScaffoldBot,

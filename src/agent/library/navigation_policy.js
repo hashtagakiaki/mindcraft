@@ -9,6 +9,7 @@ export const NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT = 1.1;
 const pendingScaffoldPlacements = new WeakMap();
 const scaffoldPlacementTails = new WeakMap();
 const pendingNavigationEdits = new WeakMap();
+const navigationScaffoldSettledCallbacks = new WeakMap();
 
 export function navigationPolicy() { return policyStorage.getStore()?.policy ?? null; }
 export function navigationScaffoldsPlaced(bot) {
@@ -51,6 +52,20 @@ export function registerNavigationCleanup(cleanup) {
     const previous = cleanupOwnedScaffolds;
     cleanupOwnedScaffolds = cleanup;
     return previous;
+}
+
+export function registerNavigationScaffoldSettledCallback(bot, callback) {
+    if (typeof callback !== 'function') throw new TypeError('Navigation scaffold callback must be a function.');
+    let callbacks = navigationScaffoldSettledCallbacks.get(bot);
+    if (!callbacks) {
+        callbacks = new Set();
+        navigationScaffoldSettledCallbacks.set(bot, callbacks);
+    }
+    callbacks.add(callback);
+    return () => {
+        callbacks.delete(callback);
+        if (!callbacks.size) navigationScaffoldSettledCallbacks.delete(bot);
+    };
 }
 
 
@@ -194,14 +209,23 @@ async function waitForScaffoldClearance(bot, position) {
 }
 
 export async function runWithNavigationPolicy(bot, policy, body) {
-    const context = { bot, policy, edits: [], scaffolds: [], unconfirmedScaffolds: [], arrivals: [], segment: null, active: true };
+    const context = { bot, policy, edits: [], scaffolds: [], unconfirmedScaffolds: [], arrivals: [], segment: null, active: true, goal: null };
+    const pathfinder = bot.pathfinder;
+    const originalSetGoal = pathfinder?.setGoal;
+    const ownedSetGoal = typeof originalSetGoal === 'function' ? function (goal, ...args) {
+        const activeContext = policyStorage.getStore();
+        if (activeContext?.bot === bot) activeContext.goal = goal;
+        return originalSetGoal.call(this, goal, ...args);
+    } : null;
+    if (ownedSetGoal) pathfinder.setGoal = ownedSetGoal;
     let result, failure;
     try {
         result = await policyStorage.run(context, async () => {
             try { return await body(); }
             finally {
                 context.active = false;
-                bot.pathfinder?.setGoal?.(null);
+                if (context.goal && pathfinder?.goal === context.goal) pathfinder.setGoal(null);
+                if (ownedSetGoal && pathfinder.setGoal === ownedSetGoal) pathfinder.setGoal = originalSetGoal;
             }
         });
     }
@@ -322,6 +346,9 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
         const position = point(target);
         context.scaffolds.push({ position, block: blockName, stateId: observed.stateId });
         context.edits.push({ kind: 'scaffold_placed', block: blockName, position });
+        for (const callback of navigationScaffoldSettledCallbacks.get(bot) ?? []) {
+            if (context.active) await callback({ bot, context, scaffold: context.scaffolds.at(-1) });
+        }
         if (navigationCancelled(bot)) throw new Error('Action cancelled after the scaffold placement was server-confirmed.');
         return placement.result;
         });
