@@ -254,11 +254,12 @@ async function main() {
     Object.assign(settings, { agent_runtime:'codex-session', codex_session:{max_search_radius:16} })
     const nativeDocs = getNativeSdkDocs(settings)
     const nativeNames = new Set(nativeDocs.map(doc=>doc.split('\n')[0]))
-    for (const name of legacyNames) assert.ok(nativeNames.has(name), `native catalog preserves ${name}`)
+    const internalOnlyNativeHelpers = new Set(['skills.goToGoal','skills.reachPositionWithScaffoldCleanup'])
+    for (const name of legacyNames) if (!internalOnlyNativeHelpers.has(name)) assert.ok(nativeNames.has(name), `native catalog preserves ${name}`)
     assert.ok(nativeDocs.every(doc=>!doc.includes('(bot,')), 'native examples use the public argument contract')
     const placeNavigationDocs = nativeDocs.filter(doc => ['places.goTo\n','places.goToAlias\n','places.tendFarm\n'].some(prefix => doc.startsWith(prefix)))
     assert.equal(placeNavigationDocs.length,3)
-    assert.ok(placeNavigationDocs.every(doc => doc.includes('navigation: {allowDig?:boolean, scaffold?:"forbid"|"temporary"|"leave"')))
+    assert.ok(placeNavigationDocs.every(doc => doc.includes('Its route preserves existing blocks')))
     let scans=0, rpcCalls=0, looks=0
     bot.state.visible=true
     bot.findBlocks = () => { scans++; return [new Vec3(0,64,0)] }
@@ -300,6 +301,7 @@ async function main() {
     assert.equal(scans,2)
     assert.equal(world.getPosition(bot).x,bot.entity.position.x,'internal bot-first API still works')
     agent.places.sdk.verify=async()=>({ok:false,status:'missing'})
+    bot.entity.position = new Vec3(0.5,64,0.5)
     const movesBeforeAlreadyArrived=bot.state.moves.length
     const observationFalse=await run('await Promise.resolve(); log(bot,JSON.stringify({entity:world.isEntityType({name:"dirt"})})); log(bot,JSON.stringify(await places.verify({placeId:"missing"}))); log(bot,JSON.stringify(await skills.goToPosition({position:{x:0,y:64,z:0}})));')
     assert.equal(observationFalse.success,true,'a false observation does not stop subsequent actions')
@@ -317,28 +319,23 @@ async function main() {
     assert.equal(failedReach.sdkFailure.result.status,'blocked')
     assert.equal(failedReach.sdkFailure.result.ok,false)
     assert.equal(failedReach.skillResults.some(call=>call.skill==='skills.breakBlockAt'),false,'failed reach prevents a later SDK mutation')
-    const failedScaffoldRecovery=await run('await skills.reachPositionWithScaffoldCleanup({position:{x:8.5,y:64,z:0.5}}); await skills.breakBlockAt({position:{x:1,y:64,z:0}});')
-    assert.equal(failedScaffoldRecovery.success,false,'missing scaffold materials fail the recovery movement')
-    assert.equal(failedScaffoldRecovery.sdkFailure.method,'skills.reachPositionWithScaffoldCleanup')
-    assert.equal(failedScaffoldRecovery.sdkFailure.result.ok,false)
-    assert.equal(failedScaffoldRecovery.skillResults.some(call=>call.skill==='skills.breakBlockAt'),false,'failed scaffold recovery prevents later edits')
     bot.__nativeTestFellTreeResult = { status:'complete', confirmedLogs:2 }
-    const wrappedFellTree = await run('await skills.fellTree({navigation:{}});')
-    assert.equal(wrappedFellTree.success,true,'the Coder guard accepts complete as the nested work status')
+    const wrappedFellTree = await run('await skills.fellTree({});')
+    assert.equal(wrappedFellTree.success,true,'the Coder guard accepts the skill result without wrapping it')
     delete bot.__nativeTestFellTreeResult
     bot.__nativeTestFellTreeResult = { status:'partial', confirmedLogs:1 }
-    const incompleteFellTree = await run('await skills.fellTree({navigation:{}});')
-    assert.equal(incompleteFellTree.success,false,'an incomplete nested tree result still fails the Coder guard')
-    assert.equal(incompleteFellTree.sdkFailure.result.result.status,'partial')
+    const incompleteFellTree = await run('await skills.fellTree({});')
+    assert.equal(incompleteFellTree.success,false,'an incomplete tree result still fails the Coder guard')
+    assert.equal(incompleteFellTree.sdkFailure.result.status,'partial')
     delete bot.__nativeTestFellTreeResult
     bot.state.route='ready'
-    const wrappedApproach = await run('await skills.approachBlock({position:{x:0,y:64,z:0}, navigation:{}});')
-    assert.equal(wrappedApproach.success,true,'the Coder guard accepts ready as the nested work status')
+    const wrappedApproach = await run('await skills.approachBlock({position:{x:0,y:64,z:0}});')
+    assert.equal(wrappedApproach.success,true,'the Coder guard accepts ready without wrapping the result')
     bot.state.route='unreachable'
     bot.entity.position = new Vec3(10.5,64,0.5)
-    const incompleteApproach = await run('await skills.approachBlock({position:{x:0,y:64,z:0}, navigation:{}});')
+    const incompleteApproach = await run('await skills.approachBlock({position:{x:0,y:64,z:0}});')
     assert.equal(incompleteApproach.success,false,'the Coder guard still rejects a blocked nested approach result')
-    assert.equal(incompleteApproach.sdkFailure.result.result.status,'blocked')
+    assert.equal(incompleteApproach.sdkFailure.result.status,'blocked')
     bot.state.route='ready'
     settings.agent_runtime='legacy'
     assert.equal((await run('await Promise.resolve(); log(bot,JSON.stringify(world.getPosition(bot)));')).success,true,'legacy generated code retains its original contract')

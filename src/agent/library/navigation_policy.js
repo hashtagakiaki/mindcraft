@@ -11,6 +11,10 @@ const scaffoldPlacementTails = new WeakMap();
 const pendingNavigationEdits = new WeakMap();
 
 export function navigationPolicy() { return policyStorage.getStore()?.policy ?? null; }
+export function navigationScaffoldsPlaced(bot) {
+    const context = policyStorage.getStore();
+    return context?.bot === bot ? context.scaffolds.length : 0;
+}
 export function navigationScaffoldPlacementPending(bot) {
     return scaffoldPlacementTails.has(bot) || (pendingNavigationEdits.get(bot) ?? 0) > 0;
 }
@@ -48,6 +52,7 @@ export function registerNavigationCleanup(cleanup) {
     cleanupOwnedScaffolds = cleanup;
     return previous;
 }
+
 
 export async function placeAndConfirmNavigationScaffold(bot, position, blockName, action) {
     const key = `${position.x},${position.y},${position.z}`;
@@ -189,13 +194,17 @@ async function waitForScaffoldClearance(bot, position) {
 }
 
 export async function runWithNavigationPolicy(bot, policy, body) {
-    if (policy.scaffold !== 'forbid' && !policy.scaffoldBlocks.some(name =>
-        (bot.inventory?.items?.() ?? []).some(item => item.name === name && item.count > 0))) {
-        throw new Error('Navigation scaffold policy requires an allowed block in inventory.');
-    }
-    const context = { bot, policy, edits: [], scaffolds: [], unconfirmedScaffolds: [], arrivals: [], segment: null };
+    const context = { bot, policy, edits: [], scaffolds: [], unconfirmedScaffolds: [], arrivals: [], segment: null, active: true };
     let result, failure;
-    try { result = await policyStorage.run(context, body); }
+    try {
+        result = await policyStorage.run(context, async () => {
+            try { return await body(); }
+            finally {
+                context.active = false;
+                bot.pathfinder?.setGoal?.(null);
+            }
+        });
+    }
     catch (error) { failure = error; }
     let cleanupFailure = null;
     if (policy.scaffold === 'temporary' && !navigationCancelled(bot) && result?.status !== 'cancelled') {
@@ -210,24 +219,14 @@ export async function runWithNavigationPolicy(bot, policy, body) {
             policy.scaffold === 'temporary' ? 'Action cancelled before cleanup began.' : 'Scaffold policy allows this placement to remain.');
     }
     context.cleanupRequired.push(...context.unconfirmedScaffolds);
-    const reached = context.arrivals.at(-1) ?? null;
-    const workResult = failure ? { error: String(failure.message ?? failure) } : result;
-    const workSucceeded = !failure && result !== false && result?.ok !== false
-        && (result?.status === undefined || result?.ok === true || ['reached', 'complete', 'ready'].includes(result.status));
     const cancelled = navigationCancelled(bot) || result?.status === 'cancelled';
-    const ok = workSucceeded && !cancelled && !context.unconfirmedScaffolds.length
-        && !(policy.scaffold === 'temporary' && context.cleanupRequired.length);
-    return {
-        ok, status: ok ? 'reached' : cancelled ? 'cancelled' : 'blocked',
-        result: workResult, arrival: reached, edits: context.edits, cleanupRequired: context.cleanupRequired,
-        ...(cleanupFailure ? { cleanupFailure } : {}),
-        reason: ok ? 'Navigation policy settled with the requested work result.'
-            : policy.scaffold === 'temporary' && context.cleanupRequired.length
-                ? `Work settled, but ${context.cleanupRequired.length} temporary scaffold(s) remain.`
-                : context.unconfirmedScaffolds.length
-                    ? 'A scaffold placement was attempted but not server-confirmed.'
-                    : 'The requested work or navigation did not complete.',
-    };
+    if (failure) throw failure;
+    if (cancelled && result !== false && result?.status !== 'cancelled') throw new Error('Action was cancelled before the navigation policy settled.');
+    if (context.unconfirmedScaffolds.length) throw new Error('A route scaffold placement was not server-confirmed.');
+    if (cleanupFailure || policy.scaffold === 'temporary' && context.cleanupRequired.length) {
+        throw new Error(cleanupFailure ?? `Work settled, but ${context.cleanupRequired.length} temporary scaffold(s) remain.`);
+    }
+    return result;
 }
 
 export function normalizeNavigationPolicy(value = {}) {
@@ -263,6 +262,7 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
     const equip = function (...args) {
         return ownPlacement(async () => {
             await awaitNavigationPlacementSettled(bot);
+            if (!context.active) throw new Error('Navigation policy ended before the next edit.');
             if (navigationCancelled(bot)) throw new Error('Action cancelled before the next navigation edit.');
             if (context.unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
             return originalEquip.call(this, ...args);
@@ -272,6 +272,7 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
         const workTargetDig = segment.workTargets.some(target => ['x', 'y', 'z'].every(axis => block.position[axis] === target[axis]));
         return ownPlacement(async () => {
         await awaitNavigationPlacementSettled(bot);
+        if (!context.active) throw new Error('Navigation policy ended before the next edit.');
         if (navigationCancelled(bot)) throw new Error('Action cancelled before the next navigation edit.');
         if (context.unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
         if (workTargetDig) {
@@ -287,6 +288,7 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
     };
     const place = function (reference, face, ...args) {
         return ownPlacement(async () => {
+        if (!context.active) throw new Error('Navigation policy ended before the next edit.');
         if (navigationCancelled(bot)) throw new Error('Action cancelled before the next navigation edit.');
         if (context.unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
         if (context.policy.scaffold === 'forbid') throw new Error('Navigation policy forbids scaffolding.');
@@ -298,6 +300,7 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
             placement = await placeAndConfirmNavigationScaffold(bot, target, blockName,
                 () => {
                     try {
+                        if (!context.active) throw placementNotAttempted('Navigation policy ended before the next edit.');
                         if (navigationCancelled(bot)) throw placementNotAttempted('Action cancelled before the next navigation edit.');
                         if (context.unconfirmedScaffolds.length) throw placementNotAttempted('Navigation stopped after an unconfirmed scaffold placement.');
                         const freshReference = bot.blockAt(reference.position);

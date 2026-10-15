@@ -8,7 +8,7 @@ import craftingSync from "./crafting_sync.js";
 import { placeBlockOriented } from './block_placement.js';
 import { resolveBlockInteraction, makeBlockInteractionGoal, interactionFaceVector, interactionEye } from './block_interaction.js';
 import { trackSkill, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, withSkillPhase, registerOwnedPromise, withNativeNavigationEditScope, nativeNavigationEditScopeActive } from './operation_context.js';
-import { awaitNavigationPlacementSettled, beginNavigationEdit, navigationPolicy, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, placeAndConfirmNavigationScaffold, recordNavigationArrival, registerNavigationCleanup, trackNavigationSegment } from './navigation_policy.js';
+import { awaitNavigationPlacementSettled, beginNavigationEdit, navigationPolicy, navigationScaffoldsPlaced, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, placeAndConfirmNavigationScaffold, recordNavigationArrival, registerNavigationCleanup, trackNavigationSegment } from './navigation_policy.js';
 
 const require = createRequire(import.meta.url);
 
@@ -128,7 +128,7 @@ function navigationMovements(bot, movementOverride = null) {
         });
         return Object.assign(new pf.Movements(bot), supplied ?? {}, {
             canDig: policy.allowDig === true, canPlaceOn: scaffoldBlocks.length > 0,
-            allow1by1towers: scaffoldBlocks.length > 0,
+            allow1by1towers: scaffoldBlocks.length > 0 && policy.allowTowers !== false,
             allowFreeMotion: false, scafoldingBlocks: scaffoldBlocks, canOpenDoors: false,
         });
     }
@@ -937,6 +937,11 @@ export async function attackEntity(bot, entity, kill=true) {
      * await skills.attackEntity(bot, entity);
      **/
 
+    if (bot.pathfinder) bot.pathfinder.setMovements(navigationMovements(bot));
+    const scaffoldsBeforeCombat = navigationScaffoldsPlaced(bot);
+    const restoreCombatWeapon = async () => {
+        if (navigationScaffoldsPlaced(bot) > scaffoldsBeforeCombat) await equipHighestAttack(bot);
+    };
     let pos = entity.position;
     await equipHighestAttack(bot)
 
@@ -947,6 +952,7 @@ export async function attackEntity(bot, entity, kill=true) {
         }
         console.log('attacking mob...')
         await bot.attack(entity);
+        await restoreCombatWeapon();
         return true;
     }
     else {
@@ -956,12 +962,20 @@ export async function attackEntity(bot, entity, kill=true) {
         const onEntityGone = goneEntity => { if (entity.id != null && goneEntity?.id === entity.id) targetGone = true; };
         bot.on('entityDead', onEntityDead);
         bot.on('entityGone', onEntityGone);
+        let pvpStopped = false;
         try {
-            bot.pvp.attack(entity);
-            while (!targetDied && !targetGone && !bot.interrupt_code) {
-                if (!world.getNearbyEntities(bot, 24).some(nearby => nearby.id === entity.id)) break;
-                await new Promise(resolve => setTimeout(resolve, COMBAT_CHECK_INTERVAL_MS));
-            }
+            await trackNavigationSegment(bot, async () => {
+                try {
+                    bot.pvp.attack(entity);
+                    while (!targetDied && !targetGone && !bot.interrupt_code) {
+                        if (!world.getNearbyEntities(bot, 24).some(nearby => nearby.id === entity.id)) break;
+                        await new Promise(resolve => setTimeout(resolve, COMBAT_CHECK_INTERVAL_MS));
+                    }
+                } finally {
+                    bot.pvp.stop();
+                    pvpStopped = true;
+                }
+            });
             if (!targetDied) return false;
             log(bot, `Successfully killed ${entity.name}.`);
             await pickupNearbyItems(bot);
@@ -971,11 +985,12 @@ export async function attackEntity(bot, entity, kill=true) {
             return false;
         } finally {
             try {
-                bot.pvp.stop();
+                if (!pvpStopped) bot.pvp.stop();
             } finally {
                 bot.removeListener('entityDead', onEntityDead);
                 bot.removeListener('entityGone', onEntityGone);
             }
+            await restoreCombatWeapon();
         }
     }
 }
@@ -989,33 +1004,39 @@ export async function defendSelf(bot, range=9) {
      * @example
      * await skills.defendSelf(bot);
      * **/
+    const scaffoldsBeforeCombat = navigationScaffoldsPlaced(bot);
     bot.modes.pause('self_defense');
     bot.modes.pause('cowardice');
     let attacked = false;
     let enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
-    while (enemy) {
-        await equipHighestAttack(bot);
-        if (bot.entity.position.distanceTo(enemy.position) >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
+    if (enemy && bot.pathfinder) bot.pathfinder.setMovements(navigationMovements(bot));
+    if (enemy) {
+        const completed = await trackNavigationSegment(bot, async () => {
             try {
-                await goToGoal(bot, new pf.goals.GoalFollow(enemy, 3.5));
-            } catch (err) {/* might error if entity dies, ignore */}
-        }
-        if (bot.entity.position.distanceTo(enemy.position) <= 2) {
-            try {
-                let inverted_goal = new pf.goals.GoalInvert(new pf.goals.GoalFollow(enemy, 2));
-                await goToGoal(bot, inverted_goal);
-            } catch (err) {/* might error if entity dies, ignore */}
-        }
-        bot.pvp.attack(enemy);
-        attacked = true;
-        await new Promise(resolve => setTimeout(resolve, 500));
-        enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
-        if (bot.interrupt_code) {
-            bot.pvp.stop();
-            return false;
-        }
+                while (enemy) {
+                    await equipHighestAttack(bot);
+                    if (bot.entity.position.distanceTo(enemy.position) >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
+                        try { await goToGoal(bot, new pf.goals.GoalFollow(enemy, 3.5)); }
+                        catch (err) {/* might error if entity dies, ignore */}
+                    }
+                    if (bot.entity.position.distanceTo(enemy.position) <= 2) {
+                        try {
+                            let inverted_goal = new pf.goals.GoalInvert(new pf.goals.GoalFollow(enemy, 2));
+                            await goToGoal(bot, inverted_goal);
+                        } catch (err) {/* might error if entity dies, ignore */}
+                    }
+                    bot.pvp.attack(enemy);
+                    attacked = true;
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
+                    if (bot.interrupt_code) return false;
+                }
+                return true;
+            } finally { bot.pvp.stop(); }
+        });
+        if (!completed) return false;
     }
-    bot.pvp.stop();
+    if (navigationScaffoldsPlaced(bot) > scaffoldsBeforeCombat) await equipHighestAttack(bot);
     if (attacked)
         log(bot, `Successfully defended self.`);
     else
@@ -1132,7 +1153,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             }
             else if (mc.mustCollectManually(blockType)) {
                 if (await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2)) {
-                    await bot.dig(block);
+                    await trackNavigationSegment(bot, () => bot.dig(block), { workTarget: block.position });
                     await pickupNearbyItems(bot);
                     success = true;
                 }
@@ -1262,7 +1283,7 @@ export async function breakBlockAt(bot, x, y, z) {
             log(bot, 'Target changed or has no reachable surface aim point before digging.');
             return false;
         }
-        await bot.dig(block, true);
+        await trackNavigationSegment(bot, () => bot.dig(block, true), { workTarget: block.position });
         log(bot, `Broke ${block.name} at x:${x.toFixed(1)}, y:${y.toFixed(1)}, z:${z.toFixed(1)}.`);
     }
     else {
@@ -2481,7 +2502,8 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
     const cleanupRequired = [];
     const early = reason => reachPositionResult('blocked', snapshotPosition(), reason, edits, cleanupRequired);
     if (!bot?.entity?.position || !bot.pathfinder || !options || typeof options !== 'object' || Array.isArray(options)) return early('Bot, position, or pathfinder is unavailable.');
-    const { position, tolerance = 1, allowDig = true, allowScaffold = true, scaffoldBlocks = ['dirt', 'cobblestone'], safeWater = false } = options;
+    const { position, tolerance = 1, allowDig = true, allowScaffold = true, scaffoldBlocks = ['dirt', 'cobblestone'], safeWater = false,
+        cleanupOwnedScaffolds = true } = options;
     if (!position || ![position.x, position.y, position.z].every(Number.isFinite)) return early('Position must contain finite x, y, and z coordinates.');
     if (!Number.isFinite(tolerance) || tolerance < 0.75 || tolerance > 8) return early('Tolerance must be between 0.75 and 8 blocks.');
     if (![allowDig, allowScaffold, safeWater].every(value => typeof value === 'boolean')) return early('Edit and water permissions must be booleans.');
@@ -2501,9 +2523,6 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
         ? scaffoldBlocks.filter(name => bot.registry?.itemsByName?.[name] &&
             (bot.inventory?.items?.() ?? []).some(item => item.name === name && item.count > 0))
         : [];
-    if (allowScaffold && availableScaffoldBlocks.length === 0) {
-        return early('None of the permitted scaffold blocks are available in inventory.');
-    }
     if (reachPositionMovementOwners.has(bot.pathfinder)) {
         return early('Another reachPosition operation already owns this pathfinder.');
     }
@@ -2512,6 +2531,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
     const originalDig = bot.dig;
     const originalPlaceBlock = bot.placeBlock;
     const originalEquip = bot.equip;
+    const canAttemptScaffolds = allowScaffold && availableScaffoldBlocks.length > 0 && typeof originalPlaceBlock === 'function';
     const originalMovements = bot.pathfinder.movements;
     const ownedMovements = new WeakSet();
     const scaffoldRecords = [];
@@ -2655,9 +2675,10 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
     };
 
     try {
-        if (!originalDig || (allowScaffold && !originalPlaceBlock) || typeof bot.pathfinder.getPathFromTo !== 'function') throw new Error('The required Mineflayer/pathfinder edit APIs are unavailable.');
+        if (!originalDig || (availableScaffoldBlocks.length > 0 && allowScaffold && !originalPlaceBlock)
+            || typeof bot.pathfinder.getPathFromTo !== 'function') throw new Error('The required Mineflayer/pathfinder edit APIs are unavailable.');
         bot.dig = digWrapper;
-        if (allowScaffold) bot.placeBlock = placeWrapper;
+        if (canAttemptScaffolds) bot.placeBlock = placeWrapper;
         bot.equip = equipWrapper;
         bot.pathfinder.setMovements(movement);
         hardTimer = setTimeout(() => {
@@ -2754,7 +2775,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
             status = 'stalled'; reason = 'Reach exceeded its bounded route-segment budget.';
         }
 
-        if (scaffoldRecords.length && !cancelled()) await cleanupScaffolds();
+        if (cleanupOwnedScaffolds && scaffoldRecords.length && !cancelled()) await cleanupScaffolds();
         if (cancelled()) { status = 'cancelled'; reason = 'Action was cancelled; no further edits were started.'; }
         else if (status === 'reached' && finalDistance() > tolerance) { status = 'blocked'; reason = 'Cleanup completed, but the final position is outside the requested tolerance.'; }
         else if (status !== 'reached' && status === 'blocked' && lastNavigationError) reason = `${reason} Last navigation error: ${lastNavigationError}`;
@@ -2762,7 +2783,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
         if (cancelled() || error.name === 'ReachCancelledError') { status = 'cancelled'; reason = 'Action was cancelled; no further edits were started.'; }
         else if (budgetExpired || error.name === 'NavigationStallTimeoutError' || error.name === 'Timeout') { status = 'stalled'; reason = String(error.message ?? error); }
         else { status = 'blocked'; reason = String(error.message ?? error); }
-        if (status !== 'cancelled' && scaffoldRecords.length) await cleanupScaffolds();
+        if (cleanupOwnedScaffolds && status !== 'cancelled' && scaffoldRecords.length) await cleanupScaffolds();
         if (cleanupRequired.length && status === 'reached') status = 'blocked';
     } finally {
         await drainNavigationEdits();
@@ -4058,7 +4079,7 @@ export async function tendNearbyFarm(bot, options = {}) {
         const expectedDropIds = itemIdsForNames(bot, [...crop.produce, crop.seed]);
         const collectionTracker = trackBlockCollection(bot, current, expectedDropIds);
         try {
-            await bot.dig(current);
+            await trackNavigationSegment(bot, () => bot.dig(current), { workTarget: current.position });
             if (await collectionTracker.wait(HARVEST_CONFIRM_TIMEOUT_MS)) {
                 for (const item of crop.produce) harvestedItems.add(item);
                 harvestedItems.add(crop.seed);
@@ -4366,7 +4387,7 @@ export async function fellTree(bot, options = {}) {
         const entry = { position: p, name, kind };
         if (kind !== 'leaf') broken.push(entry);
         try {
-            await bot.dig(block, true);
+            await trackNavigationSegment(bot, () => bot.dig(block, true), { workTarget: block.position });
             await waitState(() => treeAir(bot.blockAt(p)));
         } finally {
             // Cancellation can arrive after the server removed the block.

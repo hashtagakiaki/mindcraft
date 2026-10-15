@@ -31,12 +31,17 @@ async function main() {
   assert.deepEqual(docs.map(doc => doc.split('\n')[0]), methodNames)
   assert.ok(docs.every(doc => !/Signature:.*\(bot[,)]/.test(doc)))
 
-  // Every preexisting exposed function has an explicit adapter. This guards accidental
-  // omission while keeping newly exported helpers private until explicitly admitted.
+  // Every model-facing function has an explicit adapter. A small set of raw pathfinder
+  // helpers stays available to internal legacy code but is never model-facing.
   for (const namespace of ['skills', 'world']) {
     const source = await readFile(path.join(repo, `src/agent/library/${namespace}.js`), 'utf8')
     const exports = [...source.matchAll(/export\s+(?:async\s+)?function\s+(\w+)\s*\(/g)].map(match => `${namespace}.${match[1]}`)
-    assert.deepEqual(methodNames.filter(name => name.startsWith(`${namespace}.`)).sort(), exports.sort())
+    const exposed = methodNames.filter(name => name.startsWith(`${namespace}.`))
+    assert.ok(exposed.every(name => exports.includes(name)), 'every native entry binds an existing function')
+    if (namespace === 'skills') {
+      assert.ok(!exposed.includes('skills.goToGoal'))
+      assert.ok(!exposed.includes('skills.reachPositionWithScaffoldCleanup'))
+    } else assert.deepEqual(exposed.sort(), exports.sort())
   }
 
   const invalid = (method, args, field) => {
@@ -84,61 +89,37 @@ async function main() {
   assert.deepEqual(sdk.world.isEntityType({ name: 'cow' }), ['cow'])
   const entity = { id: 4, position: { x: 0, y: 64, z: 0 }, metadata: [] }
   assert.deepEqual(sdk.world.getVillagerProfession({ entity }), [entity])
-  assert.deepEqual(sdk.skills.attackEntity({ entity, kill: false }), [botA, entity, false])
+  assert.deepEqual(await sdk.skills.attackEntity({ entity, kill: false }), [botA, entity, false])
 
-  assert.deepEqual(sdk.skills.craftRecipe({ itemName: 'stick', times: 3 }), [botA, 'stick', 3])
-  assert.deepEqual(sdk.skills.smeltItem({ itemName: 'raw_iron', quantity: 4 }), [botA, 'raw_iron', 4])
+  assert.deepEqual(await sdk.skills.craftRecipe({ itemName: 'stick', times: 3 }), [botA, 'stick', 3])
+  assert.deepEqual(await sdk.skills.smeltItem({ itemName: 'raw_iron', quantity: 4 }), [botA, 'raw_iron', 4])
   invalid(sdk.skills.craftRecipe, [{ itemName: 'stick', quantity: 3 }], 'quantity')
   invalid(sdk.skills.craftRecipe, [{ itemName: 'stick', times: 1.5 }], 'times')
   for (const name of ['putInChest', 'takeFromChest', 'discard']) {
     invalid(sdk.skills[name], [{ itemName: 'oak_log' }], 'quantity')
     invalid(sdk.skills[name], [{ itemName: 'oak_log', quantity: -1 }], 'quantity')
     invalid(sdk.skills[name], [{ itemName: 'oak_log', quantity: 0 }], 'quantity')
-    const result = sdk.skills[name]({ itemName: 'oak_log', quantity: 'all' })
+    const result = await sdk.skills[name]({ itemName: 'oak_log', quantity: 'all' })
     assert.equal(result[0], botA)
     assert.equal(result[2], -1)
   }
-  assert.deepEqual(sdk.skills.putInChest({ itemName: 'oak_log', quantity: 2, chestPosition: input.position }), [botA, 'oak_log', 2, { chestPosition: input.position }])
-  assert.deepEqual(sdk.skills.goToPlayer({ username: 'Steve' }), [botA, 'Steve', 3])
-  const policyCall = await sdk.skills.goToNearestBlock({ blockType: 'chest', navigation: { allowDig: true, scaffold: 'forbid' } })
-  assert.deepEqual(policyCall.result, [botA, 'chest', 2, 64])
-  assert.equal(policyCall.ok, true)
-  assert.equal(Object.hasOwn(policyCall, 'edits'), false)
-  assert.equal(Object.hasOwn(policyCall, 'cleanupRequired'), false)
-  const craftPolicyCall = await sdk.skills.craftRecipe({ itemName: 'stick', navigation: { allowDig: true, scaffold: 'forbid' } })
-  assert.deepEqual(craftPolicyCall.result, [botA, 'stick', 1])
-  assert.equal(craftPolicyCall.ok, true, 'implicit movement skill receives an explicit policy without losing its work result')
-  invalid(sdk.skills.goToNearestBlock, [{ blockType: 'chest', navigation: { dig: true } }], 'navigation.dig')
-  invalid(sdk.skills.followPlayer, [{ username: 'Steve', navigation: { scaffold: 'temporary' } }], 'navigation.scaffold')
+  assert.deepEqual(await sdk.skills.putInChest({ itemName: 'oak_log', quantity: 2, chestPosition: input.position }), [botA, 'oak_log', 2, { chestPosition: input.position }])
+  assert.deepEqual(await sdk.skills.goToPlayer({ username: 'Steve' }), [botA, 'Steve', 3])
+  assert.deepEqual(await sdk.skills.goToNearestBlock({ blockType: 'chest' }), [botA, 'chest', 2, 64])
+  assert.deepEqual(await sdk.skills.craftRecipe({ itemName: 'stick' }), [botA, 'stick', 1])
+  invalid(sdk.skills.goToNearestBlock, [{ blockType: 'chest', navigation: { allowDig: true } }], 'navigation')
+  invalid(sdk.skills.followPlayer, [{ username: 'Steve', preserveEnvironment: false }], 'preserveEnvironment')
   assert.deepEqual(sdk.skills.goToPosition({ position: input.position }), [botA, {
-    position: input.position, tolerance: 1, allowDig: false, scaffold: 'forbid',
-    scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false,
+    position: input.position, allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt', 'cobblestone'],
   }])
-  assert.deepEqual(sdk.skills.goToPosition({ position: input.position, minDistance: 2, allowDig: true, scaffold: 'leave' }), [botA, {
-    position: input.position, tolerance: 2, allowDig: true, scaffold: 'leave',
-    scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false,
-  }])
-  invalid(sdk.skills.goToPosition, [{ position: input.position, tolerance: 0.5 }], 'tolerance')
-  invalid(sdk.skills.goToPosition, [{ position: input.position, scaffold: 'sometimes' }], 'scaffold')
-  invalid(sdk.skills.goToPosition, [{ position: input.position, scaffoldBlocks: ['stone'] }], 'scaffoldBlocks')
+  invalid(sdk.skills.goToPosition, [{ position: input.position, minDistance: 2 }], 'minDistance')
+  invalid(sdk.skills.goToPosition, [{ position: input.position, allowDig: true }], 'allowDig')
   assert.deepEqual(sdk.skills.reachPosition({ position: input.position }), [botA, {
-    position: input.position, tolerance: 1, allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false,
+    position: input.position, allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false, cleanupOwnedScaffolds: false,
   }])
-  assert.deepEqual(sdk.skills.reachPosition({ position: input.position, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'] }), [botA, {
-    position: input.position, tolerance: 1, allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false,
-  }])
-  invalid(sdk.skills.reachPosition, [{ position: input.position, tolerance: 0.5 }], 'tolerance')
-  assert.deepEqual(sdk.skills.reachPosition({ position: input.position, allowScaffold: true }), [botA, {
-    position: input.position, tolerance: 1, allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false,
-  }])
-  invalid(sdk.skills.reachPosition, [{ position: input.position, allowScaffold: true, scaffoldBlocks: ['stone'] }], 'scaffoldBlocks')
-  assert.deepEqual(sdk.skills.reachPosition({ position: input.position, allowScaffold: false }), [botA, {
-    position: input.position, tolerance: 1, allowDig: true, allowScaffold: false, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false,
-  }])
-  assert.deepEqual(sdk.skills.reachPositionWithScaffoldCleanup({ position: input.position }), [botA, {
-    position: input.position, tolerance: 1, allowDig: false, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false, allowScaffold: true,
-  }])
-  invalid(sdk.skills.reachPositionWithScaffoldCleanup, [{ position: input.position, scaffoldBlocks: ['stone'] }], 'scaffoldBlocks')
+  invalid(sdk.skills.reachPosition, [{ position: input.position, allowScaffold: false }], 'allowScaffold')
+  assert.equal(sdk.skills.goToGoal, undefined)
+  assert.equal(sdk.skills.reachPositionWithScaffoldCleanup, undefined)
 
   const detailedMove = {
     ok: true, status: 'reached', arrivalReached: true, finalPosition: input.position,
@@ -150,65 +131,54 @@ async function main() {
     ok: true, status: 'reached', arrivalReached: true, finalPosition: input.position,
     reason: 'Reached the requested feet position.',
   }
+  const incompletePreservedMove = {
+    ok: false, status: 'blocked', arrivalReached: true, finalPosition: input.position,
+    reason: 'Required scaffold cleanup is incomplete.',
+  }
   const movementSdk = createNativeSdk({ bot: botA, skills: {
     goToPosition: () => detailedMove,
     reachPosition: async () => detailedMove,
-    reachPositionWithScaffoldCleanup: async () => ({
-      ...detailedMove, ok: false, status: 'blocked', reason: 'Required scaffold cleanup is incomplete.',
-    }),
-    goToGoal: async () => detailedMove,
   }, places: { goTo: async () => detailedMove } })
-  assert.deepEqual(movementSdk.skills.goToPosition({ position: input.position }), compactMove)
+  assert.deepEqual(movementSdk.skills.goToPosition({ position: input.position }), incompletePreservedMove)
   assert.deepEqual(await movementSdk.skills.reachPosition({ position: input.position }), compactMove)
-  const incompleteCleanup = await movementSdk.skills.reachPositionWithScaffoldCleanup({ position: input.position })
-  assert.equal(incompleteCleanup.ok, false)
-  assert.equal(incompleteCleanup.status, 'blocked')
-  assert.equal(incompleteCleanup.arrivalReached, true)
-  assert.equal(incompleteCleanup.reason, 'Required scaffold cleanup is incomplete.')
-  assert.equal(Object.hasOwn(incompleteCleanup, 'cleanupRequired'), false)
-  assert.equal(Object.hasOwn(incompleteCleanup, 'edits'), false)
-  const policyMovement = await movementSdk.skills.goToGoal({ goal: { isEnd: () => true, heuristic: () => 0 }, navigation: { scaffold: 'leave' } })
-  assert.deepEqual(policyMovement.result, compactMove, 'nested movement results are compact too')
-  assert.equal(Object.hasOwn(policyMovement, 'edits'), false)
-  assert.equal(Object.hasOwn(policyMovement, 'cleanupRequired'), false)
-  const placeMovement = await movementSdk.places.goTo({ placeId: 'base', navigation: { scaffold: 'leave' } })
-  assert.deepEqual(placeMovement.result, compactMove)
+  const placeMovement = await movementSdk.places.goTo({ placeId: 'base' })
+  assert.deepEqual(placeMovement, detailedMove, 'fixed navigation scope keeps the place method result shape')
   assert.equal(detailedMove.edits.length, 1, 'public projection preserves internal tracking')
   assert.equal(detailedMove.cleanupRequired.length, 1)
-  const strictGuard = createNativeSdk({ bot: botA, skills: { reachPositionWithScaffoldCleanup: async () => detailedMove } })
-  const guardedCleanup = await strictGuard.skills.reachPositionWithScaffoldCleanup({ position: input.position })
-  assert.equal(guardedCleanup.ok, false, 'hiding the list preserves the existing strict-cleanup failure guard')
-  assert.equal(guardedCleanup.status, 'blocked')
-  assert.equal(Object.hasOwn(guardedCleanup, 'cleanupRequired'), false)
+  assert.ok(docs.find(doc => doc.startsWith('skills.collectBlock\n')).includes('Its route may dig and leave confirmed'))
+  assert.ok(docs.find(doc => doc.startsWith('skills.breakBlockAt\n')).includes('Its route preserves existing blocks'))
+  assert.ok(docs.find(doc => doc.startsWith('skills.attackEntity\n')).includes('Its route cannot dig'))
+  const definitions = new Map(NATIVE_SDK_DEFINITIONS.map(definition => [`${definition.namespace}.${definition.name}`, definition]))
+  assert.deepEqual(definitions.get('skills.collectBlock').navigationPolicy, { allowDig: true, scaffold: 'leave', scaffoldBlocks: ['dirt', 'cobblestone'] })
+  assert.deepEqual(definitions.get('skills.attackEntity').navigationPolicy, { allowDig: false, scaffold: 'leave', scaffoldBlocks: ['dirt', 'cobblestone'], allowTowers: false })
+  assert.deepEqual(definitions.get('skills.breakBlockAt').navigationPolicy, { allowDig: false, scaffold: 'forbid', scaffoldBlocks: [] })
 
 
   assert.deepEqual(sdk.skills.stay({ seconds: -1 }), [botA, -1])
   invalid(sdk.skills.stay, [{ seconds: -2 }], 'seconds')
-  assert.deepEqual(sdk.skills.tendNearbyFarm(), [botA, { scope: 'connected', seedReserve: 1, searchRadius: 32 }])
-  assert.deepEqual(sdk.skills.tendNearbyFarm({ scope: 'radius', radius: 5 }), [botA, { scope: 'radius', radius: 5, seedReserve: 1 }])
+  assert.deepEqual(await sdk.skills.tendNearbyFarm(), [botA, { scope: 'connected', seedReserve: 1, searchRadius: 32 }])
+  assert.deepEqual(await sdk.skills.tendNearbyFarm({ scope: 'radius', radius: 5 }), [botA, { scope: 'radius', radius: 5, seedReserve: 1 }])
   invalid(sdk.skills.tendNearbyFarm, [{ radius: 5 }], 'radius')
   invalid(sdk.skills.tendNearbyFarm, [{ scope: 'radius', searchRadius: 5 }], 'searchRadius')
   invalid(sdk.skills.tendNearbyFarm, [{ scope: 'radius', startPosition: input.position }], 'startPosition')
   invalid(sdk.skills.placeBlock, [{ blockType: 'chest', position: input.position, facing: 'north', placeOn: 'bottom' }], 'placeOn')
-  assert.deepEqual(sdk.skills.placeBlock({ blockType: 'oak_stairs', position: input.position, facing: 'west', half: 'top' }), [botA, 'oak_stairs', 10, 64, -3, { facing: 'west', half: 'top' }, false])
-  assert.deepEqual(sdk.skills.placeBlock({ blockType: 'stone', position: input.position }), [botA, 'stone', 10, 64, -3, 'bottom', false])
+  assert.deepEqual(await sdk.skills.placeBlock({ blockType: 'oak_stairs', position: input.position, facing: 'west', half: 'top' }), [botA, 'oak_stairs', 10, 64, -3, { facing: 'west', half: 'top' }, false])
+  assert.deepEqual(await sdk.skills.placeBlock({ blockType: 'stone', position: input.position }), [botA, 'stone', 10, 64, -3, 'bottom', false])
 
   assert.deepEqual(sdk.places.find({ text: 'chest' }), ['chest', { limit: 20 }])
   for (const method of ['goTo', 'goToAlias', 'tendFarm']) {
     const doc = docs.find(value => value.startsWith(`places.${method}\n`))
-    assert.ok(doc.includes('navigation: {allowDig?:boolean, scaffold?:"forbid"|"temporary"|"leave"'), `${method} documents its navigation policy`)
+    assert.ok(doc.includes('Its route preserves existing blocks'), `${method} documents its fixed route policy`)
   }
-  const placeGo = await sdk.places.goTo({ placeId: 'place-1', navigation: { allowDig: false, scaffold: 'forbid' } })
-  assert.deepEqual(placeGo.result, ['place-1'])
-  assert.equal(placeGo.ok, true, 'saved place navigation is wrapped by the shared policy')
+  const placeGo = await sdk.places.goTo({ placeId: 'place-1' })
+  assert.deepEqual(placeGo, ['place-1'])
   const visitedPlaces = createNativeSdk({ bot: botA, places: { goTo: () => ({ ok: true, status: 'visited' }) } })
-  const visitedPlace = await visitedPlaces.places.goTo({ placeId: 'place-1', navigation: { scaffold: 'forbid' } })
-  assert.equal(visitedPlace.ok, true, 'a place action status is accepted when its own contract confirms ok:true')
-  assert.equal(visitedPlace.result.status, 'visited')
-  const aliasGo = await sdk.places.goToAlias({ alias: 'home', navigation: { scaffold: 'leave' } })
-  assert.deepEqual(aliasGo.result, ['home'])
-  const farmTend = await sdk.places.tendFarm({ farmId: 'farm-1', seedReserve: 2, navigation: { allowDig: true, scaffold: 'forbid' } })
-  assert.deepEqual(farmTend.result, ['farm-1', { scope: 'connected', searchRadius: 32, seedReserve: 2 }])
+  const visitedPlace = await visitedPlaces.places.goTo({ placeId: 'place-1' })
+  assert.deepEqual(visitedPlace, { ok: true, status: 'visited' }, 'a place action keeps its own result contract')
+  const aliasGo = await sdk.places.goToAlias({ alias: 'home' })
+  assert.deepEqual(aliasGo, ['home'])
+  const farmTend = await sdk.places.tendFarm({ farmId: 'farm-1', seedReserve: 2 })
+  assert.deepEqual(farmTend, ['farm-1', { scope: 'connected', searchRadius: 32, seedReserve: 2 }])
   invalid(sdk.places.find, ['chest'], 'arguments')
   invalid(sdk.places.find, [{ query: 'chest' }], 'query')
   invalid(sdk.places.find, [{ text: 'chest', limit: 101 }], 'limit')
@@ -224,7 +194,7 @@ async function main() {
   const limited = createNativeSdk({ ...namespaces, bot: botA }, { codex_session: { max_search_radius: 10 } })
   invalid(limited.world.getNearbyBlockTypes, [{ radius: 11 }], 'radius')
   assert.deepEqual(limited.world.getNearbyBlockTypes(), [botA, 10])
-  assert.deepEqual(limited.skills.tendNearbyFarm(), [botA, { scope: 'connected', seedReserve: 1, searchRadius: 10 }])
+  assert.deepEqual(await limited.skills.tendNearbyFarm(), [botA, { scope: 'connected', seedReserve: 1, searchRadius: 10 }])
   assert.ok(getNativeSdkDocs({ codex_session: { max_search_radius: 10 } }).find(doc => doc.startsWith('world.getNearbyBlockTypes\n')).includes('default 10'))
   const missing = createNativeSdk({ bot: botA })
   invalid(missing.places.find, [null], 'arguments')

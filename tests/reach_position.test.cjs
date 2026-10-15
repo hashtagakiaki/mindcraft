@@ -308,39 +308,35 @@ async function main() {
     assert.ok(nativeTemporaryResult.edits.some(edit => edit.kind === 'scaffold_removed'))
 
     const sdkTemporary = makeBot({ gap: [2, 3, 4], corridor: true })
-    let workObservedScaffold = false
-    const sdk = createNativeSdk({ bot: sdkTemporary, skills: {
-      goToGoal: async (bot, goal, override) => {
-        const arrived = await skills.goToGoal(bot, goal, override)
-        workObservedScaffold = bot.testState.edits.some(edit => edit.kind === 'server_place')
-          && bot.testState.edits.some(edit => edit.kind === 'server_place' && bot.blockAt(new Vec3(edit.position.x, edit.position.y, edit.position.z))?.name === 'dirt')
-        return { status: arrived ? 'complete' : 'partial', result: { harvested: 2 } }
-      },
-    }})
-    const scaffoldMovements = new pathfinder.Movements(sdkTemporary)
-    scaffoldMovements.allowParkour = false
-    scaffoldMovements.allowFreeMotion = false
-    scaffoldMovements.maxDropDown = 1
-    const sdkRouteResult = await sdk.skills.goToGoal({
-      goal: new pathfinder.goals.GoalNear(6, 64, 0, 1),
-      movementOverride: scaffoldMovements,
-      navigation: { allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt'] },
-    })
+    const sdk = createNativeSdk({ bot: sdkTemporary, skills })
+    const sdkRouteResult = await sdk.skills.goToPosition({ position: { x: 6.5, y: 64, z: 0.5 } })
     assert.equal(sdkRouteResult.ok, true, JSON.stringify(sdkRouteResult))
-    assert.equal(sdkRouteResult.result.result.harvested, 2, 'native wrapper retains the underlying work result')
-    assert.equal(workObservedScaffold, true, `the work phase sees the route scaffold before outer cleanup; paths=${JSON.stringify(sdkTemporary.testState.paths)} result=${JSON.stringify(sdkRouteResult)}`)
+    assert.equal(sdkRouteResult.status, 'reached')
     assert.equal(Object.hasOwn(sdkRouteResult, 'edits'), false)
     assert.equal(Object.hasOwn(sdkRouteResult, 'cleanupRequired'), false)
-    assert.ok(sdkTemporary.testState.edits.some(edit => edit.kind === 'server_dig' && edit.block === 'dirt'),
-      'public result omits scaffold details after confirmed internal cleanup')
+    assert.ok(sdkTemporary.testState.edits.some(edit => edit.kind === 'server_place'), 'native goToPosition may use temporary route scaffolds')
+    assert.ok(sdkTemporary.testState.edits.some(edit => edit.kind === 'server_dig'), 'native goToPosition removes its confirmed route scaffolds before success')
 
-    const nativeLeave = makeBot({ gap: [2, 3, 4], corridor: true, rejectScaffoldRemoval: true })
-    const nativeLeaveResult = await skills.goToPosition(nativeLeave, {
-      position: { x: 6.5, y: 64, z: 0.5 }, scaffold: 'leave', scaffoldBlocks: ['dirt'],
-    })
+    const nativeLeave = makeBot({ gap: [2, 3, 4], corridor: true })
+    const nativeReachSdk = createNativeSdk({ bot: nativeLeave, skills })
+    const nativeLeaveResult = await nativeReachSdk.skills.reachPosition({ position: { x: 6.5, y: 64, z: 0.5 } })
     assert.equal(nativeLeaveResult.status, 'reached', JSON.stringify(nativeLeaveResult))
     assert.equal(nativeLeaveResult.ok, true)
-    assert.ok(nativeLeaveResult.cleanupRequired.length > 0)
+    assert.equal(nativeLeaveResult.arrivalReached, true)
+    assert.equal(Object.hasOwn(nativeLeaveResult, 'cleanupRequired'), false)
+    assert.ok(nativeLeave.testState.edits.some(edit => edit.kind === 'server_place'), 'native reachPosition leaves confirmed scaffolds in place')
+    assert.equal(nativeLeave.testState.edits.some(edit => edit.kind === 'server_dig'), false, 'native reachPosition does no route cleanup')
+    assert.ok(nativeLeave.testState.inventory.dirt < 16, 'left scaffolds remain in the world and consume only the blocks actually placed')
+
+    const noScaffoldMaterials = makeBot()
+    noScaffoldMaterials.testState.inventory.dirt = 0
+    noScaffoldMaterials.testState.inventory.cobblestone = 0
+    const noMaterialSdk = createNativeSdk({ bot: noScaffoldMaterials, skills })
+    assert.equal((await noMaterialSdk.skills.goToPosition({ position: { x: 5.5, y: 64, z: 0.5 } })).ok, true,
+      'preservation movement succeeds on a clear route without scaffold materials')
+    noScaffoldMaterials.entity.position = new Vec3(0.5, 64, 0.5)
+    assert.equal((await noMaterialSdk.skills.reachPosition({ position: { x: 5.5, y: 64, z: 0.5 } })).ok, true,
+      'editable movement succeeds on a clear route without scaffold materials')
 
     const nativeTemporaryIncomplete = makeBot({ gap: [2, 3, 4], corridor: true, rejectScaffoldRemoval: true })
     const nativeTemporaryIncompleteResult = await skills.goToPosition(nativeTemporaryIncomplete, {
@@ -588,9 +584,9 @@ async function main() {
     const policyResult = await runOwnedOperation(policyOwner, () => runWithNavigationPolicy(policyMovement,
       { allowDig: true, scaffold: 'forbid', scaffoldBlocks: ['dirt', 'cobblestone'] },
       () => skills.goToGoal(policyMovement, new pathfinder.goals.GoalNear(6, 64, 0, 1))));
-    assert.equal(policyResult.ok, true, JSON.stringify(policyResult))
-    assert.ok(policyResult.edits.some(edit => edit.kind === 'dug'), JSON.stringify(policyResult))
-    assert.equal(policyResult.edits.some(edit => edit.kind === 'scaffold_placed'), false)
+    assert.equal(policyResult, true, 'navigation scope preserves the skill return value')
+    assert.ok(policyMovement.testState.edits.some(edit => edit.kind === 'server_dig'))
+    assert.equal(policyMovement.testState.edits.some(edit => edit.kind === 'server_place'), false)
 
     const outerScaffoldBot = makeBot({ gap: [2, 3, 4], corridor: true })
     const outerScaffoldResult = await runWithNavigationPolicy(outerScaffoldBot,
@@ -600,25 +596,21 @@ async function main() {
         await outerScaffoldBot.placeBlock(outerScaffoldBot.blockAt(new Vec3(1, 63, 0)), new Vec3(0, 1, 0))
         return true
       })))
-    assert.equal(outerScaffoldResult.ok, true, JSON.stringify(outerScaffoldResult))
-    assert.ok(outerScaffoldResult.edits.some(edit => edit.kind === 'scaffold_placed'), JSON.stringify(outerScaffoldResult))
-    assert.ok(outerScaffoldResult.edits.some(edit => edit.kind === 'scaffold_removed'))
-    assert.equal(outerScaffoldResult.cleanupRequired.length, 0)
+    assert.equal(outerScaffoldResult, true, 'navigation scope preserves its existing boolean result')
+    assert.ok(outerScaffoldBot.testState.edits.some(edit => edit.kind === 'server_place'))
+    assert.ok(outerScaffoldBot.testState.edits.some(edit => edit.kind === 'server_dig'))
 
     const earlyNoPathBot = makeBot()
     earlyNoPathBot.testState.placementDelay = 80
-    const earlyNoPathResult = await runWithNavigationPolicy(earlyNoPathBot,
+    await assert.rejects(() => runWithNavigationPolicy(earlyNoPathBot,
       { allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt'] },
       () => trackNavigationSegment(earlyNoPathBot, async () => {
         await earlyNoPathBot.equip(earlyNoPathBot.inventory.items().find(item => item.name === 'dirt'))
         void earlyNoPathBot.placeBlock(earlyNoPathBot.blockAt(new Vec3(1, 63, 0)), new Vec3(0, 1, 0))
         throw new Error('Pathfinder returned NoPath before the pending scaffold call settled.')
-      }))
-    assert.equal(earlyNoPathResult.ok, false)
-    assert.match(earlyNoPathResult.result.error, /NoPath/)
-    assert.ok(earlyNoPathResult.edits.some(edit => edit.kind === 'scaffold_placed'), JSON.stringify(earlyNoPathResult))
-    assert.ok(earlyNoPathResult.edits.some(edit => edit.kind === 'scaffold_removed'), JSON.stringify(earlyNoPathResult))
-    assert.equal(earlyNoPathResult.cleanupRequired.length, 0, JSON.stringify(earlyNoPathResult))
+      })), /NoPath/)
+    assert.ok(earlyNoPathBot.testState.edits.some(edit => edit.kind === 'server_place'))
+    assert.ok(earlyNoPathBot.testState.edits.some(edit => edit.kind === 'server_dig'))
 
     const latePolicyBot = makeBot({ gap: [2, 3, 4], corridor: true })
     latePolicyBot.testState.placementMode = 'late-confirm'
@@ -628,22 +620,20 @@ async function main() {
     const latePolicyResult = await runWithNavigationPolicy(latePolicyBot,
       { allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt'] },
       () => skills.goToGoal(latePolicyBot, new pathfinder.goals.GoalBlock(6, 64, 0), latePolicyMovements))
-    assert.equal(latePolicyResult.ok, true, JSON.stringify(latePolicyResult))
-    assert.ok(latePolicyResult.edits.some(edit => edit.kind === 'scaffold_placed'), JSON.stringify(latePolicyResult))
-    assert.ok(latePolicyResult.edits.some(edit => edit.kind === 'scaffold_removed'), JSON.stringify(latePolicyResult))
-    assert.equal(latePolicyResult.cleanupRequired.length, 0)
+    assert.equal(latePolicyResult, true, 'a successful movement keeps its boolean result')
+    assert.ok(latePolicyBot.testState.edits.some(edit => edit.kind === 'server_place'))
+    assert.ok(latePolicyBot.testState.edits.some(edit => edit.kind === 'server_dig'))
 
     const noAckPolicyBot = makeBot({ gap: [2, 3, 4], corridor: true })
     noAckPolicyBot.testState.placementMode = 'no-ack'
     const noAckPolicyMovements = new pathfinder.Movements(noAckPolicyBot)
     noAckPolicyMovements.allowParkour = false
     noAckPolicyMovements.allowFreeMotion = false
-    const noAckPolicyResult = await runWithNavigationPolicy(noAckPolicyBot,
+    await assert.rejects(() => runWithNavigationPolicy(noAckPolicyBot,
       { allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt'] },
-      () => skills.goToGoal(noAckPolicyBot, new pathfinder.goals.GoalBlock(6, 64, 0), noAckPolicyMovements))
-    assert.equal(noAckPolicyResult.ok, false, JSON.stringify(noAckPolicyResult))
-    assert.ok(noAckPolicyResult.cleanupRequired.some(item => item.reason.includes('not server-confirmed')), JSON.stringify(noAckPolicyResult))
-    assert.equal(noAckPolicyResult.edits.some(edit => edit.kind === 'scaffold_placed'), false)
+      () => skills.goToGoal(noAckPolicyBot, new pathfinder.goals.GoalBlock(6, 64, 0), noAckPolicyMovements)),
+      error => error.name === 'NavigationStallTimeoutError')
+    assert.equal(noAckPolicyBot.testState.edits.some(edit => edit.kind === 'server_place'), false)
 
     const workTargetPolicyBot = makeBot({ wall: [{ x: 2, y: 64, z: 0, name: 'dirt' }] })
     const workTarget = { x: 2, y: 64, z: 0 }
@@ -654,27 +644,21 @@ async function main() {
         await assert.rejects(() => workTargetPolicyBot.dig(workTargetPolicyBot.blockAt(new Vec3(3, 64, 0))), /forbids digging route blocks/)
         return true
       }, { workTarget }))
-    assert.equal(workTargetPolicy.ok, true, JSON.stringify(workTargetPolicy))
-    assert.deepEqual(workTargetPolicy.edits, [], 'work-target destruction is separate from route edit reporting')
+    assert.equal(workTargetPolicy, true, 'the selected work target keeps its own permission and return type')
     assert.equal(workTargetPolicyBot.testState.edits.filter(edit => edit.kind === 'server_dig').length, 1)
 
     const cancelledPolicyBot = makeBot()
-    const cancelledPolicy = await runWithNavigationPolicy(cancelledPolicyBot,
+    await assert.rejects(() => runWithNavigationPolicy(cancelledPolicyBot,
       { allowDig: false, scaffold: 'forbid', scaffoldBlocks: ['dirt'] }, async () => {
         cancelledPolicyBot.interrupt_code = true
         return true
-      })
-    assert.equal(cancelledPolicy.ok, false, 'a successful callback cannot override cancellation')
-    assert.equal(cancelledPolicy.status, 'cancelled')
+      }), /cancelled/)
 
     const restoreCleanup = registerNavigationCleanup(async () => { throw new Error('cleanup fixture failure') })
     try {
       const cleanupFailureBot = makeBot()
-      const cleanupFailure = await runWithNavigationPolicy(cleanupFailureBot,
-        { allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt'] }, async () => ({ status: 'complete', count: 3 }))
-      assert.equal(cleanupFailure.ok, false)
-      assert.equal(cleanupFailure.result.count, 3, 'cleanup exceptions retain the settled work result')
-      assert.match(cleanupFailure.cleanupFailure, /cleanup fixture failure/)
+      await assert.rejects(() => runWithNavigationPolicy(cleanupFailureBot,
+        { allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt'] }, async () => ({ status: 'complete', count: 3 })), /cleanup fixture failure/)
     } finally { registerNavigationCleanup(restoreCleanup) }
 
     const rejectedPlacement = makeBot({ gap: [2, 3, 4], corridor: true })
@@ -853,7 +837,7 @@ async function main() {
     routeDigGateBot.dig = () => new Promise(resolve => { settleRouteDig = resolve })
     const routeDigPolicy = runWithNavigationPolicy(routeDigGateBot,
       { allowDig: true, scaffold: 'forbid', scaffoldBlocks: ['dirt'] },
-      () => trackNavigationSegment(routeDigGateBot, () => routeDigGateBot.dig(routeDigGateBot.blockAt(new Vec3(2, 63, 0)))))
+      () => trackNavigationSegment(routeDigGateBot, () => routeDigGateBot.dig(routeDigGateBot.blockAt(new Vec3(2, 64, 0)))))
     await delay(1)
     routeDigGateBot.emit('physicsTick')
     assert.equal(routeDigGateTicks, 0, 'an owned route dig suppresses competing pathfinder replans')

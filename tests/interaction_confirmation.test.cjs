@@ -99,6 +99,7 @@ async function main() {
   const fixture = path.resolve(process.argv[2])
   const skills = await import(pathToFileURL(path.join(fixture, 'src/agent/library/skills.js')))
   const ownership = await import(pathToFileURL(path.join(fixture, 'src/agent/library/operation_context.js')))
+  const navigation = await import(pathToFileURL(path.join(fixture, 'src/agent/library/navigation_policy.js')))
   const craftingSync = (await import(pathToFileURL(path.join(fixture, 'src/agent/library/crafting_sync.js')))).default
 
   const waterPos = makePosition(1, 0, 0)
@@ -217,6 +218,40 @@ async function main() {
   const failedNonlethal = makeBot({ navigationDistance: 10 })
   assert.equal(await skills.attackEntity(failedNonlethal, target, false), false, 'nonlethal attack propagates navigation failure')
   assert.equal(failedNonlethal.attacked, undefined)
+
+  const combatTarget = { id: 19, name: 'zombie', position: makePosition(1, 0, 0) }
+  const scaffoldPosition = makePosition(2, 0, 0)
+  const scaffoldSupport = makeBlock('stone', makePosition(1, 0, 0))
+  const combat = makeBot({
+    entities: [combatTarget], items: [{ name: 'iron_sword', type: 1, attackDamage: 6 }, { name: 'dirt', type: 2, count: 4 }],
+    blockStates: [[scaffoldPosition, makeBlock('air', scaffoldPosition, { type: 0 })], [scaffoldSupport.position, scaffoldSupport]],
+    async onAttack(_entity, bot) {
+      await bot.equip({ name: 'dirt', type: 2 })
+      await bot.placeBlock(scaffoldSupport, { x: 1, y: 0, z: 0 })
+      bot.emit('entityDead', combatTarget)
+    }
+  })
+  combat.registry.itemsByName.dirt = { id: 2 }
+  const movementSettings = []
+  combat.pathfinder.setMovements = movement => { movementSettings.push(movement); combat.movement = movement }
+  const equipped = []
+  const originalEquip = combat.equip
+  combat.equip = async item => { equipped.push(item.name); return originalEquip.call(combat, item) }
+  combat.placeBlock = async reference => {
+    const old = combat.blockAt(scaffoldPosition)
+    const placed = makeBlock('dirt', scaffoldPosition, { type: 2 })
+    placed.stateId = 1
+    combat.blockStates.set(key(scaffoldPosition), placed)
+    setImmediate(() => combat.emit('blockUpdate', old, placed))
+    return placed
+  }
+  const combatPolicy = { allowDig: false, scaffold: 'leave', scaffoldBlocks: ['dirt'], allowTowers: false }
+  assert.equal(await navigation.runWithNavigationPolicy(combat, combatPolicy, () => skills.attackEntity(combat, combatTarget)), true)
+  assert.equal(movementSettings[0].canDig, false, 'combat route cannot dig')
+  assert.equal(movementSettings[0].canPlaceOn, true, 'combat route can use owned scaffold inventory')
+  assert.equal(movementSettings[0].allow1by1towers, false, 'combat route cannot create tall one-block pillars')
+  assert.equal(combat.blockAt(scaffoldPosition).name, 'dirt', 'confirmed combat scaffold may remain')
+  assert.deepEqual(equipped, ['iron_sword', 'dirt', 'iron_sword'], 'confirmed route scaffold restores the combat weapon')
 
   const chestBlock = makeBlock('chest', makePosition(1, 0, 0))
   const makeChestTransfer = ({ direction, available, requested, moved = requested, serverUpdates = true }) => {

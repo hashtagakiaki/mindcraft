@@ -49,7 +49,7 @@ export class Coder {
         try {
             await trackSkill('generated_code', () => staged.func.main(this.agent.bot, staged.places))();
             check();
-            safety?.finish();
+            await safety?.finish();
         } catch (error) {
             check();
             if (!safety?.isYield(error)) throw error;
@@ -334,8 +334,12 @@ function guardSdk(sdk, check, safety = null, namespace = '') {
             const method = `${namespace}.${name}`;
             try {
                 const result = value(...args);
-                if (result?.then) return registerOwnedPromise(result.then(
-                    settled => safety.after(method, settled), error => { throw safety.fail(method, error); }));
+                if (result?.then) {
+                    const owned = registerOwnedPromise(result.then(
+                        settled => safety.after(method, settled), error => { throw safety.fail(method, error); }));
+                    safety.track?.(owned);
+                    return owned;
+                }
                 return safety.after(method, result);
             } catch (error) { throw safety.fail(method, error); }
         }]));
@@ -348,6 +352,7 @@ function nativeExecutionSafety(windowMs) {
     const owner = operationContext();
     const queries = new Set(['skills.inspectChestAt', 'places.find', 'places.inspect', 'places.verify', 'places.resolveAlias']);
     let deadline, failure, yielded;
+    const pendingSdkCalls = new Set();
     const fail = (method, error, result) => {
         failure ||= error;
         if (owner && !owner.sdkFailure) owner.sdkFailure = {
@@ -378,13 +383,20 @@ function nativeExecutionSafety(windowMs) {
                 || method === 'skills.approachBlock' && workResult?.status !== 'ready'
                 || method === 'skills.fellTree' && workResult?.status !== 'complete'
                 || method === 'skills.goToPosition' && (result?.status !== 'reached' || result?.ok !== true)
-                || method === 'skills.reachPosition' && (result?.status !== 'reached' || result?.ok !== true)
-                || method === 'skills.reachPositionWithScaffoldCleanup' && (result?.status !== 'reached' || result?.ok !== true || result?.cleanupRequired?.length > 0);
+                || method === 'skills.reachPosition' && (result?.status !== 'reached' || result?.ok !== true);
             if (failed) throw fail(method, new Error(`${method} failed: ${result === false ? "returned false" : result?.status ?? "ok:false"}`), result);
             return result;
         },
         fail,
-        finish() { if (failure) throw failure; if (yielded) throw yielded; },
+        track(promise) {
+            pendingSdkCalls.add(promise);
+            promise.then(() => pendingSdkCalls.delete(promise), () => pendingSdkCalls.delete(promise));
+        },
+        async finish() {
+            while (pendingSdkCalls.size) await Promise.allSettled([...pendingSdkCalls]);
+            if (failure) throw failure;
+            if (yielded) throw yielded;
+        },
         isYield(error) { return !failure && error === yielded; },
     };
 }

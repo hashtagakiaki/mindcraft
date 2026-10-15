@@ -1,4 +1,4 @@
-import { normalizeNavigationPolicy, runWithNavigationPolicy } from './navigation_policy.js';
+import { runWithNavigationPolicy } from './navigation_policy.js';
 
 // Native model-facing contracts. Internal/legacy SDKs retain their bot-first APIs.
 // No function-source or arity inference: each adapter states its argument mapping.
@@ -17,8 +17,27 @@ const optional = descriptor => Object.freeze({ ...descriptor, optional: true });
 const enumeration = (values, options = {}) => field('enum', { values, ...options });
 const quantity = options => field('quantity', options);
 const placeKinds = ['base', 'farm', 'storage', 'forest', 'village', 'mine', 'resource', 'other'];
-const navigationField = optional(field('navigationPolicy', { description: 'Route edit policy for implicit movement; {allowDig?:boolean, scaffold?:"forbid"|"temporary"|"leave", scaffoldBlocks?:["dirt","cobblestone"]}. Defaults to no digging or scaffolding.' }));
-const navigationFields = Object.freeze({ navigation: navigationField });
+const PRESERVE_ROUTE = Object.freeze({ allowDig: false, scaffold: 'forbid', scaffoldBlocks: Object.freeze([]) });
+const PRESERVE_WITH_CLEANUP = Object.freeze({ allowDig: false, scaffold: 'temporary', scaffoldBlocks: Object.freeze(['dirt', 'cobblestone']) });
+const EDIT_ROUTE = Object.freeze({ allowDig: true, scaffold: 'leave', scaffoldBlocks: Object.freeze(['dirt', 'cobblestone']) });
+const COMBAT_ROUTE = Object.freeze({ allowDig: false, scaffold: 'leave', scaffoldBlocks: Object.freeze(['dirt', 'cobblestone']), allowTowers: false });
+const navigationPolicies = Object.freeze({
+    'skills.goToPosition': PRESERVE_WITH_CLEANUP, 'skills.reachPosition': EDIT_ROUTE,
+    'skills.craftRecipe': PRESERVE_ROUTE, 'skills.smeltItem': PRESERVE_ROUTE, 'skills.clearNearestFurnace': PRESERVE_ROUTE,
+    'skills.attackNearest': COMBAT_ROUTE, 'skills.attackEntity': COMBAT_ROUTE, 'skills.defendSelf': COMBAT_ROUTE,
+    'skills.collectBlock': EDIT_ROUTE, 'skills.pickupNearbyItems': PRESERVE_ROUTE,
+    'skills.breakBlockAt': PRESERVE_ROUTE, 'skills.approachBlock': PRESERVE_ROUTE, 'skills.inspectChestAt': PRESERVE_ROUTE,
+    'skills.putInChest': PRESERVE_ROUTE, 'skills.takeFromChest': PRESERVE_ROUTE, 'skills.viewChest': PRESERVE_ROUTE,
+    'skills.giveToPlayer': PRESERVE_ROUTE, 'skills.goToNearestBlock': PRESERVE_ROUTE, 'skills.goToNearestEntity': PRESERVE_ROUTE,
+    'skills.goToPlayer': PRESERVE_ROUTE, 'skills.followPlayer': PRESERVE_ROUTE,
+    'skills.moveAway': COMBAT_ROUTE, 'skills.moveAwayFromEntity': COMBAT_ROUTE, 'skills.avoidEnemies': COMBAT_ROUTE,
+    'skills.goToBed': PRESERVE_ROUTE, 'skills.useDoor': PRESERVE_ROUTE, 'skills.tillAndSow': PRESERVE_ROUTE,
+    'skills.activateNearestBlock': PRESERVE_ROUTE, 'skills.showVillagerTrades': PRESERVE_ROUTE,
+    'skills.tradeWithVillager': PRESERVE_ROUTE, 'skills.goToSurface': EDIT_ROUTE, 'skills.tendNearbyFarm': PRESERVE_ROUTE,
+    'skills.fellTree': PRESERVE_ROUTE, 'skills.placeBlock': PRESERVE_ROUTE, 'skills.useToolOn': PRESERVE_ROUTE,
+    'skills.useToolOnBlock': PRESERVE_ROUTE,
+    'places.goTo': PRESERVE_ROUTE, 'places.goToAlias': PRESERVE_ROUTE, 'places.tendFarm': PRESERVE_ROUTE,
+});
 const farmFields = Object.freeze({
     scope: enumeration(['connected', 'radius'], { default: 'connected' }),
     searchRadius: optional(radius(undefined, { positive: true, description: 'Connected-plot search radius; effective default 32.' })),
@@ -40,27 +59,24 @@ function define(namespace, name, fields, description, args, options = {}) {
     definitions.push(Object.freeze({ namespace, name, fields: Object.freeze(fields), description, args,
         bindBot: namespace === 'skills' || namespace === 'world', ...options }));
 }
-const navigationSkills = new Set([
-    'craftRecipe', 'smeltItem', 'clearNearestFurnace', 'attackNearest', 'attackEntity', 'defendSelf', 'collectBlock', 'pickupNearbyItems',
-    'breakBlockAt', 'approachBlock', 'inspectChestAt', 'putInChest', 'takeFromChest', 'viewChest', 'giveToPlayer',
-    'goToGoal', 'goToNearestBlock', 'goToNearestEntity', 'goToPlayer', 'followPlayer', 'moveAway',
-    'moveAwayFromEntity', 'avoidEnemies', 'goToBed', 'useDoor', 'tillAndSow', 'activateNearestBlock',
-    'showVillagerTrades', 'tradeWithVillager', 'goToSurface', 'tendNearbyFarm', 'fellTree', 'placeBlock', 'useToolOn', 'useToolOnBlock',
-]);
-const s = (name, fields, description, args, options) => define('skills', name,
-    navigationSkills.has(name) ? { ...fields, ...navigationFields } : fields,
-    navigationSkills.has(name)
-        ? `${description} An optional navigation field applies route digging/scaffolding policy to this skill's implicit movement for the entire skill call; its work target remains governed by the skill's own contract. When supplied, the result is {ok,status,result,arrival,reason}; temporary scaffolds are removed after the work finishes and any remaining position makes ok:false.`
-        : description,
-    args, { ...options, navigationPolicy: navigationSkills.has(name) });
+const policyDescription = policy => policy === EDIT_ROUTE
+    ? 'Its route may dig and leave confirmed dirt/cobblestone scaffolds; the selected work target keeps this skill’s own permissions.'
+    : policy === COMBAT_ROUTE
+        ? 'Its route cannot dig or use one-block towers and may place confirmed dirt/cobblestone bridge scaffolds that may remain; the existing target/follow/retreat goal is preserved.'
+        : 'Its route preserves existing blocks and leaves no route scaffolds; an unreachable target returns this skill’s normal failure result.';
+const s = (name, fields, description, args, options = {}) => {
+    const navigationPolicy = navigationPolicies[`skills.${name}`];
+    return define('skills', name, fields,
+        navigationPolicy ? `${description} ${policyDescription(navigationPolicy)}` : description, args,
+        { ...options, ...(navigationPolicy ? { navigationPolicy } : {}) });
+};
 const w = (name, fields, description, args, options) => define('world', name, fields, description, args, options);
-const navigationPlaces = new Set(['goTo', 'goToAlias', 'tendFarm']);
-const p = (name, fields, description, args, options = {}) => define('places', name,
-    navigationPlaces.has(name) ? { ...fields, ...navigationFields } : fields,
-    navigationPlaces.has(name)
-        ? `${description} An optional navigation field applies route digging/scaffolding policy to this place action's movement for the entire call. When supplied, the result is {ok,status,result,arrival,reason}; temporary scaffolds are removed after the work finishes and any remaining position makes ok:false.`
-        : description,
-    args, { bindBot: false, navigationPolicy: navigationPlaces.has(name), ...options });
+const p = (name, fields, description, args, options = {}) => {
+    const navigationPolicy = navigationPolicies[`places.${name}`];
+    return define('places', name, fields,
+        navigationPolicy ? `${description} ${policyDescription(navigationPolicy)}` : description, args,
+        { bindBot: false, ...options, ...(navigationPolicy ? { navigationPolicy } : {}) });
+};
 const coords = input => [input.position.x, input.position.y, input.position.z];
 const allQuantity = value => value === 'all' ? -1 : value;
 
@@ -102,56 +118,12 @@ for (const name of ['putInChest', 'takeFromChest']) s(name, {
 s('viewChest', {}, 'Read the nearest chest and log contents; close on success/failure/cancellation. Returns boolean.', () => []);
 s('consume', { itemName: field('stringValue', { default: '', description: 'Empty string selects available food.' }) }, 'Consume food or a potion. Returns boolean.', a => [a.itemName]);
 s('giveToPlayer', { itemName: text(), playerName: text(), quantity: positiveInt({ default: 1 }) }, 'Give quantity items to the visible player. Returns boolean.', a => [a.itemName, a.playerName, a.quantity]);
-s('goToGoal', { goal: field('goal'), movementOverride: optional(field('movements')) }, 'Navigate using an existing pathfinder Goal reference. Optional Movements reference disables destructive fallback. Returns boolean.', a => [a.goal, a.movementOverride ?? null]);
-s('goToPosition', {
-    position: position(), tolerance: distance({ default: 1, max: 8 }),
-    allowDig: field('boolean', { default: false }),
-    scaffold: enumeration(['forbid', 'temporary', 'leave'], { default: 'forbid' }),
-    scaffoldBlocks: field('strings', { default: Object.freeze(['dirt', 'cobblestone']) }),
-    safeWater: field('boolean', { default: false }),
-    minDistance: optional(distance({ max: 8, description: 'Compatibility alias for tolerance; takes precedence when both fields are supplied.' })),
-}, 'Navigate to an absolute feet position with one explicit route-edit policy. allowDig defaults false. scaffold is forbid (default), temporary (owned scaffolds must be removed before success), or leave (owned scaffolds may remain). Returns {ok,status,arrivalReached,finalPosition,reason}, with arrivalReached separate from overall success; only reached with ok:true is success. minDistance is a compatibility alias for tolerance and takes precedence when both are supplied. Legacy bot-first positional calls retain their boolean behavior.', a => [{
-    position: a.position, tolerance: a.minDistance ?? a.tolerance, allowDig: a.allowDig,
-    scaffold: a.scaffold, scaffoldBlocks: a.scaffoldBlocks, safeWater: a.safeWater,
-}], {
-    constraint: (a, fail) => {
-        const tolerance = a.minDistance ?? a.tolerance;
-        if (tolerance < 0.75) fail(has(a, 'minDistance') ? 'minDistance' : 'tolerance', 'between 0.75 and 8 blocks');
-        if (a.scaffold !== 'forbid' && a.scaffoldBlocks.length === 0) fail('scaffoldBlocks', 'a nonempty list when scaffolding is permitted');
-        for (const block of a.scaffoldBlocks) if (!['dirt', 'cobblestone'].includes(block)) fail('scaffoldBlocks', 'dirt and/or cobblestone');
-        if (new Set(a.scaffoldBlocks).size !== a.scaffoldBlocks.length) fail('scaffoldBlocks', 'unique block names');
-    },
-});
-s('reachPosition', {
-    position: position(), tolerance: distance({ default: 1, max: 8, description: 'Minimum 0.75 blocks; maximum 8 blocks.' }),
-    allowDig: field('boolean', { default: true }), allowScaffold: field('boolean', { default: true }),
-    scaffoldBlocks: field('strings', { default: Object.freeze(['dirt', 'cobblestone']), description: 'Allowed scaffold types; only types actually in inventory are used.' }),
-    safeWater: field('boolean', { default: false }),
-}, 'Reach an exact feet position using bounded replanning. By default, dig with the suitable equipped tool and scaffold with listed dirt/cobblestone types that are in inventory; pass allowDig:false and/or allowScaffold:false to prohibit those edits. Water traversal remains disabled unless safeWater:true. A pathfinder scaffold is recorded only after a matching block update is observed; an intermediate update or missing confirmation never counts as placement. Loaded safe drops are limited to three blocks of feet-height onto a known solid, non-liquid support; deeper, unknown, liquid and hazardous landings remain blocked. Owned scaffolds are removed when safe; cleanup is best-effort and never invalidates an arrival within tolerance. Scaffold edit history and position lists stay internal; failures retain their reason. Returns {ok,status,arrivalReached,finalPosition,reason}; only reached is success, and every other status stops this execution.', a => a, {
-    argsObject: true,
-    constraint: (a, fail) => {
-        if (a.tolerance < 0.75) fail('tolerance', 'between 0.75 and 8 blocks');
-        if (a.allowScaffold && a.scaffoldBlocks.length === 0) fail('scaffoldBlocks', 'a nonempty list when allowScaffold is true');
-        for (const block of a.scaffoldBlocks) if (!['dirt', 'cobblestone'].includes(block)) fail('scaffoldBlocks', 'dirt and/or cobblestone');
-        if (new Set(a.scaffoldBlocks).size !== a.scaffoldBlocks.length) fail('scaffoldBlocks', 'unique block names');
-    },
-});
-s('reachPositionWithScaffoldCleanup', {
-    position: position(), tolerance: distance({ default: 1, max: 8, description: 'Minimum 0.75 blocks; maximum 8 blocks.' }),
-    allowDig: field('boolean', { default: false }),
-    scaffoldBlocks: field('strings', { default: Object.freeze(['dirt', 'cobblestone']), description: 'Allowed scaffold types; only types actually in inventory are used.' }),
-    safeWater: field('boolean', { default: false }),
-}, 'Navigate using temporary scaffolds and require every scaffold placed by this call to be removed before success. Placement must receive a matching block update; missing or ambiguous confirmation returns a non-success result with a failure reason. By default, route digging is disabled to preserve built terrain; allowDig:true explicitly permits it. Loaded safe drops are limited to three blocks of feet-height onto a known solid, non-liquid support; deeper, unknown, liquid and hazardous landings remain blocked. If cleanup is incomplete, returns a non-success status with a cleanup failure reason, and minecraft_execute stops with that result preserved. Water traversal remains disabled unless safeWater:true.', a => ({
-    ...a, allowScaffold: true,
-}), {
-    argsObject: true,
-    constraint: (a, fail) => {
-        if (a.tolerance < 0.75) fail('tolerance', 'between 0.75 and 8 blocks');
-        if (a.scaffoldBlocks.length === 0) fail('scaffoldBlocks', 'a nonempty list');
-        for (const block of a.scaffoldBlocks) if (!['dirt', 'cobblestone'].includes(block)) fail('scaffoldBlocks', 'dirt and/or cobblestone');
-        if (new Set(a.scaffoldBlocks).size !== a.scaffoldBlocks.length) fail('scaffoldBlocks', 'unique block names');
-    },
-});
+s('goToPosition', { position: position() }, 'Reach an absolute feet position without digging. Confirmed dirt/cobblestone route scaffolds are removed before success. Returns {ok,status,arrivalReached,finalPosition,reason}; arrival alone is not success.', a => [{
+    position: a.position, allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt', 'cobblestone'],
+}]);
+s('reachPosition', { position: position() }, 'Reach an absolute feet position, permitting route digging and confirmed dirt/cobblestone scaffolds that may remain. Do not start route cleanup after arrival. Returns {ok,status,arrivalReached,finalPosition,reason}; route edits must be server-confirmed.', a => [{
+    position: a.position, allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false, cleanupOwnedScaffolds: false,
+}]);
 s('goToNearestBlock', { blockType: text(), minDistance: distance({ default: 2 }), radius: radius(64) }, 'Navigate to the nearest matching block within radius. Returns boolean.', a => [a.blockType, a.minDistance, a.radius]);
 s('goToNearestEntity', { entityType: text(), minDistance: distance({ default: 2 }), radius: radius(64) }, 'Navigate to the nearest matching entity within radius. Returns boolean.', a => [a.entityType, a.minDistance, a.radius]);
 s('goToPlayer', { username: text(), minDistance: distance({ default: 3 }) }, 'Navigate near a visible player. Returns boolean.', a => [a.username, a.minDistance]);
@@ -244,7 +216,6 @@ function expected(descriptor, config) {
         block: 'an observed Block with name and Vec3 position', goal: 'a pathfinder Goal with isEnd() and heuristic()',
         movements: 'a Movements reference with blocksCantBreak Set', timestamp: 'an ISO timestamp',
         blockPredicate: 'a Block predicate function, block ID, or array of block IDs',
-        navigationPolicy: '{allowDig?:boolean, scaffold?:"forbid"|"temporary"|"leave", scaffoldBlocks?:["dirt","cobblestone"]}',
         staySeconds: 'finite nonnegative seconds or -1 until interrupted',
     };
     let result = descriptor.type === 'enum' ? descriptor.values.map(value => JSON.stringify(value)).join(' | ')
@@ -266,7 +237,6 @@ function sampleValue(descriptor, config) {
         case 'enum': return JSON.stringify(descriptor.values[0]);
         case 'position': return '{x:10,y:64,z:-3}';
         case 'positions': return '[]';
-        case 'navigationPolicy': return '{allowDig:false,scaffold:"forbid"}';
         case 'strings': return '["chest"]';
         case 'boolean': return 'true';
         case 'function': return 'entity => entity.name === "cow"';
@@ -315,15 +285,6 @@ function validateValue(value, descriptor, fieldName, fail, config) {
         case 'blockPredicate': valid = typeof value === 'function' || integer(value) && value >= 0 || Array.isArray(value) && value.every(id => integer(id) && id >= 0); break;
         case 'strings': valid = Array.isArray(value) && value.every(nonempty); break;
         case 'object': valid = objectLike(value); break;
-        case 'navigationPolicy': {
-            if (!objectLike(value)) return reject();
-            for (const key of Object.keys(value)) if (!['allowDig', 'scaffold', 'scaffoldBlocks'].includes(key)) fail(`${fieldName}.${key}`, 'a recognized navigation field (allowDig, scaffold, scaffoldBlocks)');
-            if (has(value, 'allowDig') && typeof value.allowDig !== 'boolean') fail(`${fieldName}.allowDig`, 'a boolean');
-            if (has(value, 'scaffold') && !['forbid', 'temporary', 'leave'].includes(value.scaffold)) fail(`${fieldName}.scaffold`, 'forbid, temporary, or leave');
-            if (has(value, 'scaffoldBlocks') && (!Array.isArray(value.scaffoldBlocks) || value.scaffoldBlocks.some(name => !['dirt', 'cobblestone'].includes(name)) || new Set(value.scaffoldBlocks).size !== value.scaffoldBlocks.length)) fail(`${fieldName}.scaffoldBlocks`, 'a unique list containing only dirt and/or cobblestone');
-            if ((value.scaffold ?? 'forbid') !== 'forbid' && (value.scaffoldBlocks ?? ['dirt', 'cobblestone']).length === 0) fail(`${fieldName}.scaffoldBlocks`, 'a nonempty list when scaffolding is permitted');
-            valid = true; break;
-        }
         case 'goal': valid = objectLike(value) && typeof value.isEnd === 'function' && typeof value.heuristic === 'function'; break;
         case 'movements': valid = objectLike(value) && typeof value.blocksCantBreak?.add === 'function'; break;
         case 'timestamp': valid = nonempty(value) && /^\d{4}-\d{2}-\d{2}T/.test(value) && Number.isFinite(Date.parse(value)); break;
@@ -364,13 +325,9 @@ function validateInput(definition, callArgs, config) {
             continue;
         }
         validateValue(value, descriptor, key, fail, config);
-        if (descriptor.type === 'navigationPolicy') value = normalizeNavigationPolicy(value);
         normalized[key] = value;
     }
     definition.constraint?.(normalized, fail);
-    if (normalized.navigation?.scaffold === 'temporary' && definition.name === 'followPlayer') {
-        fail('navigation.scaffold', 'forbid or leave for continuous follow');
-    }
     if (definition.name === 'tendNearbyFarm' || definition.name === 'tendFarm') {
         const radiusKey = normalized.scope === 'radius' ? 'radius' : 'searchRadius';
         if (!has(normalized, radiusKey)) normalized[radiusKey] = Math.min(32, searchLimit(config));
@@ -394,7 +351,9 @@ export function getNativeSdkDocs(config = {}) {
             const requirement = has(descriptor, 'default') && descriptor.default !== undefined ? `default ${JSON.stringify(effectiveDefault(descriptor, config))}` : descriptor.optional ? 'optional' : 'required';
             return `${key}: ${expected(descriptor, config)}; ${requirement}${descriptor.description ? `. ${descriptor.description}` : ''}.`;
         });
-        return `${definition.namespace}.${definition.name}\nSignature: ${signature(definition)}. Host binds the bot; pass only one named object. ${Object.keys(definition.fields).length ? Object.values(definition.fields).every(d => d.optional || has(d, 'default')) ? 'Input may be omitted; defaults apply.' : 'Required fields must be supplied.' : 'Accepts () or ({}).'}\n${definition.description}\n${fields.join('\n')}\nNative execution: minecraft_execute stops on action false/error/ok:false; queries remain data. Failure blocks further SDK calls even after catch or omitted await. The host owns cancellation and execution_window_ms yielding. These guarantees cover SDK calls.\nExample: ${example(definition, config)}\nRuntime availability: ${availability[definition.namespace]}\nSearch-radius defaults are capped by max_search_radius (${searchLimit(config)}). Invalid input throws SdkArgumentError (INVALID_ARGUMENT) before this method calls the internal SDK. Raw bot/plugin access is outside this guarantee.`;
+        const policy = definition.navigationPolicy
+            ? `\nFixed implicit-route policy: allowDig=${definition.navigationPolicy.allowDig}, scaffold=${definition.navigationPolicy.scaffold}. This policy applies to this skill's movement and plugin pathing; work targets retain the skill's own permissions.` : '';
+        return `${definition.namespace}.${definition.name}\nSignature: ${signature(definition)}. Host binds the bot; pass only one named object. ${Object.keys(definition.fields).length ? Object.values(definition.fields).every(d => d.optional || has(d, 'default')) ? 'Input may be omitted; defaults apply.' : 'Required fields must be supplied.' : 'Accepts () or ({}).'}\n${definition.description}${policy}\n${fields.join('\n')}\nNative execution: minecraft_execute stops on action false/error/ok:false; queries remain data. Failure blocks further SDK calls even after catch or omitted await. The host owns cancellation and execution_window_ms yielding. These guarantees cover SDK calls.\nExample: ${example(definition, config)}\nRuntime availability: ${availability[definition.namespace]}\nSearch-radius defaults are capped by max_search_radius (${searchLimit(config)}). Invalid input throws SdkArgumentError (INVALID_ARGUMENT) before this method calls the internal SDK. Raw bot/plugin access is outside this guarantee.`;
     });
 }
 
@@ -402,7 +361,7 @@ export function getNativeSdkMethodNames() {
     return definitions.map(definition => `${definition.namespace}.${definition.name}`);
 }
 
-const movementResultMethods = new Set(['goToPosition', 'reachPosition', 'reachPositionWithScaffoldCleanup']);
+const movementResultMethods = new Set(['goToPosition', 'reachPosition']);
 
 function compactNavigationResult(value, requireCleanup = false) {
     if (!objectLike(value)) return value;
@@ -431,18 +390,24 @@ export function createNativeSdk(bindings, config = {}) {
             const input = validateInput(definition, callArgs, config);
             const internal = bindings[definition.namespace]?.[definition.name];
             if (typeof internal !== 'function') throw new Error(`${definition.namespace}.${definition.name} is unavailable in this runtime.`);
-            const navigation = definition.navigationPolicy ? input.navigation : null;
-            const forwarded = navigation ? Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'navigation')) : input;
-            const args = definition.argsObject ? [definition.args(forwarded)] : definition.args(forwarded);
+            let args;
+            if (definition.namespace === 'skills' && definition.name === 'goToPosition') {
+                const policy = definition.navigationPolicy;
+                args = [{ position: input.position, allowDig: policy.allowDig, scaffold: policy.scaffold, scaffoldBlocks: [...policy.scaffoldBlocks] }];
+            } else if (definition.namespace === 'skills' && definition.name === 'reachPosition') {
+                const policy = definition.navigationPolicy;
+                args = [{ position: input.position, allowDig: policy.allowDig, allowScaffold: policy.scaffold !== 'forbid', scaffoldBlocks: [...policy.scaffoldBlocks], safeWater: false, cleanupOwnedScaffolds: false }];
+            } else {
+                args = definition.argsObject ? [definition.args(input)] : definition.args(input);
+            }
             // Internal skills/places/vision already retain their ownership wrappers.
             // Preserve pure synchronous world results by never making this wrapper async.
             const invoke = () => internal(...(definition.bindBot ? [bindings.bot, ...args] : args));
-            const result = navigation ? runWithNavigationPolicy(bindings.bot, navigation, invoke) : invoke();
-            if (!navigation && !(definition.namespace === 'skills' && movementResultMethods.has(definition.name))) return result;
-            const requireCleanup = navigation?.scaffold === 'temporary'
-                || definition.namespace === 'skills' && (definition.name === 'reachPositionWithScaffoldCleanup'
-                    || definition.name === 'goToPosition' && input.scaffold === 'temporary');
-            const compact = value => compactNavigationResult(value, requireCleanup);
+            const isPositionMove = definition.namespace === 'skills' && movementResultMethods.has(definition.name);
+            const result = definition.navigationPolicy && !isPositionMove
+                ? runWithNavigationPolicy(bindings.bot, definition.navigationPolicy, invoke) : invoke();
+            if (!(definition.namespace === 'skills' && movementResultMethods.has(definition.name))) return result;
+            const compact = value => compactNavigationResult(value, definition.name === 'goToPosition');
             return result?.then ? result.then(compact) : compact(result);
         };
     }
