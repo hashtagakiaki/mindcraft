@@ -46,6 +46,7 @@ export function mustCollectManually() { return false; }
     'src/agent/library/operation_context.js', 'src/agent/library/navigation_policy.js', 'src/agent/library/world.js',
     'src/agent/library/index.js', 'src/agent/library/skill_library.js',
     'src/agent/library/sdk_capabilities.js', 'src/agent/library/lockdown.js',
+    'src/agent/library/native_sdk.js',
     'src/agent/commands/actions.js', 'src/agent/commands/queries.js',
     'src/agent/commands/index.js', 'src/agent/coder.js',
     'bots/execTemplate.js', 'bots/lintTemplate.js', 'eslint.config.js'
@@ -149,9 +150,15 @@ async function main() {
     process.chdir(root)
     const load = relative => import(pathToFileURL(path.join(root, relative)))
     const skills = await load('src/agent/library/skills.js')
+    const { createNativeSdk } = await load('src/agent/library/native_sdk.js')
     const { normalizePlacement, makePlacementGoal } = await load('src/agent/library/block_placement.js')
     const { createOperationContext, runOwnedOperation, operationResult } = await load('src/agent/library/operation_context.js')
     const invoke = (bot, name = 'furnace', options = { facing: 'north' }, dontCheat = false) => skills.placeBlock(bot, name, 0, 65, 0, options, dontCheat)
+    const ordinaryBot = makeBot({ item: 'stone', result: { name: 'stone', properties: {} } })
+    const nativeSdk = createNativeSdk({ bot: ordinaryBot, skills })
+    assert.equal(await nativeSdk.skills.placeBlock({ blockType: 'stone', position: { x: 0, y: 65, z: 0 } }), true,
+      'native placement verifies ordinary blocks without requiring orientation options')
+    assert.equal(ordinaryBot.state.packets.filter(([packet]) => packet === 'block_place').length, 1)
     const owned = async (bot, fn) => {
       const controller = new AbortController()
       const op = createOperationContext({ id: 'placement-fixture', controller }, { bot }, { intentEpoch: 1 })

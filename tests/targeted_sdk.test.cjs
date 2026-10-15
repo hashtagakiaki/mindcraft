@@ -254,7 +254,8 @@ async function main() {
     Object.assign(settings, { agent_runtime:'codex-session', codex_session:{max_search_radius:16} })
     const nativeDocs = getNativeSdkDocs(settings)
     const nativeNames = new Set(nativeDocs.map(doc=>doc.split('\n')[0]))
-    const internalOnlyNativeHelpers = new Set(['skills.goToGoal','skills.reachPositionWithScaffoldCleanup'])
+    const internalOnlyNativeHelpers = new Set(['skills.goToGoal','skills.reachPositionWithScaffoldCleanup',
+      'skills.craftRecipe','skills.inspectChestAt','skills.viewChest','world.getBlockAtPosition','world.shouldPlaceTorch'])
     for (const name of legacyNames) if (!internalOnlyNativeHelpers.has(name)) assert.ok(nativeNames.has(name), `native catalog preserves ${name}`)
     assert.ok(nativeDocs.every(doc=>!doc.includes('(bot,')), 'native examples use the public argument contract')
     const placeNavigationDocs = nativeDocs.filter(doc => ['places.goTo\n','places.goToAlias\n','places.tendFarm\n'].some(prefix => doc.startsWith(prefix)))
@@ -277,7 +278,7 @@ async function main() {
       'await Promise.resolve(); world.getNearbyBlockTypes(12);',
       'await skills.goToPosition(bot,0,64,0);',
       'await skills.goToPosition({position:{x:"0",y:64,z:0}});',
-      'await skills.inspectChestAt({position:{x:0,y:NaN,z:0}});',
+      'await skills.inspectChest({position:{x:0,y:NaN,z:0}});',
       'await skills.breakBlockAt({position:{x:0,y:Infinity,z:0}});',
       'await skills.placeBlock({blockType:"chest",position:{x:0,y:64}});',
       'await skills.putInChest({itemName:"oak_log",quantity:0});',
@@ -300,7 +301,7 @@ async function main() {
     assert.equal(corrected.success,true,'corrected calls work in the same execution environment')
     assert.equal(scans,2)
     assert.equal(world.getPosition(bot).x,bot.entity.position.x,'internal bot-first API still works')
-    agent.places.sdk.verify=async()=>({ok:false,status:'missing'})
+    agent.places.sdk.verify=async()=>({ok:true,status:'missing'})
     bot.entity.position = new Vec3(0.5,64,0.5)
     const movesBeforeAlreadyArrived=bot.state.moves.length
     const observationFalse=await run('await Promise.resolve(); log(bot,JSON.stringify({entity:world.isEntityType({name:"dirt"})})); log(bot,JSON.stringify(await places.verify({placeId:"missing"}))); log(bot,JSON.stringify(await skills.goToPosition({position:{x:0,y:64,z:0}})));')

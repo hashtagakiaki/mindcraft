@@ -422,7 +422,7 @@ async function equipHighestAttack(bot) {
         await bot.equip(weapon, 'hand');
 }
 
-export async function craftRecipe(bot, itemName, num=1) {
+export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
     /**
      * Attempt to craft the given item name from a recipe. May craft many items.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
@@ -435,12 +435,12 @@ export async function craftRecipe(bot, itemName, num=1) {
 
     if (mc.getItemCraftingRecipes(itemName).length == 0) {
         log(bot, `${itemName} is either not an item, or it does not have a crafting recipe!`);
-        return false;
+        return nativeOptions?.details ? { ok: false, status: 'blocked', requestedQuantity: nativeOptions.quantity ?? null, confirmedQuantity: 0, remainingQuantity: nativeOptions.quantity ?? null, itemName, reason: 'no_recipe' } : false;
     }
 
     if (!Number.isInteger(num) || num < 1) {
         log(bot, `Crafting count must be a positive integer: ${num}.`);
-        return false;
+        return nativeOptions?.details ? { ok: false, status: 'blocked', requestedQuantity: nativeOptions.quantity ?? null, confirmedQuantity: 0, remainingQuantity: nativeOptions.quantity ?? null, itemName, reason: 'invalid_recipe_count' } : false;
     }
 
     return craftingSync.run(bot, async (craft) => {
@@ -509,9 +509,9 @@ export async function craftRecipe(bot, itemName, num=1) {
     const inventory = world.getInventoryCounts(bot); //Items in the agents inventory
     const requiredIngredients = mc.ingredientsFromPrismarineRecipe(recipe); //Items required to use the recipe once.
     const craftLimit = mc.calculateLimitingResource(inventory, requiredIngredients);
-    
-    const craftedCount = await craft(recipe, Math.min(craftLimit.num, num), craftingTable);
-    if(craftedCount<num) log(bot, `Not enough ${craftLimit.limitingResource} to craft ${num}, crafted ${craftedCount}. You now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
+    const requestedRecipes = nativeOptions?.quantity == null ? num : Math.ceil(nativeOptions.quantity / recipe.result.count);
+    const craftedCount = await craft(recipe, Math.min(craftLimit.num, requestedRecipes), craftingTable);
+    if(craftedCount<requestedRecipes) log(bot, `Not enough ${craftLimit.limitingResource} to craft ${requestedRecipes}, crafted ${craftedCount}. You now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
     else log(bot, `Successfully crafted ${itemName}, you now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
     if (placedTable) {
         await withSkillPhase('cleanup', () => collectBlock(bot, 'crafting_table', 1));
@@ -521,8 +521,22 @@ export async function craftRecipe(bot, itemName, num=1) {
     //There is probablly a more efficient method than checking the entire inventory but this is all mineflayer-armor-manager provides. :P
     await bot.armorManager.equipAll();
 
+    if (nativeOptions?.details) {
+        const confirmedQuantity = craftedCount * recipe.result.count;
+        const requestedQuantity = nativeOptions.quantity;
+        const complete = confirmedQuantity >= requestedQuantity;
+        return { ok: complete, status: complete ? 'complete' : confirmedQuantity > 0 ? 'partial' : 'blocked', itemName,
+            requestedQuantity, confirmedQuantity, remainingQuantity: Math.max(0, requestedQuantity - confirmedQuantity),
+            producedPerRecipe: recipe.result.count, executedRecipes: craftedCount,
+            ...(!complete ? { reason: confirmedQuantity ? 'materials_or_grid_limited' : 'craft_unavailable' } : {}) };
+    }
     return craftedCount > 0;
     });
+}
+
+export async function craftItem(bot, itemName, quantity=1) {
+    if (!Number.isSafeInteger(quantity) || quantity < 1) throw new TypeError('craftItem quantity must be a positive safe integer');
+    return craftRecipe(bot, itemName, 1, { details: true, quantity });
 }
 
 export async function wait(bot, milliseconds) {
@@ -550,7 +564,7 @@ export async function wait(bot, milliseconds) {
     return true;
 }
 
-export async function smeltItem(bot, itemName, num=1, actionContext=null) {
+export async function smeltItem(bot, itemName, num=1, options=null) {
     /**
      * Smelts the requested number of items in a nearby furnace and waits for the confirmed result.
      * @param {MinecraftBot} bot, reference to the Minecraft bot.
@@ -561,7 +575,7 @@ export async function smeltItem(bot, itemName, num=1, actionContext=null) {
      * await skills.smeltItem(bot, "raw_iron");
      * await skills.smeltItem(bot, "beef", 4);
      **/
-    const context = getActionContext(bot, actionContext);
+    const context = getActionContext(bot, options?.actionContext ?? (options?.furnacePosition === undefined ? options : null));
     if (!mc.isSmeltable(itemName)) {
         log(bot, `Cannot smelt ${itemName}. Hint: make sure you are smelting the 'raw' item.`);
         return false;
@@ -572,7 +586,11 @@ export async function smeltItem(bot, itemName, num=1, actionContext=null) {
     }
 
     const furnaceRange = 16;
-    let furnaceBlock = world.getNearestBlock(bot, 'furnace', furnaceRange);
+    const exactFurnacePosition = options && Object.hasOwn(options, 'furnacePosition') ? options.furnacePosition : undefined;
+    let furnaceBlock = exactFurnacePosition === undefined
+        ? world.getNearestBlock(bot, 'furnace', furnaceRange)
+        : bot.blockAt(new Vec3(Math.floor(exactFurnacePosition.x), Math.floor(exactFurnacePosition.y), Math.floor(exactFurnacePosition.z)));
+    if (exactFurnacePosition !== undefined && (!furnaceBlock || !['furnace', 'blast_furnace', 'smoker'].includes(furnaceBlock.name))) return false;
     let placedFurnace = false;
     if (!furnaceBlock && world.getInventoryCounts(bot).furnace > 0 && !isActionCancelled(bot, context)) {
         const pos = world.getNearestFreeSpace(bot, 1, furnaceRange);
@@ -585,7 +603,14 @@ export async function smeltItem(bot, itemName, num=1, actionContext=null) {
         return false;
     }
     if (bot.entity.position.distanceTo(furnaceBlock.position) > 4)
-        await goToNearestBlock(bot, 'furnace', 4, furnaceRange);
+        if (!await goToPosition(bot, furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 4)) return false;
+    if (exactFurnacePosition !== undefined) {
+        const currentFurnace = bot.blockAt(new Vec3(Math.floor(exactFurnacePosition.x), Math.floor(exactFurnacePosition.y), Math.floor(exactFurnacePosition.z)));
+        if (!currentFurnace || !['furnace', 'blast_furnace', 'smoker'].includes(currentFurnace.name)) return options?.returnDetails
+            ? { ok: false, status: 'unknown', inputItem: itemName, requestedQuantity: num, confirmedQuantity: 0, remainingQuantity: num, furnacePosition: exactFurnacePosition, reason: 'furnace_target_changed' }
+            : false;
+        furnaceBlock = currentFurnace;
+    }
     if (isActionCancelled(bot, context)) return false;
     let furnace = null;
     let clickGuard = null;
@@ -767,19 +792,24 @@ export async function smeltItem(bot, itemName, num=1, actionContext=null) {
     }
     if (placedFurnace && !furnace.outputItem() && !furnace.inputItem() && !furnace.fuelItem())
         await collectBlock(bot, 'furnace', 1);
+    const details = () => ({ ok: total >= num, status: total >= num ? 'complete' : total > 0 ? 'partial' : cancelled ? 'cancelled' : inventoryConfirmed && furnaceConfirmed ? 'blocked' : 'unknown',
+        inputItem: itemName, outputItem: smeltedItem?.name ?? null, requestedQuantity: num, confirmedQuantity: total,
+        remainingQuantity: Math.max(0, num - total), furnacePosition: { x: furnaceBlock.position.x, y: furnaceBlock.position.y, z: furnaceBlock.position.z },
+        ...(!total ? { reason: reason ?? (furnaceConfirmed && inventoryConfirmed ? 'no_output' : 'snapshot_unknown') } : {}) });
     if (total === 0) {
         log(bot, `Failed to smelt ${itemName}; no output was confirmed.`);
-        return false;
+        return options?.returnDetails ? details() : false;
     }
     if (total < num) {
         log(bot, `Only smelted ${total} ${mc.getItemName(smeltedItem.type)}; partial result confirmed, no retry was started.`);
-        return false;
+        return options?.returnDetails ? details() : false;
     }
     log(bot, `Successfully smelted ${itemName}, got ${total} ${mc.getItemName(smeltedItem.type)}; furnace and inventory snapshots confirmed.`);
+    if (options?.returnDetails) return details();
     return true;
 }
 
-export async function clearNearestFurnace(bot, actionContext=null) {
+export async function clearNearestFurnace(bot, options=null) {
     /**
      * Collects the output, input, and fuel from the nearest furnace.
      * @param {MinecraftBot} bot, reference to the Minecraft bot.
@@ -787,14 +817,22 @@ export async function clearNearestFurnace(bot, actionContext=null) {
      * @example
      * await skills.clearNearestFurnace(bot);
      **/
-    const context = getActionContext(bot, actionContext);
-    const furnaceBlock = world.getNearestBlock(bot, 'furnace', 32);
+    const context = getActionContext(bot, options?.actionContext ?? (options?.furnacePosition === undefined ? options : null));
+    const exactFurnacePosition = options && Object.hasOwn(options, 'furnacePosition') ? options.furnacePosition : undefined;
+    const furnaceBlock = exactFurnacePosition === undefined
+        ? world.getNearestBlock(bot, 'furnace', 32)
+        : bot.blockAt(new Vec3(Math.floor(exactFurnacePosition.x), Math.floor(exactFurnacePosition.y), Math.floor(exactFurnacePosition.z)));
+    if (exactFurnacePosition !== undefined && (!furnaceBlock || !['furnace', 'blast_furnace', 'smoker'].includes(furnaceBlock.name))) return false;
     if (!furnaceBlock) {
         log(bot, 'No furnace nearby to clear.');
         return false;
     }
     if (bot.entity.position.distanceTo(furnaceBlock.position) > 4)
-        await goToNearestBlock(bot, 'furnace', 4, 32);
+        if (!await goToPosition(bot, furnaceBlock.position.x, furnaceBlock.position.y, furnaceBlock.position.z, 4)) return false;
+    if (exactFurnacePosition !== undefined) {
+        const currentFurnace = bot.blockAt(new Vec3(Math.floor(exactFurnacePosition.x), Math.floor(exactFurnacePosition.y), Math.floor(exactFurnacePosition.z)));
+        if (!currentFurnace || !['furnace', 'blast_furnace', 'smoker'].includes(currentFurnace.name)) return false;
+    }
     if (isActionCancelled(bot, context)) return false;
 
     let furnace = null;
@@ -2003,6 +2041,17 @@ export async function inspectChestAt(bot, x, y, z) {
         try { if (chest) await chest.close(); }
         finally { setActionPhase(cancellation, previousPhase); }
     }
+}
+
+export async function inspectChest(bot, position=null) {
+    let chest = position == null ? world.getNearestBlocksWhere(bot, block => ['chest', 'trapped_chest'].includes(block.name), 32, 1)[0]
+        : bot.blockAt(new Vec3(Math.floor(position.x), Math.floor(position.y), Math.floor(position.z)));
+    if (!chest) return { status: position == null ? 'not_found' : 'unknown', target: null };
+    if (!['chest', 'trapped_chest'].includes(chest.name)) return { status: 'not_chest', target: world.inspectBlockAt(bot, chest.position.x, chest.position.y, chest.position.z) };
+    if (position == null && bot.entity.position.distanceTo(chest.position) > 4.5) {
+        if (!await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 4.5)) return { status: 'blocked', target: world.inspectBlockAt(bot, chest.position.x, chest.position.y, chest.position.z) };
+    }
+    return inspectChestAt(bot, chest.position.x, chest.position.y, chest.position.z);
 }
 
 
@@ -3404,7 +3453,7 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
     return true;
 }
 
-export async function activateNearestBlock(bot, type) {
+export async function activateNearestBlock(bot, type, position=null) {
     /**
      * Activate the nearest block of the given type.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
@@ -3413,15 +3462,23 @@ export async function activateNearestBlock(bot, type) {
      * @example
      * await skills.activateNearestBlock(bot, "lever");
      * **/
-    let block = world.getNearestBlock(bot, type, 16);
+    let block = position == null ? world.getNearestBlock(bot, type, 16)
+        : bot.blockAt(new Vec3(Math.floor(position.x), Math.floor(position.y), Math.floor(position.z)));
+    if (position != null && block?.name !== type) return false;
     if (!block) {
         log(bot, `Could not find any ${type} to activate.`);
         return false;
     }
     if (bot.entity.position.distanceTo(block.position) > 4.5) {
-        let pos = block.position;
-        bot.pathfinder.setMovements(navigationMovements(bot));
-        await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
+        const pos = block.position;
+        if (position != null) {
+            if (!await goToPosition(bot, pos.x, pos.y, pos.z, 4)) return false;
+            block = bot.blockAt(pos);
+            if (!block || block.name !== type) return false;
+        } else {
+            bot.pathfinder.setMovements(navigationMovements(bot));
+            await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
+        }
     }
     await bot.activateBlock(block);
     log(bot, `Activated ${type} at x:${block.position.x.toFixed(1)}, y:${block.position.y.toFixed(1)}, z:${block.position.z.toFixed(1)}.`);
@@ -3497,10 +3554,10 @@ async function findAndGoToVillager(bot, id) {
  * @example
  * await skills.showVillagerTrades(bot, "123");
  */
-export async function showVillagerTrades(bot, id) {
+export async function showVillagerTrades(bot, id, structured=false) {
     const villagerEntity = await findAndGoToVillager(bot, id);
     if (!villagerEntity) {
-        return false;
+        return structured ? null : false;
     }
     
     try {
@@ -3509,7 +3566,7 @@ export async function showVillagerTrades(bot, id) {
         if (!villager.trades || villager.trades.length === 0) {
             log(bot, 'This villager has no trades available - might be sleeping, a baby, or jobless');
             villager.close();
-            return false;
+            return structured ? [] : false;
         }
         
         log(bot, `Villager has ${villager.trades.length} available trades:`);
@@ -3519,12 +3576,16 @@ export async function showVillagerTrades(bot, id) {
             log(bot, tradeInfo);
         });
         
+        const trades = villager.trades;
         villager.close();
-        return true;
+        return structured ? trades.map((trade, index) => ({ index: index + 1, disabled: !!trade.disabled, uses: trade.uses ?? null,
+            maxUses: trade.maxUses ?? null, input: (trade.inputItem1 ? [{ name: trade.inputItem1.name, count: trade.inputItem1.count }] : [])
+                .concat(trade.inputItem2 ? [{ name: trade.inputItem2.name, count: trade.inputItem2.count }] : []),
+            output: trade.outputItem ? { name: trade.outputItem.name, count: trade.outputItem.count } : null })) : true;
     } catch (err) {
         log(bot, 'Failed to open villager trading interface - they might be sleeping, a baby, or jobless');
         console.log('Villager trading error:', err.message);
-        return false;
+        return structured ? null : false;
     }
 }
 
@@ -4049,6 +4110,27 @@ function selectFarmSoil(bot, { scope, searchRadius, radius, startPosition }) {
     return soil;
 }
 
+export async function useItem(bot, itemName) {
+    const equipped = await equip(bot, itemName);
+    if (!equipped) return false;
+    await bot.activateItem();
+    log(bot, `Used ${itemName}.`);
+    return true;
+}
+
+export async function useToolOnBlockAt(bot, toolName, position) {
+    const targetPosition = new Vec3(Math.floor(position.x), Math.floor(position.y), Math.floor(position.z));
+    const observed = bot.blockAt(targetPosition);
+    if (!observed) return false;
+    const expectedName = observed.name;
+    if (!await goToPosition(bot, targetPosition.x, targetPosition.y, targetPosition.z,
+        toolName === 'water_bucket' && expectedName !== 'lava' ? 1.5 : 2)) return false;
+    if (bot.interrupt_code) return false;
+    const current = bot.blockAt(targetPosition);
+    if (!current || current.name !== expectedName) return false;
+    return useToolOnBlock(bot, toolName, current);
+}
+
 export async function tendNearbyFarm(bot, options = {}) {
     /**
      * Tend the nearest connected farmland plot by default: harvest mature crops, replant empty soil, and store produce in a chest.
@@ -4059,7 +4141,7 @@ export async function tendNearbyFarm(bot, options = {}) {
      * @param {{x: number, y: number, z: number}} options.startPosition, optional farmland coordinates selecting the connected plot instead of searching.
      * @param {number} options.radius, working radius in radius mode only, default 32.
      * @param {number} options.seedReserve, number of each planting item to keep in inventory, default 1.
-     * @param {{x: number, y: number, z: number}} options.chestPosition, optional chest coordinates; otherwise searches for a chest within 32 blocks after tending.
+     * @param {{x: number, y: number, z: number}} options.chestPosition, optional exact chest coordinates; omitted nearby farming leaves harvested items in inventory.
      * @returns {Promise<object>} confirmed harvested, planted and stored counts. Unavailable seeds or unreachable crops can leave work unfinished; inspect counts and logs. An unloaded plot boundary throws before tending.
      * @example
      * await skills.tendNearbyFarm(bot);
@@ -4142,20 +4224,18 @@ export async function tendNearbyFarm(bot, options = {}) {
         const reserve = seedItems.has(itemName) ? seedReserve : 0;
         return { itemName, item: stacks[0], count: Math.max(0, itemCount - reserve) };
     }).filter(deposit => deposit.item && deposit.count > 0);
-    if (deposits.length > 0 && !bot.interrupt_code) {
+    const hasChestResolver = typeof options.resolveChestPosition === 'function';
+    if (deposits.length > 0 && !bot.interrupt_code && (chestPosition != null || hasChestResolver)) {
         let chest;
         let chestTargetBlock = null;
         let chestTargetReachable = true;
         let resolvedChestPosition = chestPosition;
-        const hasChestResolver = typeof options.resolveChestPosition === 'function';
         if (hasChestResolver) {
             const resolved = await options.resolveChestPosition();
             resolvedChestPosition = resolved?.position ?? null;
             storageStatus = resolvedChestPosition ? 'target_resolved' : (resolved?.status ?? 'target_unavailable');
         }
-        if (resolvedChestPosition == null && !hasChestResolver && chestPosition == null) {
-            chest = world.getNearestBlock(bot, 'chest', FARM_CHEST_RADIUS);
-        } else if (resolvedChestPosition && [resolvedChestPosition.x, resolvedChestPosition.y, resolvedChestPosition.z].every(Number.isFinite)) {
+        if (resolvedChestPosition && [resolvedChestPosition.x, resolvedChestPosition.y, resolvedChestPosition.z].every(Number.isFinite)) {
             const target = new Vec3(Math.floor(resolvedChestPosition.x), Math.floor(resolvedChestPosition.y), Math.floor(resolvedChestPosition.z));
             chestTargetBlock = bot.blockAt(target);
             if (!chestTargetBlock) {
@@ -4166,7 +4246,7 @@ export async function tendNearbyFarm(bot, options = {}) {
         }
         if (!chest || !['chest', 'trapped_chest'].includes(chest.name)) {
             if (storageStatus === 'target_resolved') storageStatus = !chestTargetReachable ? 'unreachable' : chestTargetBlock ? 'target_missing' : 'target_unloaded';
-            else if (!hasChestResolver && resolvedChestPosition == null && chestPosition == null) storageStatus = 'no_chest';
+            else if (resolvedChestPosition == null) storageStatus = 'target_unavailable';
             if (chestTargetBlock && typeof options.onChestBlock === 'function') {
                 await options.onChestBlock({ position: resolvedChestPosition, block: chestTargetBlock });
             }
@@ -4189,42 +4269,55 @@ export async function tendNearbyFarm(bot, options = {}) {
                 storageStatus = currentChest ? 'target_missing' : 'target_unloaded';
                 log(bot, currentChest ? 'The requested chest is missing; harvested items remain in inventory.' : 'The requested chest is no longer loaded; harvested items remain in inventory.');
             } else {
-                let container;
-                let depositError = null;
-                try {
-                    container = await bot.openContainer(currentChest);
-                    for (const deposit of deposits) {
-                        const before = bot.inventory.items().filter(item => item.name === deposit.itemName).reduce((total, item) => total + item.count, 0);
-                        try {
-                            await container.deposit(deposit.item.type, null, deposit.count);
-                        } catch (error) {
-                            if (options.confirmStorage !== true) throw error;
-                            depositError = error;
-                        }
-                        const after = bot.inventory.items().filter(item => item.name === deposit.itemName).reduce((total, item) => total + item.count, 0);
-                        stored += options.confirmStorage === true ? Math.max(0, before - after) : deposit.count;
-                        if (depositError) break;
-                    }
-                } catch (error) {
-                    if (options.confirmStorage !== true) throw error;
-                    depositError ??= error;
-                } finally {
-                    if (container) {
-                        try { await container.close(); }
-                        catch (error) {
-                            if (options.confirmStorage !== true) throw error;
-                            depositError ??= error;
-                        }
+                let depositFailed = false;
+                for (const deposit of deposits) {
+                    const operation = operationContext();
+                    const factStart = operation?.facts.length ?? 0;
+                    try {
+                        const transferred = await putInChest(bot, deposit.itemName, deposit.count, {
+                            chestPosition: { x: currentChest.position.x, y: currentChest.position.y, z: currentChest.position.z }
+                        });
+                        const confirmed = operation?.facts.slice(factStart).filter(fact => fact.phase === 'chest-deposit' && fact.target?.itemName === deposit.itemName)
+                            .reduce((sum, fact) => sum + fact.quantity, 0) ?? (transferred ? deposit.count : 0);
+                        stored += confirmed;
+                        if (!transferred) { depositFailed = true; break; }
+                    } catch (error) {
+                        const confirmed = operation?.facts.slice(factStart).filter(fact => fact.phase === 'chest-deposit' && fact.target?.itemName === deposit.itemName)
+                            .reduce((sum, fact) => sum + fact.quantity, 0) ?? 0;
+                        stored += confirmed;
+                        depositFailed = true;
+                        log(bot, `Farm storage failed after confirmed stored count ${stored}: ${error.message}`);
+                        break;
                     }
                 }
-                storageStatus = depositError ? (stored > 0 ? 'partial_storage_failed' : 'storage_failed') : stored > 0 ? 'stored' : 'storage_unconfirmed';
-                if (depositError) log(bot, `Farm storage failed after confirmed stored count ${stored}: ${depositError.message}`);
+                storageStatus = depositFailed ? (stored > 0 ? 'partial_storage_failed' : 'storage_failed') : 'stored';
             }
         } else {
             storageStatus = 'unreachable';
         }
     }
-    const result = { harvested, planted, stored };
+    const remainingMature = cropPositions.filter(original => {
+        const current = bot.blockAt(original.position);
+        const crop = current && crops[current.name];
+        const age = current?.getProperties?.().age;
+        return crop && age != null && Number(age) >= crop.mature;
+    }).length;
+    const remainingPlantable = soil.filter(block => bot.blockAt(block.position)?.name === 'farmland' &&
+        bot.blockAt(block.position.offset(0, 1, 0))?.name === 'air').length;
+    const remainingWork = { matureCrops: remainingMature, emptySoil: remainingPlantable };
+    const seedAvailable = [...seedItems].some(seed => bot.inventory.items().filter(item => item.name === seed).reduce((n, item) => n + item.count, 0) > seedReserve);
+    const workInitiallyPresent = cropPositions.some(block => {
+        const crop = crops[block.name], age = block.getProperties?.().age;
+        return crop && age != null && Number(age) >= crop.mature;
+    }) || soil.some(block => bot.blockAt(block.position.offset(0, 1, 0))?.name === 'air');
+    const storageIncomplete = storageStatus !== 'not_needed' && storageStatus !== 'stored' && deposits.length > 0;
+    const status = !workInitiallyPresent ? 'no_work' : storageIncomplete || remainingMature > 0 || remainingPlantable > 0 ? 'partial' : 'complete';
+    const reason = storageIncomplete ? `storage_${storageStatus}`
+        : remainingMature > 0 ? 'mature_crops_remain'
+            : remainingPlantable > 0 && !seedAvailable ? 'seed_shortage'
+                : remainingPlantable > 0 ? 'empty_soil_remains' : undefined;
+    const result = { ok: status === 'complete' || status === 'no_work', status, harvested, planted, stored, remainingWork,
+        ...(reason ? { reason } : {}) };
     if (options.includeStorageStatus === true) result.storageStatus = storageStatus;
     log(bot, `Farm cycle complete: ${JSON.stringify(result)}. Call skills.tendNearbyFarm again to repeat.`);
     return result;
@@ -4694,6 +4787,7 @@ export async function fellTree(bot, options = {}) {
 
 // Replace exported bindings so internal delegation and direct command callers share ownership.
 craftRecipe = trackSkill("skills.craftRecipe", craftRecipe);
+craftItem = trackSkill("skills.craftItem", craftItem);
 wait = trackSkill("skills.wait", wait);
 smeltItem = trackSkill("skills.smeltItem", smeltItem);
 clearNearestFurnace = trackSkill("skills.clearNearestFurnace", clearNearestFurnace);
@@ -4710,6 +4804,7 @@ putInChest = trackSkill("skills.putInChest", putInChest);
 takeFromChest = trackSkill("skills.takeFromChest", takeFromChest);
 approachBlock = trackSkill("skills.approachBlock", approachBlock);
 inspectChestAt = trackSkill("skills.inspectChestAt", inspectChestAt);
+inspectChest = trackSkill("skills.inspectChest", inspectChest);
 viewChest = trackSkill("skills.viewChest", viewChest);
 consume = trackSkill("skills.consume", consume);
 giveToPlayer = trackSkill("skills.giveToPlayer", giveToPlayer);
@@ -4734,7 +4829,9 @@ tradeWithVillager = trackSkill("skills.tradeWithVillager", tradeWithVillager);
 digDown = trackSkill("skills.digDown", digDown);
 goToSurface = trackSkill("skills.goToSurface", goToSurface);
 useToolOn = trackSkill("skills.useToolOn", useToolOn);
+useItem = trackSkill("skills.useItem", useItem);
 useToolOnBlock = trackSkill("skills.useToolOnBlock", useToolOnBlock);
+useToolOnBlockAt = trackSkill("skills.useToolOnBlockAt", useToolOnBlockAt);
 tendNearbyFarm = trackSkill("skills.tendNearbyFarm", tendNearbyFarm);
 
 fellTree = trackSkill("skills.fellTree", fellTree);

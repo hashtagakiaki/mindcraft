@@ -41,7 +41,7 @@ export class VisionInterpreter {
         return result + `Image analysis: "${await this.analyzeImage(filename)}"`;
     }
 
-    async lookAtPosition(x, y, z) {
+    async lookAtPosition(x, y, z, aimOffsetY=2) {
         if (!this._visionAvailable()) {
             return "Vision is disabled. Use other methods to describe the environment.";
         }
@@ -50,12 +50,14 @@ export class VisionInterpreter {
         if (![x, y, z].every(value => typeof value === "number" && Number.isFinite(value))) {
             throw new TypeError("Use vision.lookAtPosition(x, y, z) with finite numbers; do not pass bot.");
         }
-        await bot.lookAt(new Vec3(x, y + 2, z));
+        await bot.lookAt(new Vec3(x, y + aimOffsetY, z));
         result = `Looking at coordinate ${x}, ${y}, ${z}\n`;
 
         let filename = await this.camera.capture(this._captureOptions());
-
-        return result + `Image analysis: "${await this.analyzeImage(filename)}"`;
+        const analysis = await this.analyzeImage(filename);
+        if (aimOffsetY === 0) return { status: analysis == null ? 'unknown' : 'observed', aim: { x, y, z },
+            observedAt: new Date().toISOString(), analysis };
+        return result + `Image analysis: "${analysis}"`;
     }
 
     async lookAtBlock(x, y, z) {

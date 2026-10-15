@@ -33,7 +33,8 @@ export class Coder {
             if (context?.signal.aborted || this.agent.bot.interrupt_code) throw new Error('Action cancelled');
         };
         const safety = settings.agent_runtime === 'codex-session'
-            ? nativeExecutionSafety(settings.codex_session?.execution_window_ms ?? NATIVE_EXECUTION_WINDOW_MS) : null;
+            ? nativeExecutionSafety(settings.codex_session?.execution_window_ms ?? NATIVE_EXECUTION_WINDOW_MS,
+                (await import('./library/native_sdk.js')).getNativeSdkExecutionMetadata()) : null;
         lockdown();
         check();
         this.agent.actions.setPhase('staging', context?.actionId);
@@ -242,7 +243,7 @@ export class Coder {
             vision: {
                 lookAtPlayer: trackSkill('vision.lookAtPlayer', (playerName, direction) => this.agent.vision_interpreter.lookAtPlayer(playerName, direction)),
                 lookAtBlock: trackSkill('vision.lookAtBlock', (x, y, z) => this.agent.vision_interpreter.lookAtBlock(x, y, z)),
-                lookAtPosition: trackSkill('vision.lookAtPosition', (x, y, z) => this.agent.vision_interpreter.lookAtPosition(x, y, z)),
+                lookAtPosition: trackSkill('vision.lookAtPosition', (...args) => this.agent.vision_interpreter.lookAtPosition(...args)),
             },
             communication: settings.agent_runtime === 'codex-session' ? {
                 sendToBot: trackSkill('communication.sendToBot', (recipient, message) => {
@@ -347,10 +348,9 @@ function guardSdk(sdk, check, safety = null, namespace = '') {
 
 // Per generated operation, shared by all native SDK entries. A caught or
 // unawaited failure cannot authorize another operation in this same body.
-function nativeExecutionSafety(windowMs) {
+function nativeExecutionSafety(windowMs, metadata) {
     if (!Number.isFinite(windowMs) || windowMs <= 0) throw new Error('Invalid codex_session.execution_window_ms');
     const owner = operationContext();
-    const queries = new Set(['skills.inspectChestAt', 'places.find', 'places.inspect', 'places.verify', 'places.resolveAlias']);
     let deadline, failure, yielded;
     const pendingSdkCalls = new Set();
     const fail = (method, error, result) => {
@@ -378,8 +378,11 @@ function nativeExecutionSafety(windowMs) {
         },
         after(method, result) {
             const workResult = result?.result ?? result;
-            const action = !method.startsWith('world.') && !method.startsWith('diagnostics.') && !queries.has(method);
-            const failed = action && (result === false || result?.ok === false)
+            const contract = metadata[method];
+            const action = contract?.kind === 'action';
+            const incomplete = contract?.completion === 'complete' && result?.status !== 'complete'
+                || contract?.completion === 'farm' && !['complete', 'no_work'].includes(result?.status);
+            const failed = action && (result === false || result?.ok === false || incomplete)
                 || method === 'skills.approachBlock' && workResult?.status !== 'ready'
                 || method === 'skills.fellTree' && workResult?.status !== 'complete'
                 || method === 'skills.goToPosition' && (result?.status !== 'reached' || result?.ok !== true)

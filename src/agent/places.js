@@ -51,6 +51,26 @@ export function createPlacesFacade(agent, client) {
 	};
 	const actions = createPlaceActions(agent, client);
 	const methods = {
+		findRecords: async (options = {}) => {
+			if (!options || typeof options !== 'object' || Array.isArray(options)) throw new TypeError('places.find options must be an object');
+			requireEnabled();
+			const bot = agent.bot;
+			const dimension = options.dimension ?? normalizedDimension(bot);
+			const current = bot?.entity?.position;
+			const results = await client.queryPlaces({ text: options.text, purpose: options.purpose, kind: options.kind,
+				dimension, near: current ? { x: current.x, y: current.y, z: current.z } : undefined, nearDimension: dimension,
+				existence: options.existence, staleBefore: options.staleBefore, limit: options.limit ?? MAX_PLACE_SEARCH_RESULTS });
+			searchCandidates = results.slice(0, MAX_PROMPT_CANDIDATES);
+			selected = results.length === 1 ? await client.inspectPlace(results[0].id) : null;
+			return results;
+		},
+		inspectRecord: async (placeId) => {
+			requireEnabled();
+			const result = await client.inspectPlace(placeId);
+			if (!result) throw new Error(`No place with ID '${placeId}' exists.`);
+			selected = result;
+			return result;
+		},
 		find: async (text, options = {}) => {
 			if (typeof text !== 'string' || !text.trim()) {
 				throw new TypeError('places.find(text, options?) requires a nonempty string as its first argument. Example: await places.find("倉庫", { kind: "storage", purpose: "food" });');
@@ -118,6 +138,7 @@ export function createPlacesFacade(agent, client) {
 			selected = await client.inspectPlace(response.value.id);
 			return `Saved observed place: ${describe(response.value)}`;
 		},
+		rememberHereRecord: async (...args) => { await methods.rememberHere(...args); return { ok: true, ...(await client.inspectPlace(selected.place.id)) }; },
 		rememberObservedAt: async (name, kind, purpose, position) => {
 			requireEnabled();
 			if (!position || !['x', 'y', 'z'].every((axis) => Number.isFinite(position[axis]))) throw new Error('Target coordinates must be finite x, y, z values.');
@@ -141,6 +162,7 @@ export function createPlacesFacade(agent, client) {
 			selected = await client.inspectPlace(response.value.id);
 			return `Saved observed place at loaded ${block.name}: ${describe(response.value)}`;
 		},
+		rememberObservedAtRecord: async (...args) => { await methods.rememberObservedAt(...args); return { ok: true, ...(await client.inspectPlace(selected.place.id)) }; },
 		rememberReported: async (name, kind, purpose, position, dimension) => {
 			requireEnabled();
 			if (!position || !['x', 'y', 'z'].every((axis) => Number.isFinite(position[axis]))) throw new Error('Place coordinates must be finite x, y, z values.');
@@ -156,6 +178,7 @@ export function createPlacesFacade(agent, client) {
 			selected = await client.inspectPlace(response.value.id);
 			return `Saved unverified place: ${describe(response.value)}`;
 		},
+		rememberReportedRecord: async (...args) => { await methods.rememberReported(...args); return { ok: true, ...(await client.inspectPlace(selected.place.id)) }; },
 		verify: async (placeId) => {
 			requireEnabled();
 			const record = await client.getPlace(placeId);

@@ -274,6 +274,25 @@ for (let batch = 0; batch < 10; batch++) {
       }
     }
     batchAgent.actions.beginUserIntent()
+    let editsAfterQuery = 0
+    batchAgent.places = { sdk: {
+      find: () => false,
+      tendFarm: async () => ({ ok: false, status: 'partial', harvested: 1, planted: 0, stored: 0, remainingWork: { matureCrops: 1, emptySoil: 0 } }),
+      setAlias: async () => { editsAfterQuery++; return true }
+    } }
+    const queryFalse = await batchAgent.actions.runAction('query-false-is-data',
+      () => batchAgent.coder.executeCode('const absent = await places.find({kind:"storage"}); await places.setAlias({alias:"still-running",placeId:"mock-place"});'), { timeout: 0 })
+    assert.equal(queryFalse.success, true, 'query false is ordinary observation data')
+    assert.equal(editsAfterQuery, 1)
+    batchAgent.actions.beginUserIntent()
+    editsAfterQuery = 0
+    const partialFarm = await batchAgent.actions.runAction('partial-farm-fails-batch',
+      () => batchAgent.coder.executeCode('await places.tendFarm({farmId:"farm-1"}); await places.setAlias({alias:"must-not-run",placeId:"mock-place"});'), { timeout: 0 })
+    assert.equal(partialFarm.success, false)
+    assert.equal(partialFarm.sdkFailure.method, 'places.tendFarm')
+    assert.equal(partialFarm.sdkFailure.result.status, 'partial')
+    assert.equal(editsAfterQuery, 0, 'partial farm work stops the same code batch')
+    batchAgent.actions.beginUserIntent()
     settings.codex_session.execution_window_ms = 1000
     batchEdits = 0; batchCalls = 0; batchObservations = []
     batchAgent.places = { sdk: {
@@ -862,7 +881,7 @@ for (let batch = 0; batch < 10; batch++) {
         assert.throws(() => readDocumentation('unknown'), /Unknown SDK/)
       },
       runTurn: async () => {
-        const result = await execute('log(bot, await vision.lookAtPosition({position:{x:1,y:64,z:3}}));')
+        const result = await execute('log(bot, JSON.stringify(await vision.lookAtPosition({position:{x:1,y:64,z:3}})));')
         assert.equal(result.success, true)
         assert.match(result.message, /Screenshot attached/)
         imageResult = await prepareResult(result)

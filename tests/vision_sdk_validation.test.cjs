@@ -124,7 +124,7 @@ async function main() {
     assert.equal(good.success, true)
     assert.equal(good.taskId, 'same-task')
     assert.equal(good.operationSettlement, 'settled')
-    assert.deepEqual(calls.splice(0), [['lookAt', 75, 75, -292], ['capture']])
+    assert.deepEqual(calls.splice(0), [['lookAt', 75, 73, -292], ['capture']])
     agent.actions.beginUserIntent()
     const blockResult = await run('log(bot, JSON.stringify(await vision.lookAtBlock({position:{x:75.2,y:73.8,z:-291.8}})));')
     assert.equal(blockResult.success, true)

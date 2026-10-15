@@ -123,8 +123,7 @@ export function createPlaceActions(agent, client) {
         }
         await observe(farmId, 'observed', 'available');
 
-        const initialStorage = await resolveFarmStorage(snapshot, farm);
-        if (initialStorage.error) return { ...initialStorage.error, ...(observationErrors.length ? { observationErrors } : {}) };
+        let initialStorage = null;
         let depositTarget = null;
         let checkedSnapshot = null;
 
@@ -133,6 +132,8 @@ export function createPlaceActions(agent, client) {
             if (!current?.place) return { status: 'farm_missing' };
             const currentDimension = dimensionId(bot.game?.dimension);
             if (!currentDimension || currentDimension !== dimensionId(current.place.dimension)) return { status: 'dimension_mismatch' };
+            initialStorage ??= await resolveFarmStorage(snapshot, farm);
+            if (initialStorage.error) return { status: initialStorage.error.status };
             const resolved = current.relation
                 ? await resolveFarmStorage(current, current.place)
                 : initialStorage.relation
@@ -152,7 +153,7 @@ export function createPlaceActions(agent, client) {
             if (relationKey(current) !== relationKey(checkedSnapshot)) return false;
             const sameTarget = current.relation
                 ? current.outputStorage?.id === depositTarget.id
-                : !initialStorage.relation && initialStorage.place.id === depositTarget.id;
+                : initialStorage && !initialStorage.relation && initialStorage.place.id === depositTarget.id;
             if (!sameTarget) return false;
             const latestTarget = current.relation ? current.outputStorage : await client.getPlace(depositTarget.id);
             if (!latestTarget || latestTarget.kind !== 'storage' || latestTarget.existence === 'missing' ||
@@ -211,7 +212,9 @@ export function createPlaceActions(agent, client) {
                 relationRecordError = cause?.message ?? String(cause);
             }
             return {
-                ok: true, status: result.storageStatus === 'partial_storage_failed' ? 'partial_storage_failed' : 'completed', farmId, storageId: depositTarget?.id,
+                ok: result.status === 'complete' || result.status === 'no_work',
+                status: result.storageStatus === 'partial_storage_failed' ? 'partial' : result.status,
+                farmId, storageId: depositTarget?.id,
                 ...result,
                 ...(observationErrors.length ? { observationErrors } : {}),
                 ...(relationRecordError ? { relationRecordError, actionAlreadyCompleted: true } : {})
@@ -219,10 +222,8 @@ export function createPlaceActions(agent, client) {
         }
 
         return {
-            ok: result.harvested > 0 || result.planted > 0,
-            status: result.storageStatus === 'not_needed'
-                ? (result.harvested > 0 || result.planted > 0 ? 'completed_without_storage' : 'no_work')
-                : result.storageStatus ?? (result.harvested > 0 || result.planted > 0 ? 'completed_without_storage' : 'no_work'),
+            ok: result.status === 'complete' || result.status === 'no_work',
+            status: result.status,
             farmId, storageId: depositTarget?.id, ...result,
             ...(observationErrors.length ? { observationErrors } : {})
         };

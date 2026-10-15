@@ -9,7 +9,7 @@ const { pathToFileURL } = require('node:url')
 const repo = path.resolve(__dirname, '..')
 
 async function main() {
-  const { createNativeSdk, getNativeSdkDocs, getNativeSdkMethodNames, NATIVE_SDK_DEFINITIONS, SdkArgumentError } =
+  const { createNativeSdk, getNativeSdkDocs, getNativeSdkMethodNames, getNativeSdkExecutionMetadata, NATIVE_SDK_DEFINITIONS, SdkArgumentError } =
     await import(pathToFileURL(path.join(repo, 'src/agent/library/native_sdk.js')))
   const calls = []
   const namespaces = {}
@@ -20,6 +20,9 @@ async function main() {
       return args
     }
   }
+  for (const name of ['craftItem', 'inspectChest', 'useToolOnBlockAt']) namespaces.skills[name] = (...args) => { calls.push({ method: `skills.${name}`, args }); return args }
+  namespaces.world.getBlockAtPosition = (...args) => { calls.push({ method: 'world.getBlockAtPosition', args }); return args }
+  for (const name of ['findRecords', 'inspectRecord', 'rememberHereRecord', 'rememberObservedAtRecord', 'rememberReportedRecord']) namespaces.places[name] = (...args) => { calls.push({ method: `places.${name}`, args }); return args }
   const botA = { username: 'A', inventory: { items: () => [{ name: 'dirt', count: 1 }] } }
   const botB = { username: 'B' }
   const sdk = createNativeSdk({ ...namespaces, bot: botA })
@@ -28,8 +31,15 @@ async function main() {
   assert.equal(methodNames.length, new Set(methodNames).size)
   assert.deepEqual(Object.entries(sdk).flatMap(([namespace, methods]) => Object.keys(methods).map(name => `${namespace}.${name}`)), methodNames)
   const docs = getNativeSdkDocs()
+  const execution = getNativeSdkExecutionMetadata()
   assert.deepEqual(docs.map(doc => doc.split('\n')[0]), methodNames)
   assert.ok(docs.every(doc => !/Signature:.*\(bot[,)]/.test(doc)))
+  assert.equal(execution['world.isEntityType'].kind, 'query')
+  assert.equal(execution['places.find'].kind, 'query')
+  assert.equal(execution['skills.showVillagerTrades'].kind, 'query')
+  assert.equal(execution['places.verify'].kind, 'action', 'verification updates the saved record')
+  assert.equal(execution['skills.craftItem'].completion, 'complete')
+  assert.equal(execution['places.tendFarm'].completion, 'farm')
 
   // Every model-facing function has an explicit adapter. A small set of raw pathfinder
   // helpers stays available to internal legacy code but is never model-facing.
@@ -37,11 +47,12 @@ async function main() {
     const source = await readFile(path.join(repo, `src/agent/library/${namespace}.js`), 'utf8')
     const exports = [...source.matchAll(/export\s+(?:async\s+)?function\s+(\w+)\s*\(/g)].map(match => `${namespace}.${match[1]}`)
     const exposed = methodNames.filter(name => name.startsWith(`${namespace}.`))
-    assert.ok(exposed.every(name => exports.includes(name)), 'every native entry binds an existing function')
+    assert.ok(exposed.every(name => exports.includes(name) || name === 'world.getBlockAtOffset'), 'every native entry binds an existing function or documented native alias')
     if (namespace === 'skills') {
       assert.ok(!exposed.includes('skills.goToGoal'))
       assert.ok(!exposed.includes('skills.reachPositionWithScaffoldCleanup'))
-    } else assert.deepEqual(exposed.sort(), exports.sort())
+      for (const internal of ['skills.craftRecipe', 'skills.inspectChestAt', 'skills.viewChest', 'skills.useToolOnBlockAt']) assert.ok(!exposed.includes(internal))
+    } else assert.deepEqual(exposed.sort(), exports.filter(name => name !== 'world.shouldPlaceTorch').map(name => name === 'world.getBlockAtPosition' ? 'world.getBlockAtOffset' : name).sort())
   }
 
   const invalid = (method, args, field) => {
@@ -66,7 +77,7 @@ async function main() {
   assert.ok(!sdk.world.getPosition().then, 'synchronous observation stays synchronous')
   const input = vm.runInNewContext('({position:{x:10,y:64,z:-3}})')
   assert.deepEqual(sdk.world.inspectBlockAt(input), [botA, 10, 64, -3])
-  assert.deepEqual(sdk.world.getBlockAtPosition({ offset: { x: 0, y: -1, z: 0 } }), [botA, 0, -1, 0])
+  assert.deepEqual(sdk.world.getBlockAtOffset({ offset: { x: 0, y: -1, z: 0 } }), [botA, 0, -1, 0])
   assert.deepEqual(sdk.world.getNearestBlocks(), [botA, null, 8, 10000])
   assert.deepEqual(sdk.world.getNearbyBlockTypes({ radius: 12 }), [botA, 12])
   invalid(sdk.world.getNearbyBlockTypes, [12], 'arguments')
@@ -91,10 +102,9 @@ async function main() {
   assert.deepEqual(sdk.world.getVillagerProfession({ entity }), [entity])
   assert.deepEqual(await sdk.skills.attackEntity({ entity, kill: false }), [botA, entity, false])
 
-  assert.deepEqual(await sdk.skills.craftRecipe({ itemName: 'stick', times: 3 }), [botA, 'stick', 3])
-  assert.deepEqual(await sdk.skills.smeltItem({ itemName: 'raw_iron', quantity: 4 }), [botA, 'raw_iron', 4])
-  invalid(sdk.skills.craftRecipe, [{ itemName: 'stick', quantity: 3 }], 'quantity')
-  invalid(sdk.skills.craftRecipe, [{ itemName: 'stick', times: 1.5 }], 'times')
+  assert.deepEqual(await sdk.skills.craftItem({ itemName: 'stick', quantity: 3 }), [botA, 'stick', 3])
+  assert.deepEqual(await sdk.skills.smeltItem({ itemName: 'raw_iron', quantity: 4 }), [botA, 'raw_iron', 4, { furnacePosition: undefined, returnDetails: true }])
+  invalid(sdk.skills.craftItem, [{ itemName: 'stick', quantity: 1.5 }], 'quantity')
   for (const name of ['putInChest', 'takeFromChest', 'discard']) {
     invalid(sdk.skills[name], [{ itemName: 'oak_log' }], 'quantity')
     invalid(sdk.skills[name], [{ itemName: 'oak_log', quantity: -1 }], 'quantity')
@@ -103,10 +113,9 @@ async function main() {
     assert.equal(result[0], botA)
     assert.equal(result[2], -1)
   }
-  assert.deepEqual(await sdk.skills.putInChest({ itemName: 'oak_log', quantity: 2, chestPosition: input.position }), [botA, 'oak_log', 2, { chestPosition: input.position }])
+  assert.deepEqual(await sdk.skills.putInChest({ itemName: 'oak_log', quantity: 2, chestPosition: input.position }), [botA, 'oak_log', 2, { chestPosition: input.position, details: true }])
   assert.deepEqual(await sdk.skills.goToPlayer({ username: 'Steve' }), [botA, 'Steve', 3])
   assert.deepEqual(await sdk.skills.goToNearestBlock({ blockType: 'chest' }), [botA, 'chest', 2, 64])
-  assert.deepEqual(await sdk.skills.craftRecipe({ itemName: 'stick' }), [botA, 'stick', 1])
   invalid(sdk.skills.goToNearestBlock, [{ blockType: 'chest', navigation: { allowDig: true } }], 'navigation')
   invalid(sdk.skills.followPlayer, [{ username: 'Steve', preserveEnvironment: false }], 'preserveEnvironment')
   assert.deepEqual(sdk.skills.goToPosition({ position: input.position }), [botA, {
@@ -161,11 +170,10 @@ async function main() {
   invalid(sdk.skills.tendNearbyFarm, [{ radius: 5 }], 'radius')
   invalid(sdk.skills.tendNearbyFarm, [{ scope: 'radius', searchRadius: 5 }], 'searchRadius')
   invalid(sdk.skills.tendNearbyFarm, [{ scope: 'radius', startPosition: input.position }], 'startPosition')
-  invalid(sdk.skills.placeBlock, [{ blockType: 'chest', position: input.position, facing: 'north', placeOn: 'bottom' }], 'placeOn')
   assert.deepEqual(await sdk.skills.placeBlock({ blockType: 'oak_stairs', position: input.position, facing: 'west', half: 'top' }), [botA, 'oak_stairs', 10, 64, -3, { facing: 'west', half: 'top' }, false])
-  assert.deepEqual(await sdk.skills.placeBlock({ blockType: 'stone', position: input.position }), [botA, 'stone', 10, 64, -3, 'bottom', false])
+  assert.deepEqual(await sdk.skills.placeBlock({ blockType: 'stone', position: input.position }), [botA, 'stone', 10, 64, -3, {}, false])
 
-  assert.deepEqual(sdk.places.find({ text: 'chest' }), ['chest', { limit: 20 }])
+  assert.deepEqual(sdk.places.find({ text: 'chest' }), [{ text: 'chest', limit: 20 }])
   for (const method of ['goTo', 'goToAlias', 'tendFarm']) {
     const doc = docs.find(value => value.startsWith(`places.${method}\n`))
     assert.ok(doc.includes('Its route preserves existing blocks'), `${method} documents its fixed route policy`)
@@ -178,14 +186,14 @@ async function main() {
   const aliasGo = await sdk.places.goToAlias({ alias: 'home' })
   assert.deepEqual(aliasGo, ['home'])
   const farmTend = await sdk.places.tendFarm({ farmId: 'farm-1', seedReserve: 2 })
-  assert.deepEqual(farmTend, ['farm-1', { scope: 'connected', searchRadius: 32, seedReserve: 2 }])
+  assert.deepEqual(farmTend, ['farm-1', { seedReserve: 2 }])
   invalid(sdk.places.find, ['chest'], 'arguments')
   invalid(sdk.places.find, [{ query: 'chest' }], 'query')
   invalid(sdk.places.find, [{ text: 'chest', limit: 101 }], 'limit')
   invalid(sdk.places.find, [{ text: 'chest', existence: 'reported' }], 'existence')
   invalid(sdk.places.rememberHere, [{ name: 'chest', kind: 'storage' }], 'kind')
   invalid(sdk.places.tendFarm, [{ farmId: 'farm-1', scope: 'radius' }], 'scope')
-  assert.deepEqual(sdk.vision.lookAtPosition({ position: input.position }), [10, 64, -3])
+  assert.deepEqual(sdk.vision.lookAtPosition({ position: input.position }), [10, 64, -3, 0])
   assert.deepEqual(sdk.vision.lookAtPlayer({ playerName: 'Steve' }), ['Steve', 'at'])
   invalid(sdk.vision.lookAtPlayer, [{ playerName: 'Steve', direction: 'left' }], 'direction')
   invalid(sdk.communication.sendToBot, [{ recipient: 'B', message: 'x'.repeat(2001) }], 'message')

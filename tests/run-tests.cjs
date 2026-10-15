@@ -478,12 +478,16 @@ async function testFarm(root) {
   }
   globalThis.farmScenario = scenario
   let bot = makeBot(scenario)
-  let result = await tendNearbyFarm(bot, { scope: 'radius', radius: 16, seedReserve: 1, chestPosition: { x: 4.9, y: 0.5, z: 0.1 } })
-  assert.deepEqual(result, { harvested: 1, planted: 1, stored: 2 })
-  assert.deepEqual(scenario.opened, [explicitChest])
-  assert.equal(scenario.closed, 1)
-  assert.deepEqual(scenario.deposits, [{ type: 'wheat', count: 1 }, { type: 'wheat_seeds', count: 1 }])
-  assert.equal(bot.inventory.items().find(item => item.name === 'wheat_seeds').count, 1)
+  let result = await tendNearbyFarm(bot, { scope: 'radius', radius: 16, seedReserve: 1 })
+  assert.equal(result.status, 'partial')
+  assert.equal(result.harvested, 1)
+  assert.equal(result.planted, 1)
+  assert.equal(result.stored, 0, 'storage without server-fenced snapshots is not counted')
+  assert.equal(result.reason, 'empty_soil_remains')
+  assert.deepEqual(scenario.opened, [], 'farm internals do not choose storage without an explicit resolver')
+  assert.equal(scenario.closed, 0)
+  assert.deepEqual(scenario.deposits, [])
+  assert.equal(bot.inventory.items().find(item => item.name === 'wheat_seeds').count, 2, 'harvested seeds remain without a selected storage target')
 
   function plotScenario() {
     const plot = [0, 1, 2, 3, 4].map(x => block('farmland', null, x));
@@ -496,7 +500,8 @@ async function testFarm(root) {
   globalThis.farmScenario = connected;
   let connectedBot = makeBot(connected);
   result = await tendNearbyFarm(connectedBot, { searchRadius: 1 });
-  assert.deepEqual(result, { harvested: 1, planted: 5, stored: 0 }, 'connected plot extends beyond the starting search distance');
+  assert.equal(result.status, 'complete', 'connected plot extends beyond the starting search distance');
+  assert.deepEqual({ harvested: result.harvested, planted: result.planted, stored: result.stored }, { harvested: 1, planted: 5, stored: 0 });
   assert.ok(connected.crops.slice(1).every(crop => crop.diggable), 'water gaps, diagonals and different heights are separate plots');
   assert.equal(connected.planted.size, 5, 'empty soil joins the same plot and harvested soil is replanted');
 
@@ -546,7 +551,7 @@ async function testFarm(root) {
   connected = plotScenario();
   connected.plot = []; connected.crops = [];
   globalThis.farmScenario = connected;
-  assert.deepEqual(await tendNearbyFarm(makeBot(connected)), { harvested: 0, planted: 0, stored: 0 }, 'no farmland is a no-op');
+  assert.equal((await tendNearbyFarm(makeBot(connected))).status, 'no_work', 'no farmland is a no-op');
   globalThis.farmScenario = scenario;
 
   const occupiedFarmScenario = {
@@ -597,7 +602,7 @@ async function testFarm(root) {
   scenario.opened = []; scenario.deposits = []; scenario.closed = 0
   bot = makeBot(scenario)
   result = await tendNearbyFarm(bot, { scope: 'radius', radius: 16, seedReserve: 1 })
-  assert.deepEqual(result, { harvested: 0, planted: 0, stored: 0 })
+  assert.equal(result.status, 'no_work')
   assert.deepEqual(scenario.opened, [], 'default chest is unused when there are no deposits')
 
   scenario.crops = [block('wheat', 7)]
@@ -608,7 +613,7 @@ async function testFarm(root) {
   bot = makeBot(scenario)
   result = await tendNearbyFarm(bot, { scope: 'radius' })
   assert.equal(result.harvested, 1)
-  assert.match(bot.output, /Could not find a nearby chest/)
+  assert.equal(result.reason, 'seed_shortage', 'farm internals do not choose a nearby chest implicitly')
   assert.equal(scenario.closed, 0)
 
   scenario.crops = [block('wheat', 7)]
@@ -617,17 +622,18 @@ async function testFarm(root) {
   scenario.opened = []; scenario.deposits = []; scenario.closed = 0; scenario.cheat = true; scenario.depositReject = false
   bot = makeBot(scenario)
   result = await tendNearbyFarm(bot, { scope: 'radius', radius: 32, seedReserve: 0 })
-  assert.equal(result.stored, 2)
-  assert.deepEqual(scenario.opened, [nearChest], 'default chest lookup is used')
-  assert.equal(scenario.closed, 1, 'opened container is closed')
+  assert.equal(result.stored, 0)
+  assert.deepEqual(scenario.opened, [], 'no storage resolver means no implicit nearby chest selection')
+  assert.equal(scenario.closed, 0)
 
   scenario.crops = [block('wheat', 7)]
   scenario.items = []
   scenario.depositReject = true
   scenario.opened = []; scenario.deposits = []; scenario.closed = 0; scenario.cheat = true
   bot = makeBot(scenario)
-  await assert.rejects(tendNearbyFarm(bot, { scope: 'radius', radius: 32, seedReserve: 0 }), /injected deposit failure/)
-  assert.equal(scenario.closed, 1, 'container closes when a deposit fails')
+  result = await tendNearbyFarm(bot, { scope: 'radius', radius: 32, seedReserve: 0 })
+  assert.equal(result.stored, 0, 'unselected storage is not attempted')
+  assert.equal(scenario.closed, 0)
 
   const plantingScenario = {
     crops: [], farmland: [block('farmland', null, 20)],

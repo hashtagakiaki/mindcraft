@@ -38,7 +38,7 @@ function familyOf(name) {
     if (name.endsWith('_door')) return 'door';
     if (name.endsWith('_bed')) return 'bed';
     if (['stone', 'cobblestone', 'dirt', 'crafting_table'].includes(name) || name.endsWith('_planks')) return 'plain';
-    throw new Error(`Oriented placement is not supported for ${name}.`);
+    return 'plain';
 }
 
 export function normalizePlacement(bot, blockType, position, options) {
