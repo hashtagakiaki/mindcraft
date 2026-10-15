@@ -283,6 +283,14 @@ async function testNavigation(root) {
   assert.equal(await skills.goToNearestBlock(bot, 'chest'), true)
   assert.equal(await skills.goToNearestEntity(bot, 'cow'), true)
   bot = makeBot()
+  const actionPhases = []
+  const cancellation = { signal: new AbortController().signal, setPhase(phase) { actionPhases.push(phase) } }
+  bot.getActionCancellationContext = () => cancellation
+  const viewContext = createOperationContext({ id: 'view-chest', controller: new AbortController() }, { bot }, { intentEpoch: 1 })
+  assert.equal(await runOwnedOperation(viewContext, () => skills.viewChest(bot)), true)
+  assert.ok(actionPhases.includes('opening-chest'), 'viewChest marks its stationary container interaction as non-movement')
+  assert.equal(actionPhases.at(-1), 'executing', 'viewChest restores the owning action phase after closing the chest')
+  bot = makeBot()
   let stopCalls = 0
   let rejectPending
   bot.pathfinder.goto = () => {

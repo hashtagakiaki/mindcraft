@@ -73,8 +73,8 @@ function makeBot() {
     },
     stop() {},
   }
-  bot.fillSurface = () => {
-    for (let x = -10; x <= 10; x++) for (let z = -10; z <= 10; z++) bot.put(x, 12, z, 'stone')
+  bot.fillSurface = (minX = -10, maxX = 10, minZ = -10, maxZ = 10) => {
+    for (let x = minX; x <= maxX; x++) for (let z = minZ; z <= maxZ; z++) bot.put(x, 12, z, 'stone')
   }
   return bot
 }
@@ -151,6 +151,12 @@ async function main() {
     assert.equal(bot.entity.position.x, 1.5)
 
     bot = makeBot()
+    bot.fillSurface(8, 10, -1, 1)
+    bot.reachable = new Set([key(8, 13, 0)])
+    assert.equal(await runSurface(bot), true, 'a loaded surface beyond six blocks remains discoverable')
+    assert.equal(bot.entity.position.x, 8.5)
+
+    bot = makeBot()
     bot.fillSurface()
     for (let x = -8; x <= 8; x++) for (let z = -8; z <= 8; z++) {
       for (let y = 13; y <= 17; y++) bot.put(x, y, z, 'stone')
@@ -174,7 +180,7 @@ async function main() {
 
     bot = makeBot()
     bot.fillSurface()
-    for (let x = -6; x <= 6; x++) for (let z = -6; z <= 6; z++) {
+    for (let x = -16; x <= 16; x++) for (let z = -16; z <= 16; z++) {
       for (let y = -16; y <= 12; y++) bot.put(x, y, z, 'air')
     }
     assert.equal(await runSurface(bot), false, 'no local loaded surface is not reported as impossible or successful')
