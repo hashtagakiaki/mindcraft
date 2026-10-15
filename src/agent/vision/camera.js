@@ -7,6 +7,9 @@ import fs from 'fs/promises';
 import { Vec3 } from 'vec3';
 import { EventEmitter } from 'events';
 
+// prismarine-viewer entity meshes use the global THREE symbol.
+globalThis.THREE = THREE;
+
 import worker_threads from 'worker_threads';
 global.Worker = worker_threads.Worker;
 
