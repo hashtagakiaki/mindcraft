@@ -37,8 +37,12 @@ async function main() {
   assert.equal(execution['world.isEntityType'].kind, 'query')
   assert.equal(execution['places.find'].kind, 'query')
   assert.equal(execution['skills.showVillagerTrades'].kind, 'query')
-  assert.equal(execution['places.verify'].kind, 'action', 'verification updates the saved record')
+  assert.equal(execution['places.verify'].kind, 'query', 'verification observations remain query data even though they refresh a saved observation record')
   assert.equal(execution['skills.craftItem'].completion, 'complete')
+  assert.equal(execution['skills.smeltItem'].completion, 'complete')
+  assert.equal(execution['skills.putInChest'].completion, 'complete')
+  assert.equal(execution['skills.takeFromChest'].completion, 'complete')
+  assert.equal(execution['skills.tendNearbyFarm'].completion, 'farm')
   assert.equal(execution['places.tendFarm'].completion, 'farm')
 
   // Every model-facing function has an explicit adapter. A small set of raw pathfinder
@@ -159,14 +163,16 @@ async function main() {
   assert.ok(docs.find(doc => doc.startsWith('skills.attackEntity\n')).includes('Its route cannot dig'))
   const definitions = new Map(NATIVE_SDK_DEFINITIONS.map(definition => [`${definition.namespace}.${definition.name}`, definition]))
   assert.deepEqual(definitions.get('skills.collectBlock').navigationPolicy, { allowDig: true, scaffold: 'leave', scaffoldBlocks: ['dirt', 'cobblestone'] })
+  assert.deepEqual(definitions.get('skills.craftItem').navigationPolicy, { allowDig: false, scaffold: 'forbid', scaffoldBlocks: [] },
+    'the public craftItem entry owns the preserving route policy')
   assert.deepEqual(definitions.get('skills.attackEntity').navigationPolicy, { allowDig: false, scaffold: 'leave', scaffoldBlocks: ['dirt', 'cobblestone'], allowTowers: false })
   assert.deepEqual(definitions.get('skills.breakBlockAt').navigationPolicy, { allowDig: false, scaffold: 'forbid', scaffoldBlocks: [] })
 
 
   assert.deepEqual(sdk.skills.stay({ seconds: -1 }), [botA, -1])
   invalid(sdk.skills.stay, [{ seconds: -2 }], 'seconds')
-  assert.deepEqual(await sdk.skills.tendNearbyFarm(), [botA, { scope: 'connected', seedReserve: 1, searchRadius: 32 }])
-  assert.deepEqual(await sdk.skills.tendNearbyFarm({ scope: 'radius', radius: 5 }), [botA, { scope: 'radius', radius: 5, seedReserve: 1 }])
+  assert.deepEqual(await sdk.skills.tendNearbyFarm(), [botA, { scope: 'connected', seedReserve: 1, searchRadius: 32, keepHarvestInInventory: true }])
+  assert.deepEqual(await sdk.skills.tendNearbyFarm({ scope: 'radius', radius: 5 }), [botA, { scope: 'radius', radius: 5, seedReserve: 1, keepHarvestInInventory: true }])
   invalid(sdk.skills.tendNearbyFarm, [{ radius: 5 }], 'radius')
   invalid(sdk.skills.tendNearbyFarm, [{ scope: 'radius', searchRadius: 5 }], 'searchRadius')
   invalid(sdk.skills.tendNearbyFarm, [{ scope: 'radius', startPosition: input.position }], 'startPosition')
@@ -202,7 +208,7 @@ async function main() {
   const limited = createNativeSdk({ ...namespaces, bot: botA }, { codex_session: { max_search_radius: 10 } })
   invalid(limited.world.getNearbyBlockTypes, [{ radius: 11 }], 'radius')
   assert.deepEqual(limited.world.getNearbyBlockTypes(), [botA, 10])
-  assert.deepEqual(await limited.skills.tendNearbyFarm(), [botA, { scope: 'connected', seedReserve: 1, searchRadius: 10 }])
+  assert.deepEqual(await limited.skills.tendNearbyFarm(), [botA, { scope: 'connected', seedReserve: 1, searchRadius: 10, keepHarvestInInventory: true }])
   assert.ok(getNativeSdkDocs({ codex_session: { max_search_radius: 10 } }).find(doc => doc.startsWith('world.getNearbyBlockTypes\n')).includes('default 10'))
   const missing = createNativeSdk({ bot: botA })
   invalid(missing.places.find, [null], 'arguments')

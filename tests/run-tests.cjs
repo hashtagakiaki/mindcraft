@@ -108,6 +108,7 @@ async function setupFarmFixture(root) {
   await write(root, 'src/agent/library/crafting_sync.js', await readFile(path.join(repo, 'src/agent/library/crafting_sync.js')))
   await write(root, 'src/agent/library/index.js', await readFile(path.join(repo, 'src/agent/library/index.js')))
   await write(root, 'src/agent/library/skill_library.js', await readFile(path.join(repo, 'src/agent/library/skill_library.js')))
+  await write(root, 'src/agent/library/native_sdk.js', await readFile(path.join(repo, 'src/agent/library/native_sdk.js')))
   await write(root, 'src/agent/library/sdk_capabilities.js', await readFile(path.join(repo, 'src/agent/library/sdk_capabilities.js')))
   await write(root, 'src/agent/settings.js', 'export default {};')
   await write(root, 'src/agent/modes.js', await readFile(path.join(repo, 'src/agent/modes.js')))
@@ -126,7 +127,7 @@ export function getNearestBlocksWhere(bot, predicate) {
 }
 export function getNearestBlock(bot, type, distance) {
   const scenario = globalThis.farmScenario;
-  if (type === 'chest') return scenario.nearestChest;
+  if (type === 'chest') { scenario.nearestChestLookups = (scenario.nearestChestLookups || 0) + 1; return scenario.nearestChest; }
   const soil = getNearestBlocks(bot, type, distance);
   return soil.sort((a, b) => Math.hypot(a.position.x, a.position.y, a.position.z) - Math.hypot(b.position.x, b.position.y, b.position.z))[0] || null;
 }
@@ -465,6 +466,7 @@ async function testFarm(root) {
   const { tendNearbyFarm, tillAndSow } = await import(pathToFileURL(path.join(root, 'src/agent/library/skills.js')))
   const { getSkillDocs } = await import(pathToFileURL(path.join(root, 'src/agent/library/index.js')))
   const { SkillLibrary } = await import(pathToFileURL(path.join(root, 'src/agent/library/skill_library.js')))
+  const { createNativeSdk } = await import(pathToFileURL(path.join(root, 'src/agent/library/native_sdk.js')))
 
   const nearChest = { name: 'chest', position: { x: 8, y: 0, z: 0 } }
   const explicitChest = { name: 'trapped_chest', position: { x: 4, y: 0, z: 0 } }
@@ -483,11 +485,8 @@ async function testFarm(root) {
   assert.equal(result.harvested, 1)
   assert.equal(result.planted, 1)
   assert.equal(result.stored, 0, 'storage without server-fenced snapshots is not counted')
-  assert.equal(result.reason, 'empty_soil_remains')
-  assert.deepEqual(scenario.opened, [], 'farm internals do not choose storage without an explicit resolver')
-  assert.equal(scenario.closed, 0)
-  assert.deepEqual(scenario.deposits, [])
-  assert.equal(bot.inventory.items().find(item => item.name === 'wheat_seeds').count, 2, 'harvested seeds remain without a selected storage target')
+  assert.equal(result.reason, 'storage_storage_failed', 'required storage failure takes precedence over remaining crop work')
+  assert.ok(scenario.nearestChestLookups > 0, 'legacy bot-first calls still resolve a nearby chest by default')
 
   function plotScenario() {
     const plot = [0, 1, 2, 3, 4].map(x => block('farmland', null, x));
@@ -500,7 +499,7 @@ async function testFarm(root) {
   globalThis.farmScenario = connected;
   let connectedBot = makeBot(connected);
   result = await tendNearbyFarm(connectedBot, { searchRadius: 1 });
-  assert.equal(result.status, 'complete', 'connected plot extends beyond the starting search distance');
+  assert.equal(result.status, 'partial', 'connected work is complete but the legacy nearest-chest storage attempt has no chest');
   assert.deepEqual({ harvested: result.harvested, planted: result.planted, stored: result.stored }, { harvested: 1, planted: 5, stored: 0 });
   assert.ok(connected.crops.slice(1).every(crop => crop.diggable), 'water gaps, diagonals and different heights are separate plots');
   assert.equal(connected.planted.size, 5, 'empty soil joins the same plot and harvested soil is replanted');
@@ -588,13 +587,14 @@ async function testFarm(root) {
 
   scenario.crops = []
   scenario.farmland = [block('farmland', null, 11), block('farmland', null, 12)]
-  scenario.items = [{ name: 'wheat_seeds', type: 'wheat_seeds', count: 2 }]
+  scenario.items = [{ name: 'wheat_seeds', type: 'wheat_seeds', count: 3 }]
   scenario.opened = []; scenario.deposits = []; scenario.closed = 0; scenario.activations = []; scenario.planted = new Map(); scenario.cheat = false
   bot = makeBot(scenario)
   result = await tendNearbyFarm(bot, { scope: 'radius', radius: 16, seedReserve: 1 })
-  assert.equal(result.planted, 1)
-  assert.deepEqual(scenario.activations, [11], 'normal-mode planting uses only seed inventory above reserve')
-  assert.equal(bot.inventory.items().find(item => item.name === 'wheat_seeds').count, 1, 'one seed is consumed and reserve remains')
+  assert.equal(result.planted, 2)
+  assert.equal(result.status, 'complete', 'planting initially empty soil counts as work even after it is no longer empty')
+  assert.deepEqual(scenario.activations, [11, 12], 'normal-mode planting uses only seed inventory above reserve')
+  assert.equal(bot.inventory.items().find(item => item.name === 'wheat_seeds').count, 1, 'the configured seed reserve remains after planting')
 
   scenario.crops = []
   scenario.farmland = []
@@ -613,27 +613,42 @@ async function testFarm(root) {
   bot = makeBot(scenario)
   result = await tendNearbyFarm(bot, { scope: 'radius' })
   assert.equal(result.harvested, 1)
-  assert.equal(result.reason, 'seed_shortage', 'farm internals do not choose a nearby chest implicitly')
+  assert.equal(result.reason, 'storage_target_unavailable', 'legacy omission still reports its unavailable nearest-chest destination')
   assert.equal(scenario.closed, 0)
 
   scenario.crops = [block('wheat', 7)]
   scenario.items = []
   scenario.nearestChest = nearChest
-  scenario.opened = []; scenario.deposits = []; scenario.closed = 0; scenario.cheat = true; scenario.depositReject = false
+  scenario.opened = []; scenario.deposits = []; scenario.closed = 0; scenario.nearestChestLookups = 0; scenario.cheat = true; scenario.depositReject = false
   bot = makeBot(scenario)
   result = await tendNearbyFarm(bot, { scope: 'radius', radius: 32, seedReserve: 0 })
-  assert.equal(result.stored, 0)
-  assert.deepEqual(scenario.opened, [], 'no storage resolver means no implicit nearby chest selection')
-  assert.equal(scenario.closed, 0)
+  assert.equal(result.stored, 0, 'mock storage without server-fenced chest snapshots is not counted as confirmed')
+  assert.ok(scenario.nearestChestLookups > 0, 'legacy bot-first omission still selects the nearest chest')
 
   scenario.crops = [block('wheat', 7)]
   scenario.items = []
   scenario.depositReject = true
-  scenario.opened = []; scenario.deposits = []; scenario.closed = 0; scenario.cheat = true
+  scenario.opened = []; scenario.deposits = []; scenario.closed = 0; scenario.nearestChestLookups = 0; scenario.cheat = true
   bot = makeBot(scenario)
   result = await tendNearbyFarm(bot, { scope: 'radius', radius: 32, seedReserve: 0 })
   assert.equal(result.stored, 0, 'unselected storage is not attempted')
-  assert.equal(scenario.closed, 0)
+  assert.equal(result.status, 'partial', 'failed required storage cannot be masked by completed crop work')
+  assert.equal(result.reason, 'storage_storage_failed')
+  assert.ok(scenario.nearestChestLookups > 0, 'legacy default attempts its nearest chest')
+
+  const nativeFarmScenario = {
+    crops: [block('wheat', 7)], farmland: [], items: [], nearestChest: nearChest,
+    opened: [], deposits: [], closed: 0, activations: [], planted: new Map(), cheat: true
+  }
+  globalThis.farmScenario = nativeFarmScenario
+  bot = makeBot(nativeFarmScenario)
+  const nativeFarmSdk = createNativeSdk({ bot, skills: { tendNearbyFarm }, world: {} })
+  result = await nativeFarmSdk.skills.tendNearbyFarm({ scope: 'radius', radius: 32, seedReserve: 0 })
+  assert.equal(result.status, 'partial', 'native omission keeps harvested items in inventory while accurately reporting remaining empty soil')
+  assert.equal(result.harvested, 1)
+  assert.equal(result.stored, 0)
+  assert.deepEqual(nativeFarmScenario.opened, [], 'native omission preserves harvested items in inventory')
+  assert.equal(nativeFarmScenario.closed, 0)
 
   const plantingScenario = {
     crops: [], farmland: [block('farmland', null, 20)],

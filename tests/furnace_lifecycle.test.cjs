@@ -47,6 +47,7 @@ async function loadRuntime() {
     ['src/agent/library/world.js', 'src/agent/library/world.js'],
     ['src/agent/library/crafting_sync.js', 'src/agent/library/crafting_sync.js'],
     ['src/agent/library/mining_sync.js', 'src/agent/library/mining_sync.js'],
+    ['src/agent/library/native_sdk.js', 'src/agent/library/native_sdk.js'],
     ['src/agent/action_manager.js', 'src/agent/action_manager.js'],
     ['src/agent/settings.js', 'src/agent/settings.js'],
     ['src/utils/mcdata.js', 'src/utils/mcdata.js'],
@@ -72,9 +73,10 @@ async function loadRuntime() {
   }
   const skills = await import(pathToFileURL(path.join(dir, 'src/agent/library/skills.js')))
   const { default: craftingSync } = await import(pathToFileURL(path.join(dir, 'src/agent/library/crafting_sync.js')))
+  const { createNativeSdk } = await import(pathToFileURL(path.join(dir, 'src/agent/library/native_sdk.js')))
   const { ActionManager } = await import(pathToFileURL(path.join(dir, 'src/agent/action_manager.js')))
   const { createOperationContext, operationResult, runOwnedOperation } = await import(pathToFileURL(path.join(dir, 'src/agent/library/operation_context.js')))
-  return { dir, skills, craftingSync, ActionManager, createOperationContext, operationResult, runOwnedOperation }
+  return { dir, skills, craftingSync, createNativeSdk, ActionManager, createOperationContext, operationResult, runOwnedOperation }
 }
 
 function notch(item) { return item ? Item.toNotch(new Item(item.id, item.count)) : { present: false } }
@@ -247,7 +249,7 @@ function cancellationContext() {
 }
 
 async function main() {
-  const { skills, craftingSync, ActionManager, createOperationContext, operationResult, runOwnedOperation } = await loadRuntime()
+  const { skills, craftingSync, createNativeSdk, ActionManager, createOperationContext, operationResult, runOwnedOperation } = await loadRuntime()
   const cases = {}
   const successful = makeBot()
   assert.equal(await skills.smeltItem(successful, 'raw_iron', 2), true, `successful smelt fixture: ${successful.output}`)
@@ -255,6 +257,15 @@ async function main() {
   assert.equal(successful._fixture.writesBefore('close_window').length, 1)
   assert.equal(await skills.clearNearestFurnace(successful), true, 'clear should preserve its boolean success contract')
   cases.success = { smelt: true, clear: true, closedOwnedWindow: true, inventoryConfirmed: true }
+
+  const exactTargetMissing = makeBot()
+  exactTargetMissing.blockAt = position => ({ name: 'dirt', position })
+  const nativeSmelt = createNativeSdk({ bot: exactTargetMissing, skills, world: {} })
+  const missingFurnaceResult = await nativeSmelt.skills.smeltItem({ itemName: 'raw_iron', quantity: 1, furnacePosition: { x: 1, y: 64, z: 0 } })
+  assert.deepEqual(missingFurnaceResult, {
+    ok: false, status: 'blocked', requestedQuantity: 1, confirmedQuantity: 0, remainingQuantity: 1, itemName: 'raw_iron'
+  }, 'an early internal false result is projected to the structured native completion contract')
+  cases.exactMissingTarget = { status: missingFurnaceResult.status, requestedQuantity: missingFurnaceResult.requestedQuantity }
 
   const delayedOutput = makeBot({ ore: 1, coal: 1, smeltDelayMs: 350 })
   const waitOperation = createOperationContext({ id: 'delayed-smelt', controller: new AbortController() }, { bot: delayedOutput }, { intentEpoch: 1 }, 'smelt-task')

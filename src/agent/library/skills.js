@@ -1681,6 +1681,18 @@ function chestTransferOutput(bot, direction, requestedQuantity, confirmedQuantit
     log(bot, `Chest ${direction}: ${JSON.stringify({ requestedQuantity, confirmedQuantity, remainingQuantity, chestPosition })}`);
 }
 
+function chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity, chest, cancelled = false, reason, unknown = false, legacyOk = false }) {
+    const complete = !cancelled && !unknown && requestedQuantity > 0 && confirmedQuantity === requestedQuantity;
+    const ok = complete;
+    const status = cancelled ? 'cancelled' : unknown || confirmedQuantity == null ? 'unknown'
+        : complete ? 'complete' : confirmedQuantity > 0 ? 'partial' : 'blocked';
+    if (options?.details !== true) return legacyOk || ok;
+    return { ok, status, itemName, requestedQuantity, confirmedQuantity,
+        remainingQuantity: requestedQuantity == null || confirmedQuantity == null ? null : Math.max(0, requestedQuantity - confirmedQuantity),
+        ...(chest?.position ? { chestPosition: { x: chest.position.x, y: chest.position.y, z: chest.position.z } } : {}),
+        ...(reason ? { reason } : {}) };
+}
+
 async function resolveChestTransferTarget(bot, chestPosition) {
     if (chestPosition === undefined) {
         const chest = world.getNearestBlock(bot, 'chest', 32);
@@ -1799,22 +1811,23 @@ export async function putInChest(bot, itemName, num=-1, options={}) {
     const signature = 'skills.putInChest(bot, itemName, num, options)';
     validateChestTransferQuantity(num, signature);
     const chestPosition = validateChestTransferOptions(options, signature);
+    const initialAvailable = inventoryItemCount(bot, itemName);
+    let requestedQuantity = num === -1 ? initialAvailable : num;
     let chest = await resolveChestTransferTarget(bot, chestPosition);
     if (!chest) {
         if (chestPosition === undefined) log(bot, `Could not find a chest nearby.`);
-        return false;
+        return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: 0, reason: 'chest_unavailable' });
     }
-    const initialAvailable = inventoryItemCount(bot, itemName);
-    if (chestPosition === undefined && !await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2)) return false;
+    if (chestPosition === undefined && !await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2))
+        return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: 0, chest, reason: 'chest_unreachable' });
     const context = getActionContext(bot);
-    if (isActionCancelled(bot, context)) return false;
+    if (isActionCancelled(bot, context)) return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: 0, chest, cancelled: true });
     const chestContainer = await (chestPosition === undefined ? bot.openContainer(chest) : openContainerAtSurface(bot, chest));
     let beforeSnapshot = null;
     let afterSnapshot = null;
     let transferError = null;
     let snapshotError = null;
     let closeError = null;
-    let requestedQuantity = num === -1 ? initialAvailable : num;
     let attemptedQuantity = 0;
     try {
         try { beforeSnapshot = await craftingSync.snapshotWindow(bot, chestContainer); }
@@ -1861,15 +1874,18 @@ export async function putInChest(bot, itemName, num=-1, options={}) {
         bot.inventoryUnconfirmed = true;
     }
     chestTransferOutput(bot, 'deposit', requestedQuantity, confirmed, chest);
-    if (transferError) throw transferError;
-    if (closeError) throw closeError;
-    if (isActionCancelled(bot, context)) return false;
+    if (transferError && options?.details !== true) throw transferError;
+    if (closeError && options?.details !== true) throw closeError;
+    if (isActionCancelled(bot, context)) return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: confirmed, chest, cancelled: true,
+        reason: transferError?.message ?? closeError?.message });
+    if (closeError) return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: confirmed, chest, unknown: true, reason: `container_close_failed: ${String(closeError)}` });
     if (confirmed !== requestedQuantity) {
         log(bot, `Chest transfer was incomplete: confirmed ${confirmed == null ? 'unknown' : confirmed} of ${requestedQuantity} ${itemName}${confirmed === attemptedQuantity && attemptedQuantity < requestedQuantity ? '; only the currently available inventory was transferred.' : '; inventory actions are gated until state is confirmed.'}`);
-        return false;
+        return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: confirmed, chest,
+            unknown: confirmed == null, reason: transferError?.message ?? (confirmed == null ? 'snapshot_unknown' : 'quantity_shortfall') });
     }
     log(bot, `Successfully put ${confirmed} ${itemName} in the chest.`);
-    return true;
+    return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: confirmed, chest, legacyOk: true });
 }
 
 export async function takeFromChest(bot, itemName, num=-1, options={}) {
@@ -1890,11 +1906,12 @@ export async function takeFromChest(bot, itemName, num=-1, options={}) {
     let chest = await resolveChestTransferTarget(bot, chestPosition);
     if (!chest) {
         if (chestPosition === undefined) log(bot, `Could not find a chest nearby.`);
-        return false;
+        return chestTransferResult(options, { itemName, requestedQuantity: num === -1 ? null : num, confirmedQuantity: 0, reason: 'chest_unavailable' });
     }
-    if (chestPosition === undefined && !await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2)) return false;
+    if (chestPosition === undefined && !await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2))
+        return chestTransferResult(options, { itemName, requestedQuantity: num === -1 ? null : num, confirmedQuantity: 0, chest, reason: 'chest_unreachable' });
     const context = getActionContext(bot);
-    if (isActionCancelled(bot, context)) return false;
+    if (isActionCancelled(bot, context)) return chestTransferResult(options, { itemName, requestedQuantity: num === -1 ? null : num, confirmedQuantity: 0, chest, cancelled: true });
     const chestContainer = await (chestPosition === undefined ? bot.openContainer(chest) : openContainerAtSurface(bot, chest));
     let serverSnapshot;
     try { serverSnapshot = await craftingSync.snapshotWindow(bot, chestContainer); }
@@ -1904,6 +1921,8 @@ export async function takeFromChest(bot, itemName, num=-1, options={}) {
         recordUncertainty({ requestedQuantity: num === -1 ? null : num, confirmedQuantity: null, unit: 'item', target: itemName,
             reason: `server-fenced chest snapshot unavailable: ${String(error)}` });
         chestTransferOutput(bot, 'withdraw', num === -1 ? null : num, null, chest);
+        if (options?.details === true) return chestTransferResult(options, { itemName, requestedQuantity: num === -1 ? null : num, confirmedQuantity: null, chest,
+            unknown: true, reason: `snapshot_unknown: ${String(error)}` });
         throw error;
     }
     
@@ -1916,7 +1935,7 @@ export async function takeFromChest(bot, itemName, num=-1, options={}) {
         try { await chestContainer.close(); }
         catch (error) { bot.inventoryUnconfirmed = true; throw error; }
         chestTransferOutput(bot, 'withdraw', requestedQuantity, 0, chest);
-        return false;
+        return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: 0, chest, reason: 'item_unavailable' });
     }
     let afterSnapshot = null;
     let transferError = null;
@@ -1952,17 +1971,22 @@ export async function takeFromChest(bot, itemName, num=-1, options={}) {
         if (confirmed != null) recordUncertainty({ requestedQuantity: attemptedQuantity, confirmedQuantity: confirmed, unit: 'item', target: itemName,
             reason: 'server-fenced chest transfer did not confirm the full attempted quantity' });
     }
+    let closeError;
     try { await chestContainer.close(); }
-    catch (error) { bot.inventoryUnconfirmed = true; throw error; }
+    catch (error) { bot.inventoryUnconfirmed = true; closeError = error; }
     chestTransferOutput(bot, 'withdraw', requestedQuantity, confirmed, chest);
-    if (transferError) throw transferError;
-    if (isActionCancelled(bot, context)) return confirmed > 0 && confirmed === requestedQuantity;
+    if (transferError && options?.details !== true) throw transferError;
+    if (closeError && options?.details !== true) throw closeError;
+    if (isActionCancelled(bot, context)) return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: confirmed, chest, cancelled: true,
+        reason: transferError?.message ?? closeError?.message });
+    if (closeError) return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: confirmed, chest, unknown: true, reason: `container_close_failed: ${String(closeError)}` });
     if (confirmed !== requestedQuantity) {
         log(bot, `Chest transfer was incomplete: confirmed ${confirmed == null ? 'unknown' : confirmed} of ${requestedQuantity} ${itemName}${confirmed === toTake && toTake < requestedQuantity ? '; the chest contained fewer items than requested.' : '; inventory actions are gated until state is confirmed.'}`);
-        return false;
+        return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: confirmed, chest,
+            unknown: confirmed == null, reason: transferError?.message ?? (confirmed == null ? 'snapshot_unknown' : 'quantity_shortfall') });
     }
     log(bot, `Successfully took ${confirmed} ${itemName} from the chest.`);
-    return true;
+    return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: confirmed, chest });
 }
 
 export async function approachBlock(bot, x, y, z) {
@@ -4149,7 +4173,7 @@ export async function tendNearbyFarm(bot, options = {}) {
      * @param {{x: number, y: number, z: number}} options.startPosition, optional farmland coordinates selecting the connected plot instead of searching.
      * @param {number} options.radius, working radius in radius mode only, default 32.
      * @param {number} options.seedReserve, number of each planting item to keep in inventory, default 1.
-     * @param {{x: number, y: number, z: number}} options.chestPosition, optional exact chest coordinates; omitted nearby farming leaves harvested items in inventory.
+     * @param {{x: number, y: number, z: number}} options.chestPosition, optional exact chest coordinates. Legacy bot-first calls select a nearby chest when omitted; the native facade privately opts to keep harvested items in inventory.
      * @returns {Promise<object>} confirmed harvested, planted and stored counts. Unavailable seeds or unreachable crops can leave work unfinished; inspect counts and logs. An unloaded plot boundary throws before tending.
      * @example
      * await skills.tendNearbyFarm(bot);
@@ -4172,6 +4196,10 @@ export async function tendNearbyFarm(bot, options = {}) {
     const cropPositions = soil.map(block => bot.blockAt(block.position.offset(0, 1, 0)))
         .filter(block => block && crops[block.name])
         .sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position));
+    const workInitiallyPresent = cropPositions.some(block => {
+        const crop = crops[block.name], age = block.getProperties?.().age;
+        return crop && age != null && Number(age) >= crop.mature;
+    }) || soil.some(block => bot.blockAt(block.position.offset(0, 1, 0))?.name === 'air');
     const harvestedItems = new Set();
     let harvested = 0;
 
@@ -4233,7 +4261,10 @@ export async function tendNearbyFarm(bot, options = {}) {
         return { itemName, item: stacks[0], count: Math.max(0, itemCount - reserve) };
     }).filter(deposit => deposit.item && deposit.count > 0);
     const hasChestResolver = typeof options.resolveChestPosition === 'function';
-    if (deposits.length > 0 && !bot.interrupt_code && (chestPosition != null || hasChestResolver)) {
+    // Preserve the legacy bot-first default; the native public adapter explicitly
+    // sets this private flag when its caller omits chestPosition.
+    const selectLegacyNearbyChest = chestPosition == null && !hasChestResolver && options.keepHarvestInInventory !== true;
+    if (deposits.length > 0 && !bot.interrupt_code && (chestPosition != null || hasChestResolver || selectLegacyNearbyChest)) {
         let chest;
         let chestTargetBlock = null;
         let chestTargetReachable = true;
@@ -4242,6 +4273,9 @@ export async function tendNearbyFarm(bot, options = {}) {
             const resolved = await options.resolveChestPosition();
             resolvedChestPosition = resolved?.position ?? null;
             storageStatus = resolvedChestPosition ? 'target_resolved' : (resolved?.status ?? 'target_unavailable');
+        } else if (selectLegacyNearbyChest) {
+            chest = world.getNearestBlock(bot, 'chest', FARM_CHEST_RADIUS);
+            storageStatus = chest ? 'legacy_nearest_selected' : 'no_chest';
         }
         if (resolvedChestPosition && [resolvedChestPosition.x, resolvedChestPosition.y, resolvedChestPosition.z].every(Number.isFinite)) {
             const target = new Vec3(Math.floor(resolvedChestPosition.x), Math.floor(resolvedChestPosition.y), Math.floor(resolvedChestPosition.z));
@@ -4314,12 +4348,8 @@ export async function tendNearbyFarm(bot, options = {}) {
         bot.blockAt(block.position.offset(0, 1, 0))?.name === 'air').length;
     const remainingWork = { matureCrops: remainingMature, emptySoil: remainingPlantable };
     const seedAvailable = [...seedItems].some(seed => bot.inventory.items().filter(item => item.name === seed).reduce((n, item) => n + item.count, 0) > seedReserve);
-    const workInitiallyPresent = cropPositions.some(block => {
-        const crop = crops[block.name], age = block.getProperties?.().age;
-        return crop && age != null && Number(age) >= crop.mature;
-    }) || soil.some(block => bot.blockAt(block.position.offset(0, 1, 0))?.name === 'air');
     const storageIncomplete = storageStatus !== 'not_needed' && storageStatus !== 'stored' && deposits.length > 0;
-    const status = !workInitiallyPresent ? 'no_work' : storageIncomplete || remainingMature > 0 || remainingPlantable > 0 ? 'partial' : 'complete';
+    const status = storageIncomplete || remainingMature > 0 || remainingPlantable > 0 ? 'partial' : !workInitiallyPresent ? 'no_work' : 'complete';
     const reason = storageIncomplete ? `storage_${storageStatus}`
         : remainingMature > 0 ? 'mature_crops_remain'
             : remainingPlantable > 0 && !seedAvailable ? 'seed_shortage'

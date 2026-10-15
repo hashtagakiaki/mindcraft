@@ -42,6 +42,7 @@ export function mustCollectManually() { return false; }
 `)
   for (const relative of ['src/agent/library/skills.js', 'src/agent/library/block_interaction.js', 'src/agent/library/block_placement.js',
     'src/agent/library/crafting_sync.js', 'src/agent/library/mining_sync.js', 'src/agent/library/operation_context.js', 'src/agent/library/navigation_policy.js',
+    'src/agent/library/native_sdk.js',
     'src/agent/library/world.js', 'src/agent/library/index.js', 'src/agent/library/skill_library.js',
     'src/agent/library/sdk_capabilities.js', 'src/agent/library/lockdown.js', 'src/agent/commands/actions.js',
     'src/agent/commands/queries.js', 'src/agent/commands/index.js', 'src/agent/coder.js',
@@ -155,6 +156,8 @@ async function main() {
   try {
     await setup(root); process.chdir(root)
     const skills = await import(pathToFileURL(path.join(root, 'src/agent/library/skills.js')))
+    const world = await import(pathToFileURL(path.join(root, 'src/agent/library/world.js')))
+    const { createNativeSdk } = await import(pathToFileURL(path.join(root, 'src/agent/library/native_sdk.js')))
     const craftingSync = (await import(pathToFileURL(path.join(root, 'src/agent/library/crafting_sync.js')))).default
     const ownership = await import(pathToFileURL(path.join(root, 'src/agent/library/operation_context.js')))
     let snapshots = 0
@@ -171,6 +174,48 @@ async function main() {
     assert.deepEqual(bot.state.opened, ['8,64,0'], 'deposit opens only the requested chest')
     assert.deepEqual(bot.state.closed, ['8,64,0'])
     assert.equal(snapshots, 2, 'deposit remains fenced by before and after snapshots')
+
+    const nativeBot = makeBot({ inventoryCounts: [4], chestCounts: [] })
+    const nativeSdk = createNativeSdk({ bot: nativeBot, skills, world })
+    const nativeOwner = ownership.createOperationContext(
+      { id: 'native-deposit-quantity', controller: { signal: new AbortController().signal } },
+      { bot: nativeBot }, { intentEpoch: 1 }, 'native-chest-transfer'
+    )
+    const nativeResult = await ownership.runOwnedOperation(nativeOwner, () => nativeSdk.skills.putInChest({
+      itemName: 'oak_log', quantity: 1, chestPosition: { x: 8, y: 64, z: 0 }
+    }))
+    assert.deepEqual(nativeResult, {
+      ok: true, status: 'complete', itemName: 'oak_log', requestedQuantity: 1, confirmedQuantity: 1,
+      remainingQuantity: 0, chestPosition: { x: 8, y: 64, z: 0 }
+    }, 'the public native facade returns the quantity confirmed by the real chest-transfer core')
+    assert.deepEqual(ownership.operationResult(nativeOwner).confirmedChanges.map(change => change.quantity), [1],
+      'the structured result and operation ownership facts describe the same transfer')
+
+    const nativeShort = makeBot({ inventoryCounts: [4], chestCounts: [] })
+    const nativeShortSdk = createNativeSdk({ bot: nativeShort, skills, world })
+    const partialResult = await nativeShortSdk.skills.putInChest({ itemName: 'oak_log', quantity: 6, chestPosition: { x: 8, y: 64, z: 0 } })
+    assert.deepEqual(partialResult, {
+      ok: false, status: 'partial', itemName: 'oak_log', requestedQuantity: 6, confirmedQuantity: 4,
+      remainingQuantity: 2, chestPosition: { x: 8, y: 64, z: 0 }, reason: 'quantity_shortfall'
+    }, 'an available-only transfer remains visibly partial through the public facade')
+
+    const nativeAll = makeBot({ inventoryCounts: [4], chestCounts: [] })
+    const nativeAllSdk = createNativeSdk({ bot: nativeAll, skills, world })
+    const allResult = await nativeAllSdk.skills.putInChest({ itemName: 'oak_log', quantity: 'all', chestPosition: { x: 8, y: 64, z: 0 } })
+    assert.equal(allResult.status, 'complete')
+    assert.equal(allResult.requestedQuantity, 4, 'all resolves to the exact available inventory count')
+    assert.equal(allResult.confirmedQuantity, 4)
+
+    const nativeUnknown = makeBot({ inventoryCounts: [4], chestCounts: [] })
+    const nativeUnknownSdk = createNativeSdk({ bot: nativeUnknown, skills, world })
+    failChestSnapshot = true
+    const unknownResult = await nativeUnknownSdk.skills.putInChest({ itemName: 'oak_log', quantity: 2, chestPosition: { x: 8, y: 64, z: 0 } })
+    failChestSnapshot = false
+    assert.equal(unknownResult.ok, false)
+    assert.equal(unknownResult.status, 'unknown')
+    assert.equal(unknownResult.requestedQuantity, 2)
+    assert.equal(unknownResult.confirmedQuantity, null, 'a failed server fence is not projected as a confirmed zero')
+    assert.equal(unknownResult.remainingQuantity, null)
 
     for (const [count, stacks] of [[262, [64, 64, 64, 64, 6]], [104, [64, 40]]]) {
       const stacked = makeBot({ inventoryCounts: stacks, chestCounts: [] })

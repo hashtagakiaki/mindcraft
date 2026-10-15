@@ -277,12 +277,13 @@ for (let batch = 0; batch < 10; batch++) {
     let editsAfterQuery = 0
     batchAgent.places = { sdk: {
       find: () => false,
+      verify: async () => ({ status: 'unknown', reason: 'target_not_observed' }),
       tendFarm: async () => ({ ok: false, status: 'partial', harvested: 1, planted: 0, stored: 0, remainingWork: { matureCrops: 1, emptySoil: 0 } }),
       setAlias: async () => { editsAfterQuery++; return true }
     } }
     const queryFalse = await batchAgent.actions.runAction('query-false-is-data',
-      () => batchAgent.coder.executeCode('const absent = await places.find({kind:"storage"}); await places.setAlias({alias:"still-running",placeId:"mock-place"});'), { timeout: 0 })
-    assert.equal(queryFalse.success, true, 'query false is ordinary observation data')
+      () => batchAgent.coder.executeCode('const absent = await places.find({kind:"storage"}); const unknown = await places.verify({placeId:"mock-place"}); await places.setAlias({alias:"still-running",placeId:"mock-place"});'), { timeout: 0 })
+    assert.equal(queryFalse.success, true, 'false and unknown query observations are ordinary data')
     assert.equal(editsAfterQuery, 1)
     batchAgent.actions.beginUserIntent()
     editsAfterQuery = 0

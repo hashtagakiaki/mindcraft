@@ -24,7 +24,7 @@ const EDIT_ROUTE = Object.freeze({ allowDig: true, scaffold: 'leave', scaffoldBl
 const COMBAT_ROUTE = Object.freeze({ allowDig: false, scaffold: 'leave', scaffoldBlocks: Object.freeze(['dirt', 'cobblestone']), allowTowers: false });
 const navigationPolicies = Object.freeze({
     'skills.goToPosition': PRESERVE_WITH_CLEANUP, 'skills.reachPosition': EDIT_ROUTE,
-    'skills.craftRecipe': PRESERVE_ROUTE, 'skills.smeltItem': PRESERVE_ROUTE, 'skills.clearNearestFurnace': PRESERVE_ROUTE,
+    'skills.craftItem': PRESERVE_ROUTE, 'skills.smeltItem': PRESERVE_ROUTE, 'skills.clearNearestFurnace': PRESERVE_ROUTE,
     'skills.attackNearest': COMBAT_ROUTE, 'skills.attackEntity': COMBAT_ROUTE, 'skills.defendSelf': COMBAT_ROUTE,
     'skills.collectBlock': EDIT_ROUTE, 'skills.pickupNearbyItems': PRESERVE_ROUTE,
     'skills.breakBlockAt': PRESERVE_ROUTE, 'skills.approachBlock': PRESERVE_ROUTE, 'skills.inspectChest': PRESERVE_ROUTE,
@@ -45,7 +45,7 @@ const farmFields = Object.freeze({
     radius: optional(radius(undefined, { positive: true, description: 'Work radius for scope:"radius" only; effective default 32.' })),
     startPosition: optional(position({ description: 'Select connected farmland; scope:"connected" only.' })),
     seedReserve: field('nonnegativeInteger', { default: 1, description: 'Items of each seed to retain.' }),
-    chestPosition: optional(position({ description: 'Explicit chest; otherwise searches within 32 blocks.' })),
+    chestPosition: optional(position({ description: 'Store harvested items in this exact chest; omission keeps harvested items in inventory.' })),
 });
 
 function farmConstraint(input, fail) {
@@ -58,7 +58,7 @@ function farmConstraint(input, fail) {
 const definitions = [];
 function define(namespace, name, fields, description, args, options = {}) {
     const method = `${namespace}.${name}`;
-    const queries = new Set(['places.find', 'places.inspect', 'places.resolveAlias', 'skills.inspectChest', 'skills.showVillagerTrades']);
+    const queries = new Set(['places.find', 'places.inspect', 'places.resolveAlias', 'places.verify', 'skills.inspectChest', 'skills.showVillagerTrades']);
     const kind = options.kind ?? (namespace === 'world' || namespace === 'diagnostics' || namespace === 'vision' || queries.has(method) ? 'query' : 'action');
     definitions.push(Object.freeze({ namespace, name, fields: Object.freeze(fields), description, args,
         kind, completion: options.completion ?? (kind === 'query' ? 'data' : 'truthy'),
@@ -88,7 +88,7 @@ const allQuantity = value => value === 'all' ? -1 : value;
 s('log', { message: field('stringValue') }, 'Append a message to operation output. No world mutation.', a => [a.message]);
 s('craftItem', { itemName: text(), quantity: positiveInt({ default: 1, description: 'Minimum new output items to craft; excess recipe output is included in confirmedQuantity.' }) }, 'Craft at least quantity new items. Returns requested, confirmed and remaining item quantities based on server-confirmed recipe output.', a => [a.itemName, a.quantity], { completion: 'complete' });
 s('wait', { milliseconds: distance() }, 'Interruptible wait in milliseconds. Returns boolean.', a => [a.milliseconds]);
-s('smeltItem', { itemName: text(), quantity: positiveInt({ default: 1, description: 'Input items to smelt.' }), furnacePosition: optional(position({ description: 'Use this exact furnace; never substitute another.' })) }, 'Smelt in a furnace. An explicit furnacePosition is exact; omission selects the nearest. Returns the output item and server-confirmed quantities.', a => [a.itemName, a.quantity, a.furnacePosition]);
+s('smeltItem', { itemName: text(), quantity: positiveInt({ default: 1, description: 'Input items to smelt.' }), furnacePosition: optional(position({ description: 'Use this exact furnace; never substitute another.' })) }, 'Smelt in a furnace. An explicit furnacePosition is exact; omission selects the nearest. Returns the output item and server-confirmed quantities.', a => [a.itemName, a.quantity, a.furnacePosition], { completion: 'complete' });
 s('clearNearestFurnace', { furnacePosition: optional(position({ description: 'Use this exact furnace; never substitute another.' })) }, 'Remove contents of the selected furnace; omission selects the nearest.', a => [a.furnacePosition ?? null]);
 s('attackNearest', { mobType: text(), kill: field('boolean', { default: true }) }, 'Attack the nearest matching mob; kill:false makes one attack. Returns boolean.', a => [a.mobType, a.kill]);
 s('attackEntity', { entity: field('entity'), kill: field('boolean', { default: true }) }, 'Attack an observed Entity reference; kill:false makes one attack. Returns boolean.', a => [a.entity, a.kill]);
@@ -117,7 +117,7 @@ s('equip', { itemName: text() }, 'Equip the named item. Returns boolean.', a => 
 s('discard', { itemName: text(), quantity: quantity() }, 'Discard quantity items; quantity:"all" explicitly discards all matching items. Returns boolean.', a => [a.itemName, allQuantity(a.quantity)]);
 for (const name of ['putInChest', 'takeFromChest']) s(name, {
     itemName: text(), quantity: quantity(), chestPosition: optional(position()),
-}, 'Transfer quantity items; quantity:"all" explicitly requests all matching available items. chestPosition selects one chest; omission uses nearest. Partial transfers return false. Output reports server-confirmed quantities or null when unknown.', a => [a.itemName, allQuantity(a.quantity), has(a, 'chestPosition') ? { chestPosition: a.chestPosition } : {}]);
+}, 'Transfer quantity items; quantity:"all" explicitly requests all matching available items. chestPosition selects one chest; omission uses nearest. Returns server-confirmed requested, confirmed and remaining quantities; incomplete or unknown results stop the current code batch.', a => [a.itemName, allQuantity(a.quantity), has(a, 'chestPosition') ? { chestPosition: a.chestPosition, details: true } : { details: true }], { completion: 'complete' });
 s('consume', { itemName: field('stringValue', { default: '', description: 'Empty string selects available food.' }) }, 'Consume food or a potion. Returns boolean.', a => [a.itemName]);
 s('giveToPlayer', { itemName: text(), playerName: text(), quantity: positiveInt({ default: 1 }) }, 'Give quantity items to the visible player. Returns boolean.', a => [a.itemName, a.playerName, a.quantity]);
 s('goToPosition', { position: position() }, 'Reach an absolute feet position without digging. Confirmed dirt/cobblestone route scaffolds are removed before success. Returns {ok,status,arrivalReached,finalPosition,reason}; arrival alone is not success.', a => [{
@@ -145,7 +145,7 @@ s('goToSurface', {}, 'Find and navigate to the surface. Returns boolean.', () =>
 s('useToolOn', { toolName: text(), targetName: text() }, 'Equip tool (or "hand") and use on nearest entity/block. Use useItem for activation without a target.', a => [a.toolName, a.targetName]);
 s('useToolOnBlock', { toolName: text(), position: position() }, 'Resolve the currently loaded block at this position immediately before using the tool.', a => [a.toolName, a.position]);
 s('useItem', { itemName: text() }, 'Activate a held item without targeting a block or entity. Confirms the use input only; later effects are separate observations.', a => [a.itemName]);
-s('tendNearbyFarm', { ...farmFields }, 'Tend connected farmland by default; radius scope works a circular area. Harvest, replant and store produce. Inspect confirmed harvested/planted/stored counts and status; this does not guarantee the whole request.', a => a.scope === 'radius' ? { ...a, radius: a.radius ?? 32 } : { ...a, searchRadius: a.searchRadius ?? 32 }, { argsObject: true, constraint: farmConstraint });
+s('tendNearbyFarm', { ...farmFields }, 'Tend connected farmland by default; radius scope works a circular area. Harvest and replant; an explicit chestPosition stores harvested produce there, while omission leaves it in inventory. Returns confirmed counts, remaining work and status; incomplete work or storage stops the current code batch.', a => a.scope === 'radius' ? { ...a, radius: a.radius ?? 32 } : { ...a, searchRadius: a.searchRadius ?? 32 }, { argsObject: true, constraint: farmConstraint, completion: 'farm' });
 s('fellTree', { startPosition: optional(position()), searchRadius: radius(24, { positive: true, max: 64 }) }, 'Fell one natural single-trunk tree, collect logs and remove this call’s pillars. Returns complete/partial/cancelled/blocked/not_found and confirmed counts. Bring an axe, free slots and scaffolding; inspect leftoverScaffolds/grounded. In minecraft_execute, an incomplete status stops execution and preserves the result in sdkFailure.', a => [a]);
 
 w('inspectBlockAt', { position: position() }, 'Synchronously inspect an absolute block: loaded state, position/name/properties, legacy center visibility/distance, canDig (installed mining admission, using the same surface resolver), dimension/time, and interaction status/aim/face/distance/reason from surface rays within 4.5 blocks. Center visibility or center-distance admission is not required for digging. Unknown is not air; no sampled aim is not proof of total occlusion.', coords);
@@ -175,10 +175,10 @@ w('isClearPath', { target: field('entity') }, 'Check whether an observed target 
 p('find', { text: optional(text()), kind: optional(enumeration(placeKinds)), purpose: optional(text()), dimension: optional(text()), existence: optional(enumeration(['observed', 'unverified', 'missing'])), staleBefore: optional(field('timestamp')), limit: positiveInt({ default: 20, max: 100 }) }, 'Find persistent place records by optional text and filters. Returns structured records with stable IDs.', a => [a,], { argsObject: true });
 for (const [name, description] of [
     ['inspect', 'Read a saved place and linked storage by stable ID as a structured record; missing ID throws.'],
-    ['verify', 'Reobserve a saved place in the current dimension. Loaded target blocks or proximity to representative points are required.'],
+    ['verify', 'Reobserve a saved place in the current dimension and update its observation record. Loaded target blocks or proximity to representative points are required. Missing, unknown and verified are query results.'],
     ['setHome', 'Set this bot’s home preference to an existing stable place ID.'],
     ['goTo', 'Navigate to a saved stable place ID in the current dimension. Inspect travel status; arrival must be confirmed.'],
-]) p(name, { placeId: text() }, description, a => [a.placeId]);
+]) p(name, { placeId: text() }, description, a => [a.placeId], name === 'verify' ? { kind: 'query' } : {});
 p('resolveAlias', { alias: text() }, 'Resolve this bot’s personal alias/home preference to a place snapshot or null.', a => [a.alias]);
 p('goToAlias', { alias: text() }, 'Resolve this bot’s alias then navigate; missing alias throws. Inspect travel status.', a => [a.alias]);
 p('rememberHere', { name: text(), kind: enumeration(['other', 'base'], { default: 'other' }), purpose: field('stringValue', { default: '' }) }, 'Save current observed representative point; storage/farm records require rememberObservedAt. Returns a structured record.', a => [a.name, a.kind, a.purpose]);
@@ -434,6 +434,8 @@ export function createNativeSdk(bindings, config = {}) {
                     : [input.text ?? '', Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'text'))];
             } else if (definition.namespace === 'places' && definition.name === 'tendFarm') {
                 args = [input.farmId, { seedReserve: input.seedReserve }];
+            } else if (definition.namespace === 'skills' && definition.name === 'tendNearbyFarm') {
+                args = [{ ...definition.args(input), keepHarvestInInventory: true }];
             } else if (definition.namespace === 'skills' && ['putInChest', 'takeFromChest'].includes(definition.name)) {
                 args = [input.itemName, allQuantity(input.quantity), input.chestPosition ? { chestPosition: input.chestPosition, details: true } : { details: true }];
             } else {
@@ -483,6 +485,7 @@ function projectDomainResult(definition, value, context, factStart, uncertaintyS
             remainingQuantity: Math.max(0, input.quantity - (facts.find(f => f.unit === 'item')?.quantity ?? (value === true ? input.quantity : 0))), itemName: input.itemName };
     }
     if (definition.completion === 'complete' && ['skills.putInChest', 'skills.takeFromChest'].includes(method)) {
+        if (value && typeof value === 'object' && Object.hasOwn(value, 'confirmedQuantity')) return value;
         const fact = [...facts, ...uncertain].reverse().find(f => f.unit === 'item' && f.target?.itemName === input.itemName || f.unit === 'item' && f.target === input.itemName);
         const requested = fact?.requestedQuantity ?? (input.quantity === 'all' ? null : input.quantity);
         const confirmed = fact?.quantity ?? fact?.confirmedQuantity ?? (value === true ? requested : 0);
@@ -493,8 +496,9 @@ function projectDomainResult(definition, value, context, factStart, uncertaintyS
     }
     if (definition.completion === 'farm') {
         const result = value?.result ?? value;
-        const noWork = result?.status === 'no_work';
-        return { ...result, ok: result?.ok === true || noWork, status: noWork ? 'no_work' : result?.ok ? 'complete' : result?.status ?? 'blocked',
+        const noWork = result?.status === 'no_work' && result?.ok === true;
+        const complete = result?.status === 'complete' && result?.ok === true;
+        return { ...result, ok: noWork || complete, status: noWork ? 'no_work' : complete ? 'complete' : result?.status ?? 'blocked',
             remainingWork: result?.remainingWork ?? null };
     }
     return value;
