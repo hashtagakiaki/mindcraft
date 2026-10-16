@@ -1222,7 +1222,15 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             else {
                 const collectionMovements = bot.collectBlock.movements;
                 if (collectionMovements) bot.collectBlock.movements = navigationMovements(bot, movements);
-                try { await trackNavigationSegment(bot, () => bot.collectBlock.collect(block), { workTarget: block.position }); }
+                try {
+                    await trackNavigationSegment(bot, async () => {
+                        if (block.name.endsWith('_ore')) {
+                            await goToGoal(bot, new pf.goals.GoalNear(
+                                block.position.x, block.position.y, block.position.z, 2), movements);
+                        }
+                        await bot.collectBlock.collect(block);
+                    }, { workTarget: block.position });
+                }
                 finally { if (collectionMovements) bot.collectBlock.movements = collectionMovements; }
                 success = true;
             }

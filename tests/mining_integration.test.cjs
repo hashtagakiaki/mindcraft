@@ -14,7 +14,9 @@ function createBot(scenario) {
   bot.registry.items[20] = { name: 'iron_ore' }
   bot.registry.items[30] = { name: 'wheat' }
   bot.registry.items[31] = { name: 'wheat_seeds' }
-  bot.entity = { id: 1, position: { x: 0, y: 0, z: 0 } }
+  bot.entity = { id: 1, position: { x: 0, y: 0, z: 0, floored() { return this } } }
+  bot.pathfinder = { goals: [], setMovements() {}, getPathTo: () => ({ status: 'success' }),
+    async goto(goal) { this.goals.push(goal) } }
   bot.inventory = { items: () => scenario.items ?? [], slots: scenario.items ?? [] }
   bot.modes = { isOn: () => true }
   bot.tool = { async equipForBlock() { bot.heldItem = scenario.heldItem ?? { type: 1, enchants: [] } } }
@@ -90,7 +92,9 @@ async function main() {
     })
     scenario.items = [{ name: 'raw_iron', type: 10, count: 20 }]
     const bot = createBot(scenario)
-    assert.equal(await collectBlock(bot, 'iron_ore'), true, `pickup remains confirmed when storage occurs ${storage} it`)
+    assert.equal(await collectBlock(bot, 'iron_ore'), true, `pickup remains confirmed when storage occurs ${storage} it\n${bot.output}`)
+    assert.equal(bot.pathfinder.goals.length, 1)
+    assert.equal(bot.pathfinder.goals[0].range, 2, 'ore collection first uses a dig-enabled near goal')
   }
   // Slot movement without a playerCollect packet is not a pickup, in either update order.
   for (const destinationFirst of [true, false]) {

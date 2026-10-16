@@ -113,7 +113,7 @@ async function setupFarmFixture(root) {
   await write(root, 'src/agent/settings.js', 'export default {};')
   await write(root, 'src/agent/modes.js', await readFile(path.join(repo, 'src/agent/modes.js')))
   await write(root, 'src/agent/conversation.js', 'export default {};')
-  await write(root, 'src/utils/mcdata.js', 'export function mustCollectManually(name) { return name === "wheat"; }')
+  await write(root, 'src/utils/mcdata.js', 'export function mustCollectManually(name) { return name === "wheat"; } export function getBlockId() { return 1; }')
   await write(root, 'src/utils/math.js', 'export function cosineSimilarity() { return 0; }')
   await write(root, 'src/utils/text.js', 'export function wordOverlapScore() { return 0; }')
   await write(root, 'src/agent/library/world.js', `
@@ -143,7 +143,13 @@ export default function Vec3(x, y, z) {
 }
 `)
   await write(root, 'node_modules/mineflayer-pathfinder/package.json', '{"type":"module","exports":"./index.js"}')
-  await write(root, 'node_modules/mineflayer-pathfinder/index.js', 'export default { goals: { GoalNear: class {} }, Movements: class { safeToBreak() { return true } } };')
+  await write(root, 'node_modules/mineflayer-pathfinder/index.js', `export default {
+    goals: { GoalNear: class { constructor(x,y,z,range) { Object.assign(this,{x,y,z,range}) }
+      heuristic(p) { return Math.max(Math.abs(p.x-this.x),Math.abs(p.y-this.y),Math.abs(p.z-this.z))-this.range }
+    } }, Movements: class { constructor() { this.blocksCantBreak=new Set() }
+      safeToBreak() { return true }
+    }
+  };`)
 }
 
 async function setupNavigationFixture(root) {
