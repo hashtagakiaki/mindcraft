@@ -2321,16 +2321,16 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     const cancellation = owner?.cancellation;
     const previousActionPhase = cancellation?.phase ?? 'running';
     const recoveryDeadline = Number.isFinite(movementOverride?.navigationRecoveryDeadline) ? movementOverride.navigationRecoveryDeadline : null;
-    const configuredNavigationStallTimeoutMs = Number.isFinite(settings.navigation_stall_timeout_ms) && settings.navigation_stall_timeout_ms > 0
+    const navigationStallTimeoutMs = Number.isFinite(settings.navigation_stall_timeout_ms) && settings.navigation_stall_timeout_ms > 0
         ? settings.navigation_stall_timeout_ms : DEFAULT_NAVIGATION_STALL_TIMEOUT_MS;
-    const navigationStallTimeoutMs = recoveryDeadline ? Math.min(configuredNavigationStallTimeoutMs,
-        Math.max(1, recoveryDeadline - Date.now())) : configuredNavigationStallTimeoutMs;
+    const boundedNavigationStallTimeoutMs = recoveryDeadline ? Math.min(navigationStallTimeoutMs,
+        Math.max(1, recoveryDeadline - Date.now())) : navigationStallTimeoutMs;
     const configuredNavigationCheckIntervalMs = Number.isFinite(settings.navigation_check_interval_ms) && settings.navigation_check_interval_ms > 0
         ? settings.navigation_check_interval_ms : DEFAULT_NAVIGATION_CHECK_INTERVAL_MS;
     const navigationCheckIntervalMs = recoveryDeadline ? Math.min(configuredNavigationCheckIntervalMs, 250) : configuredNavigationCheckIntervalMs;
     const navigationWait = beginOwnedWait({
         phase: 'navigation', reason: 'goal-or-new-route-segment',
-        startedAt: new Date().toISOString(), timeoutMs: navigationStallTimeoutMs,
+        startedAt: new Date().toISOString(), timeoutMs: boundedNavigationStallTimeoutMs,
         progressCount: 0,
     });
     let timeoutHandle;
