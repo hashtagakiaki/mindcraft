@@ -2656,6 +2656,16 @@ function reachPositionStartHazard(bot) {
     return null;
 }
 
+function reachPositionFullTopSupport(block) {
+    return !!block?.shapes?.some(shape => shape[0] <= 0.01 && shape[2] <= 0.01
+        && shape[3] >= 0.99 && shape[4] >= 0.99 && shape[5] >= 0.99);
+}
+
+function reachPositionFullCollisionBlock(block) {
+    return !!block?.shapes?.some(shape => shape[0] <= 0.01 && shape[1] <= 0.01 && shape[2] <= 0.01
+        && shape[3] >= 0.99 && shape[4] >= 0.99 && shape[5] >= 0.99);
+}
+
 function reachPositionWaterExitRegion(bot) {
     const start = bot.entity.position.floored();
     const startBlock = bot.blockAt(start);
@@ -2681,7 +2691,7 @@ function reachPositionWaterExitRegion(bot) {
             support = bot.blockAt(current.offset(0, -depth, 0));
         }
         if (!support || REACH_POSITION_WATER_NAMES.has(support.name) || REACH_POSITION_EXIT_HAZARDS.has(support.name)
-            || !support.shapes?.some(shape => shape[4] >= 0.99)) continue;
+            || !reachPositionFullTopSupport(support)) continue;
         region.set(key, { position: current, depth });
         for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) queue.push(current.offset(dx, 0, dz));
     }
@@ -2689,12 +2699,55 @@ function reachPositionWaterExitRegion(bot) {
     return { region, reason: null };
 }
 
-function reachPositionWaterExitStage(bot, region) {
+function reachPositionWaterExitPlacementAnchor(bot, target) {
+    const faces = [
+        { offset: new Vec3(0, -1, 0), face: new Vec3(0, 1, 0), faceId: 1 },
+        { offset: new Vec3(0, 0, -1), face: new Vec3(0, 0, 1), faceId: 3 },
+        { offset: new Vec3(0, 0, 1), face: new Vec3(0, 0, -1), faceId: 2 },
+        { offset: new Vec3(-1, 0, 0), face: new Vec3(1, 0, 0), faceId: 5 },
+        { offset: new Vec3(1, 0, 0), face: new Vec3(-1, 0, 0), faceId: 4 },
+    ];
+    for (const candidate of faces) {
+        const anchorPosition = target.plus(candidate.offset);
+        const anchor = bot.blockAt(anchorPosition);
+        if (!reachPositionFullCollisionBlock(anchor) || REACH_POSITION_EXIT_HAZARDS.has(anchor.name)
+            || REACH_POSITION_WATER_NAMES.has(anchor.name)) continue;
+        const interaction = resolveBlockInteraction(bot, anchor, { reach: 4.5 });
+        if (interaction.status !== 'ready' || interaction.face !== candidate.faceId) continue;
+        return { anchor: { x: anchorPosition.x, y: anchorPosition.y, z: anchorPosition.z },
+            face: { x: candidate.face.x, y: candidate.face.y, z: candidate.face.z }, interactionFace: candidate.faceId };
+    }
+    return null;
+}
+
+function reachPositionWaterExitStage(bot, region, scaffoldBlocks = []) {
     const start = bot.entity.position.floored();
     const height = Number.isFinite(bot.entity.height) && bot.entity.height > 0 ? bot.entity.height : 1.8;
     const candidates = [];
+    const scaffoldCandidates = [];
     const adjacentWater = new Set();
     for (const { position } of region.values()) {
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            adjacentWater.add(`${position.x + dx},${position.y},${position.z + dz}`);
+        }
+    }
+    const supportedWaterStages = [];
+    if (scaffoldBlocks.length) {
+        for (const key of adjacentWater) {
+            const [x, y, z] = key.split(',').map(Number);
+            const position = new Vec3(x, y, z);
+            const water = bot.blockAt(position);
+            if (!water || !REACH_POSITION_WATER_NAMES.has(water.name) || region.has(reachPositionBlockKey(position))) continue;
+            const head = bot.blockAt(position.offset(0, 1, 0));
+            const target = bot.blockAt(position.offset(0, -1, 0));
+            if (!head || head.name !== 'air' || head.type !== 0 || !target || target.name !== 'air' || target.type !== 0) continue;
+            const targetPosition = position.offset(0, -1, 0);
+            const anchor = reachPositionWaterExitPlacementAnchor(bot, targetPosition);
+            if (!anchor) continue;
+            supportedWaterStages.push({ position: { x, y, z }, target: { x: x, y: y - 1, z }, ...anchor });
+        }
+    }
+    for (const { position } of supportedWaterStages) {
         for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
             adjacentWater.add(`${position.x + dx},${position.y},${position.z + dz}`);
         }
@@ -2709,27 +2762,115 @@ function reachPositionWaterExitStage(bot, region) {
         if (!feet || !head || !support || REACH_POSITION_WATER_NAMES.has(feet.name)
             || REACH_POSITION_WATER_NAMES.has(head.name) || feet.shapes?.length || head.shapes?.length) continue;
         if (REACH_POSITION_EXIT_HAZARDS.has(feet.name) || REACH_POSITION_EXIT_HAZARDS.has(head.name)
-            || REACH_POSITION_EXIT_HAZARDS.has(support.name) || !support.shapes?.some(shape => shape[4] >= 0.99)) continue;
-        candidates.push({ x, y, z, distance });
+            || REACH_POSITION_EXIT_HAZARDS.has(support.name)) continue;
+        if (reachPositionFullTopSupport(support)) {
+            candidates.push({ x, y, z, distance, requiresScaffold: false });
+        }
+        if (scaffoldBlocks.length && support.name === 'air' && support.type === 0) {
+            const target = new Vec3(x, y - 1, z);
+            const anchor = reachPositionWaterExitPlacementAnchor(bot, target);
+            if (anchor) scaffoldCandidates.push({ x, y, z, distance, requiresScaffold: true,
+                target: { x, y: y - 1, z }, ...anchor });
+        }
+        for (const waterStage of supportedWaterStages) {
+            if (Math.abs(waterStage.position.x - x) + Math.abs(waterStage.position.z - z) !== 1
+                || waterStage.position.y !== y) continue;
+            scaffoldCandidates.push({ x, y, z, distance, requiresScaffold: true, ...waterStage,
+                waterPosition: waterStage.position });
+        }
     }
     candidates.sort((a, b) => b.y - a.y || a.distance - b.distance || a.x - b.x || a.z - b.z);
-    if (!candidates.length) return null;
-    return {
-        candidates,
-        goal: new pf.goals.GoalCompositeAny(candidates.map(candidate => new pf.goals.GoalBlock(candidate.x, candidate.y, candidate.z))),
-    };
+    scaffoldCandidates.sort((a, b) => b.y - a.y || a.distance - b.distance || a.x - b.x || a.z - b.z);
+    if (!candidates.length && !scaffoldCandidates.length) return null;
+    const stage = { candidates, scaffoldCandidates, supportedWaterStages, mode: candidates.length ? 'natural' : 'scaffold', failedScaffoldCells: new Set(), scaffoldPlaced: false };
+    stage.goal = reachPositionWaterExitGoal(stage);
+    return stage;
 }
 
-function reachPositionWaterExitMoves(bot, options, region) {
+function reachPositionWaterExitGoal(stage) {
+    const candidates = stage.mode === 'natural' ? stage.candidates
+        : stage.mode === 'placed' ? [stage.placedCandidate]
+            : stage.scaffoldCandidates.filter(candidate => !stage.failedScaffoldCells.has(reachPositionBlockKey(candidate.target)));
+    if (!candidates.length) return null;
+    return new pf.goals.GoalCompositeAny(candidates.map(candidate => new pf.goals.GoalBlock(candidate.x, candidate.y, candidate.z)));
+}
+
+function reachPositionWaterExitCandidate(stage, targetPosition) {
+    const key = reachPositionBlockKey(targetPosition);
+    return stage.scaffoldCandidates.filter(candidate => reachPositionBlockKey(candidate.target) === key
+        && !stage.failedScaffoldCells.has(key)).sort((a, b) => Number(!!b.waterPosition) - Number(!!a.waterPosition))[0];
+}
+
+function reachPositionWaterExitSafeLanding(bot, position) {
+    const feet = bot.blockAt(position);
+    const head = bot.blockAt(position.offset(0, 1, 0));
+    const support = bot.blockAt(position.offset(0, -1, 0));
+    return bot.entity.onGround === true && !!feet && !!head && !!support && feet.type === 0 && head.type === 0
+        && !REACH_POSITION_WATER_NAMES.has(feet.name) && !REACH_POSITION_WATER_NAMES.has(head.name)
+        && !REACH_POSITION_EXIT_HAZARDS.has(feet.name) && !REACH_POSITION_EXIT_HAZARDS.has(head.name)
+        && !REACH_POSITION_EXIT_HAZARDS.has(support.name) && reachPositionFullTopSupport(support);
+}
+
+function reachPositionWaterExitPlacement(pathResult, stage) {
+    const placements = [];
+    for (let index = 0; index < (pathResult.path ?? []).length; index++) {
+        const node = pathResult.path[index];
+        for (const placement of node.toPlace ?? []) {
+            if (placement.useOne) continue;
+            placements.push({ index, placement });
+        }
+    }
+    if (placements.length > 1 || placements.length === 1 && !reachPositionWaterExitCandidate(stage,
+        new Vec3(placements[0].placement.x + placements[0].placement.dx,
+            placements[0].placement.y + placements[0].placement.dy,
+            placements[0].placement.z + placements[0].placement.dz))) return { invalid: true, placement: null };
+    return { invalid: false, placement: placements[0] ?? null };
+}
+
+function reachPositionWaterExitPathSafe(bot, pathResult, stage) {
+    const planned = reachPositionWaterExitPlacement(pathResult, stage);
+    if (planned.invalid) return false;
+    const stagedCandidate = planned.placement
+        ? reachPositionWaterExitCandidate(stage, new Vec3(
+            planned.placement.placement.x + planned.placement.placement.dx,
+            planned.placement.placement.y + planned.placement.placement.dy,
+            planned.placement.placement.z + planned.placement.placement.dz))
+        : null;
+    if (planned.placement && !stagedCandidate) return false;
+    for (const node of pathResult.path ?? []) {
+        const position = new Vec3(node.x, node.y, node.z);
+        const blockPosition = position.floored();
+        if (stage.region.has(reachPositionBlockKey(blockPosition))) continue;
+        const feet = bot.blockAt(blockPosition);
+        const head = bot.blockAt(blockPosition.offset(0, 1, 0));
+        const support = bot.blockAt(blockPosition.offset(0, -1, 0));
+        const isStagedWater = stagedCandidate?.waterPosition
+            && reachPositionBlockKey(blockPosition) === reachPositionBlockKey(stagedCandidate.waterPosition)
+            && reachPositionBlockKey(support?.position ?? {}) === reachPositionBlockKey(stagedCandidate.target)
+            && head?.type === 0 && head.name === 'air';
+        if (isStagedWater) continue;
+        if (!feet || !head || !support || feet.type !== 0 || head.type !== 0
+            || REACH_POSITION_WATER_NAMES.has(feet.name) || REACH_POSITION_WATER_NAMES.has(head.name)
+            || REACH_POSITION_EXIT_HAZARDS.has(feet.name) || REACH_POSITION_EXIT_HAZARDS.has(head.name)
+            || REACH_POSITION_EXIT_HAZARDS.has(support.name)) return false;
+        const isStagedLanding = stagedCandidate && node.x === stagedCandidate.x && node.y === stagedCandidate.y && node.z === stagedCandidate.z
+            && reachPositionBlockKey(support.position) === reachPositionBlockKey(stagedCandidate.target);
+        if (!reachPositionFullTopSupport(support) && !isStagedLanding) return false;
+    }
+    return true;
+}
+
+function reachPositionWaterExitMoves(bot, options, region, supportedWaterStages = []) {
     const movements = reachPositionMoves(bot, { ...options, safeWater: true });
     const getBlock = movements.getBlock.bind(movements);
+    const supportedWaterKeys = new Set(supportedWaterStages.map(stage => reachPositionBlockKey(stage.position)));
     movements.getBlock = (position, dx, dy, dz) => {
         const block = getBlock(position, dx, dy, dz);
         if (!REACH_POSITION_WATER_NAMES.has(block.name)) return block;
         const from = position.floored();
         const to = block.position;
         const fromAllowed = region.has(`${from.x},${from.y},${from.z}`);
-        const toAllowed = region.has(`${to.x},${to.y},${to.z}`);
+        const toAllowed = region.has(`${to.x},${to.y},${to.z}`) || supportedWaterKeys.has(`${to.x},${to.y},${to.z}`);
         if (!fromAllowed || !toAllowed || from.y !== to.y) {
             block.safe = false;
             block.physical = false;
@@ -2826,6 +2967,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
     const ownedMovements = new WeakSet();
     const scaffoldRecords = [];
     const unconfirmedScaffolds = [];
+    const failedScaffoldCells = new Set();
     const pendingNavigationEdits = new Set();
     const ownNavigationEdit = (promise, releaseGate) => {
         pendingNavigationEdits.add(promise);
@@ -2892,6 +3034,34 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
         const targetPosition = reference.position.plus(face).floored();
         let placement;
         try {
+            const observedTarget = bot.blockAt(targetPosition);
+            if (!observedTarget || REACH_POSITION_WATER_NAMES.has(observedTarget.name)
+                || ['lava', 'flowing_lava'].includes(observedTarget.name)) {
+                failedScaffoldCells.add(reachPositionBlockKey(targetPosition));
+                if (waterExitStage) waterExitStage.failedScaffoldCells.add(reachPositionBlockKey(targetPosition));
+                const error = new Error('Navigation scaffold target is unknown or occupied by liquid.');
+                error.navigationPlacementAttempted = false;
+                throw error;
+            }
+            if (waterExitStage) {
+                const candidate = reachPositionWaterExitCandidate(waterExitStage, targetPosition);
+                const supportPosition = reference.position.floored();
+                const currentTarget = bot.blockAt(targetPosition);
+                const support = bot.blockAt(supportPosition);
+                const interaction = resolveBlockInteraction(bot, support, { reach: 4.5 });
+                if (waterExitStage.scaffoldPlaced || !candidate
+                    || currentTarget?.type !== 0 || currentTarget.name !== 'air'
+                    || REACH_POSITION_WATER_NAMES.has(currentTarget?.name)
+                    || reachPositionBlockKey(supportPosition) !== reachPositionBlockKey(candidate.anchor)
+                    || face.x !== candidate.face.x || face.y !== candidate.face.y || face.z !== candidate.face.z
+                    || !reachPositionFullCollisionBlock(support) || REACH_POSITION_EXIT_HAZARDS.has(support?.name)
+                    || interaction.status !== 'ready' || interaction.face !== candidate.interactionFace) {
+                    waterExitStage.failedScaffoldCells.add(reachPositionBlockKey(targetPosition));
+                    const error = new Error('Water-exit staging block failed its loaded air, full support, or reachable top-face check.');
+                    error.navigationPlacementAttempted = false;
+                    throw error;
+                }
+            }
             placement = await placeAndConfirmNavigationScaffold(bot, targetPosition, blockName,
                 () => {
                     try {
@@ -2989,6 +3159,12 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
         for (let segment = 0; segment < REACH_POSITION_MAX_SEGMENTS; segment++) {
             active();
             if (waterExitStage && !waterExitStage.region.has(reachPositionBlockKey(bot.entity.position.floored()))) {
+                if (!reachPositionWaterExitSafeLanding(bot, bot.entity.position.floored())) {
+                    status = 'blocked';
+                    reason = 'Water departure stopped outside its admitted water cells without a grounded dry landing on full support.';
+                    log(bot, `[reachPosition-departure] ${JSON.stringify({ policy: 'shallow-water-exit', reason: 'unsafe_or_airborne_landing', position: bot.entity.position.floored() })}`);
+                    break;
+                }
                 waterExitStage = null;
                 clearTimeout(waterExitTimer);
                 waterExitTimer = null;
@@ -3006,18 +3182,134 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
             }
             const start = bot.entity.position.floored();
             let pathGoal = waterExitStage?.goal ?? goal;
+            if (waterExitStage && waterExitStage.mode === 'scaffold' && !waterExitStage.scaffoldPlaced) {
+                const candidate = waterExitStage.scaffoldCandidates
+                    .filter(entry => !waterExitStage.failedScaffoldCells.has(reachPositionBlockKey(entry.target)))
+                    .sort((a, b) => Number(!!b.waterPosition) - Number(!!a.waterPosition)
+                        || a.distance - b.distance || a.x - b.x || a.z - b.z)[0];
+                if (!candidate || !canAttemptScaffolds || !availableScaffoldBlocks.length) {
+                    status = 'blocked';
+                    reason = 'No material-backed, reachable staging block remains for a safe dry landing.';
+                    break;
+                }
+                const targetPosition = new Vec3(candidate.target.x, candidate.target.y, candidate.target.z);
+                const anchor = bot.blockAt(new Vec3(candidate.anchor.x, candidate.anchor.y, candidate.anchor.z));
+                const targetBlock = bot.blockAt(targetPosition);
+                const landing = new Vec3(candidate.x, candidate.y, candidate.z);
+                const landingFeet = bot.blockAt(landing);
+                const landingHead = bot.blockAt(landing.offset(0, 1, 0));
+                const landingSupport = bot.blockAt(landing.offset(0, -1, 0));
+                const interaction = resolveBlockInteraction(bot, anchor, { reach: 4.5 });
+                const landingIsSafeAfterPlacement = !!landingFeet && !!landingHead && !!landingSupport
+                    && landingFeet.type === 0 && landingHead.type === 0
+                    && !REACH_POSITION_WATER_NAMES.has(landingFeet.name) && !REACH_POSITION_WATER_NAMES.has(landingHead.name)
+                    && !REACH_POSITION_EXIT_HAZARDS.has(landingFeet.name) && !REACH_POSITION_EXIT_HAZARDS.has(landingHead.name)
+                    && !REACH_POSITION_EXIT_HAZARDS.has(landingSupport.name)
+                    && (reachPositionFullTopSupport(landingSupport)
+                        || !candidate.waterPosition && reachPositionBlockKey(landingSupport.position) === reachPositionBlockKey(candidate.target));
+                const stagedWaterStillSafe = !candidate.waterPosition || (() => {
+                    const water = bot.blockAt(new Vec3(candidate.waterPosition.x, candidate.waterPosition.y, candidate.waterPosition.z));
+                    const head = bot.blockAt(new Vec3(candidate.waterPosition.x, candidate.waterPosition.y + 1, candidate.waterPosition.z));
+                    return !!water && REACH_POSITION_WATER_NAMES.has(water.name) && !!head
+                        && head.type === 0 && head.name === 'air'
+                        && reachPositionBlockKey(new Vec3(candidate.waterPosition.x, candidate.waterPosition.y - 1, candidate.waterPosition.z))
+                            === reachPositionBlockKey(candidate.target);
+                })();
+                if (!targetBlock || targetBlock.type !== 0 || targetBlock.name !== 'air'
+                    || !anchor || !reachPositionFullCollisionBlock(anchor)
+                    || REACH_POSITION_EXIT_HAZARDS.has(anchor.name) || REACH_POSITION_WATER_NAMES.has(anchor.name)
+                    || interaction.status !== 'ready' || interaction.face !== candidate.interactionFace
+                    || !landingIsSafeAfterPlacement || !stagedWaterStillSafe) {
+                    waterExitStage.failedScaffoldCells.add(reachPositionBlockKey(candidate.target));
+                    failedScaffoldCells.add(reachPositionBlockKey(candidate.target));
+                    waterExitStage.goal = reachPositionWaterExitGoal(waterExitStage);
+                    log(bot, `[reachPosition-departure] ${JSON.stringify({ policy: 'shallow-water-exit', staging: 'rejected-before-send', target: candidate.target })}`);
+                    if (!waterExitStage.goal) {
+                        status = 'blocked';
+                        reason = 'No loaded dry landing with a reachable full-face staging support remains.';
+                        break;
+                    }
+                    continue;
+                }
+                active();
+                const scaffoldBlock = availableScaffoldBlocks[0];
+                const scaffoldItem = bot.inventory.items().find(item => item.name === scaffoldBlock && item.count > 0);
+                if (!scaffoldItem) {
+                    waterExitStage.failedScaffoldCells.add(reachPositionBlockKey(candidate.target));
+                    failedScaffoldCells.add(reachPositionBlockKey(candidate.target));
+                    waterExitStage.goal = reachPositionWaterExitGoal(waterExitStage);
+                    if (!waterExitStage.goal) {
+                        status = 'blocked';
+                        reason = 'Scaffold material became unavailable before staging.';
+                        break;
+                    }
+                    continue;
+                }
+                await bot.equip(scaffoldItem);
+                active();
+                const freshAnchor = bot.blockAt(anchor.position);
+                if (!freshAnchor || !reachPositionFullCollisionBlock(freshAnchor)
+                    || resolveBlockInteraction(bot, freshAnchor, { reach: 4.5 }).face !== candidate.interactionFace) {
+                    waterExitStage.failedScaffoldCells.add(reachPositionBlockKey(candidate.target));
+                    failedScaffoldCells.add(reachPositionBlockKey(candidate.target));
+                    waterExitStage.goal = reachPositionWaterExitGoal(waterExitStage);
+                    if (!waterExitStage.goal) {
+                        status = 'blocked';
+                        reason = 'Staging support changed before the placement attempt.';
+                        break;
+                    }
+                    continue;
+                }
+                await bot.placeBlock(freshAnchor, new Vec3(candidate.face.x, candidate.face.y, candidate.face.z));
+                active();
+                if (!reachPositionFullTopSupport(bot.blockAt(targetPosition))) {
+                    status = 'blocked';
+                    reason = 'The server-confirmed staging block does not provide full support.';
+                    break;
+                }
+                waterExitStage.scaffoldPlaced = true;
+                waterExitStage.placedCandidate = candidate;
+                waterExitStage.mode = 'placed';
+                waterExitStage.goal = reachPositionWaterExitGoal(waterExitStage);
+                if (candidate.waterPosition) {
+                    const stagedWaterPosition = new Vec3(candidate.waterPosition.x, candidate.waterPosition.y, candidate.waterPosition.z);
+                    waterExitStage.region.set(reachPositionBlockKey(stagedWaterPosition), { position: stagedWaterPosition, depth: 1 });
+                }
+                movement = reachPositionWaterExitMoves(bot, {
+                    allowDig: false, allowScaffold: false, scaffoldBlocks: [],
+                }, waterExitStage.region);
+                ownedMovements.add(movement);
+                bot.pathfinder.setMovements(movement);
+                log(bot, `[reachPosition-departure] ${JSON.stringify({ policy: 'shallow-water-exit', staging: 'server-confirmed', target: candidate.target, block: scaffoldBlock, replanning: true })}`);
+                continue;
+            }
             const waterSearchOptions = waterExitStage ? {
+                timeout: REACH_POSITION_WATER_EXIT_SEARCH_TIMEOUT_MS,
+                tickTimeout: REACH_POSITION_WATER_EXIT_SEARCH_TICK_MS,
+                steps: REACH_POSITION_WATER_EXIT_SEARCH_STEPS,
+            } : initialHazard === 'shallow_water' ? {
                 timeout: REACH_POSITION_WATER_EXIT_SEARCH_TIMEOUT_MS,
                 tickTimeout: REACH_POSITION_WATER_EXIT_SEARCH_TICK_MS,
                 steps: REACH_POSITION_WATER_EXIT_SEARCH_STEPS,
             } : undefined;
             let pathResult = reachPositionPath(bot, movement, pathGoal, waterSearchOptions);
+            if (!waterExitStage && initialHazard === 'shallow_water' && pathResult.status === 'success') {
+                const liquidPlacement = pathResult.path.flatMap(node => node.toPlace ?? [])
+                    .find(placement => !placement.useOne && REACH_POSITION_WATER_NAMES.has(bot.blockAt(
+                        new Vec3(placement.x + placement.dx, placement.y + placement.dy, placement.z + placement.dz))?.name));
+                if (liquidPlacement) {
+                    log(bot, `[reachPosition-departure] ${JSON.stringify({ policy: 'ordinary', reason: 'liquid_scaffold_forbidden',
+                        target: { x: liquidPlacement.x + liquidPlacement.dx, y: liquidPlacement.y + liquidPlacement.dy, z: liquidPlacement.z + liquidPlacement.dz } })}`);
+                    pathResult = { status: 'noPath', path: [] };
+                }
+            }
             let startedWaterExitThisSegment = false;
             if (!waterExitStage && initialHazard === 'shallow_water' && !waterExitTried && pathResult.status === 'noPath') {
                 waterExitTried = true;
                 const ordinarySearchStatus = pathResult.status;
                 const discovered = reachPositionWaterExitRegion(bot);
-                const stage = discovered.region && reachPositionWaterExitStage(bot, discovered.region);
+                const stage = discovered.region && reachPositionWaterExitStage(bot, discovered.region,
+                    canAttemptScaffolds ? availableScaffoldBlocks : []);
                 if (stage) {
                     waterExitStartedAt = Date.now();
                     waterExitStage = { ...stage, kind: 'shallow-water-exit', region: discovered.region, nodesUsed: 0 };
@@ -3047,10 +3339,15 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                     }
                     log(bot, `[reachPosition-departure] ${JSON.stringify({
                         policy: 'shallow-water-exit', start: { x: start.x, y: start.y, z: start.z },
-                        waterCells: discovered.region.size, candidateCount: stage.candidates.length,
+                        waterCells: discovered.region.size, candidateCount: stage.candidates.length + stage.scaffoldCandidates.length,
+                        naturalCandidateCount: stage.candidates.length, stagingCandidateCount: stage.scaffoldCandidates.length,
+                        naturalCandidates: stage.candidates.map(({ x, y, z }) => ({ x, y, z })),
+                        stagingCandidates: stage.scaffoldCandidates.map(candidate => ({ x: candidate.x, y: candidate.y, z: candidate.z, target: candidate.target, anchor: candidate.anchor, face: candidate.face })),
+                        stagingMode: stage.mode,
                         ordinarySearchStatus, searchStatus: pathResult.status, pathNodeCount: nodeCount,
                         stopReason: nodeCount > REACH_POSITION_WATER_EXIT_MAX_NODES ? 'departure_path_budget_exceeded' : null,
                     })}`);
+                    if (stage.mode === 'scaffold') continue;
                 } else {
                     log(bot, `[reachPosition-departure] ${JSON.stringify({
                         policy: 'none', start: { x: start.x, y: start.y, z: start.z },
@@ -3072,6 +3369,111 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                     break;
                 }
             }
+            if (waterExitStage && pathResult.status === 'success'
+                && !reachPositionWaterExitPathSafe(bot, pathResult, waterExitStage)) {
+                const unsafePath = pathResult.path.map(node => {
+                    const position = new Vec3(node.x, node.y, node.z);
+                    return { x: node.x, y: node.y, z: node.z,
+                        inWaterRegion: waterExitStage.region.has(reachPositionBlockKey(position)),
+                        feet: bot.blockAt(position)?.name ?? null,
+                        head: bot.blockAt(position.offset(0, 1, 0))?.name ?? null,
+                        support: bot.blockAt(position.offset(0, -1, 0))?.name ?? null,
+                        toPlace: node.toPlace ?? [] };
+                });
+                log(bot, `[reachPosition-departure] ${JSON.stringify({ policy: 'shallow-water-exit', reason: 'unsafe-intermediate-node', path: unsafePath })}`);
+                pathResult = { status: 'noPath', path: [] };
+            }
+            if (waterExitStage && pathResult.status === 'noPath' && waterExitStage.mode === 'natural'
+                && waterExitStage.scaffoldCandidates.length && canAttemptScaffolds) {
+                waterExitStage.mode = 'scaffold';
+                waterExitStage.goal = reachPositionWaterExitGoal(waterExitStage);
+                movement = reachPositionWaterExitMoves(bot, {
+                    allowDig: false, allowScaffold: false, scaffoldBlocks: [],
+                }, waterExitStage.region);
+                ownedMovements.add(movement);
+                bot.pathfinder.setMovements(movement);
+                log(bot, '[reachPosition-departure] {"policy":"shallow-water-exit","reason":"natural_surface_unreachable","staging":"one-confirmed-block"}');
+                continue;
+            }
+            if (waterExitStage && waterExitStage.mode === 'scaffold' && pathResult.status === 'success') {
+                const planned = reachPositionWaterExitPlacement(pathResult, waterExitStage);
+                if (planned.invalid) {
+                    status = 'blocked';
+                    reason = 'Water-exit staging path exceeded its one-block or approved-cell limit.';
+                    break;
+                }
+                if (planned.placement) {
+                    const { placement } = planned.placement;
+                    const targetPosition = new Vec3(placement.x + placement.dx, placement.y + placement.dy, placement.z + placement.dz).floored();
+                    const candidate = reachPositionWaterExitCandidate(waterExitStage, targetPosition);
+                    const anchor = candidate && bot.blockAt(new Vec3(candidate.anchor.x, candidate.anchor.y, candidate.anchor.z));
+                    const targetBlock = bot.blockAt(targetPosition);
+                    const interaction = resolveBlockInteraction(bot, anchor, { reach: 4.5 });
+                    if (!candidate || targetBlock?.type !== 0 || targetBlock.name !== 'air'
+                        || !anchor || !reachPositionFullCollisionBlock(anchor)
+                        || interaction.status !== 'ready' || interaction.face !== candidate.interactionFace) {
+                        if (candidate) waterExitStage.failedScaffoldCells.add(reachPositionBlockKey(candidate.target));
+                        waterExitStage.goal = reachPositionWaterExitGoal(waterExitStage);
+                        if (!waterExitStage.goal) {
+                            status = 'blocked';
+                            reason = 'No reachable, unloaded-safe, non-liquid staging cell remains.';
+                            break;
+                        }
+                        log(bot, `[reachPosition-departure] ${JSON.stringify({ policy: 'shallow-water-exit', staging: 'rejected-before-send', target: candidate?.target ?? null })}`);
+                        continue;
+                    }
+                    try {
+                        active();
+                        const scaffoldBlock = availableScaffoldBlocks[0];
+                        const scaffoldItem = bot.inventory.items().find(item => item.name === scaffoldBlock && item.count > 0);
+                        if (!scaffoldItem) {
+                            waterExitStage.failedScaffoldCells.add(reachPositionBlockKey(candidate.target));
+                            waterExitStage.goal = reachPositionWaterExitGoal(waterExitStage);
+                            continue;
+                        }
+                        await bot.equip(scaffoldItem);
+                        active();
+                        const freshAnchor = bot.blockAt(anchor.position);
+                        if (!freshAnchor || !reachPositionFullCollisionBlock(freshAnchor)
+                            || resolveBlockInteraction(bot, freshAnchor, { reach: 4.5 }).face !== candidate.interactionFace) {
+                            waterExitStage.failedScaffoldCells.add(reachPositionBlockKey(candidate.target));
+                            waterExitStage.goal = reachPositionWaterExitGoal(waterExitStage);
+                            continue;
+                        }
+                        await bot.placeBlock(freshAnchor, new Vec3(candidate.face.x, candidate.face.y, candidate.face.z));
+                        active();
+                        waterExitStage.scaffoldPlaced = true;
+                        waterExitStage.placedCandidate = candidate;
+                        waterExitStage.mode = 'placed';
+                        if (candidate.waterPosition) {
+                            const stagedWaterPosition = new Vec3(candidate.waterPosition.x, candidate.waterPosition.y, candidate.waterPosition.z);
+                            const stagedWater = bot.blockAt(stagedWaterPosition);
+                            if (!stagedWater || !REACH_POSITION_WATER_NAMES.has(stagedWater.name)
+                                || !reachPositionFullTopSupport(bot.blockAt(stagedWaterPosition.offset(0, -1, 0)))) {
+                                status = 'blocked';
+                                reason = 'The confirmed staging block did not create a supported shallow-water transition.';
+                                break;
+                            }
+                            waterExitStage.region.set(reachPositionBlockKey(stagedWaterPosition), { position: stagedWaterPosition, depth: 1 });
+                        }
+                        waterExitStage.goal = reachPositionWaterExitGoal(waterExitStage);
+                        movement = reachPositionWaterExitMoves(bot, {
+                            allowDig: false, allowScaffold: false, scaffoldBlocks: [],
+                        }, waterExitStage.region);
+                        ownedMovements.add(movement);
+                        bot.pathfinder.setMovements(movement);
+                        log(bot, `[reachPosition-departure] ${JSON.stringify({ policy: 'shallow-water-exit', staging: 'server-confirmed', target: candidate.target, block: scaffoldBlock, replanning: true })}`);
+                        continue;
+                    } catch (error) {
+                        if (error.navigationPlacementAttempted === false) {
+                            waterExitStage.failedScaffoldCells.add(reachPositionBlockKey(candidate.target));
+                            waterExitStage.goal = reachPositionWaterExitGoal(waterExitStage);
+                            if (waterExitStage.goal) continue;
+                        }
+                        throw error;
+                    }
+                }
+            }
             if (pathResult.status === 'unavailable') { status = 'blocked'; reason = 'Bounded path search is unavailable.'; break; }
             const path = Array.isArray(pathResult.path) ? pathResult.path : [];
             const endpoint = path.at(-1);
@@ -3084,7 +3486,29 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                 departureRemainingNodes: waterExitStage ? Math.max(0, REACH_POSITION_WATER_EXIT_MAX_NODES - waterExitStage.nodesUsed) : null,
                 startHazard: segment === 0 ? initialHazard : null,
             };
+            if (waterExitStage) searchDiagnostic.stagingPlacements = pathResult.path.flatMap(node => (node.toPlace ?? [])
+                .filter(placement => !placement.useOne).map(placement => ({ x: placement.x, y: placement.y, z: placement.z, dx: placement.dx, dy: placement.dy, dz: placement.dz })));
             if (!endpoint || endpoint.x === start.x && endpoint.y === start.y && endpoint.z === start.z) {
+                const currentFeet = bot.entity.position.floored();
+                if (waterExitStage && !waterExitStage.region.has(reachPositionBlockKey(currentFeet))) {
+                    if (!reachPositionWaterExitSafeLanding(bot, currentFeet)) {
+                        status = 'blocked';
+                        reason = 'Water departure stopped outside its admitted water cells without a grounded dry landing on full support.';
+                        log(bot, `[reachPosition-departure] ${JSON.stringify({ policy: 'shallow-water-exit', reason: 'unsafe_or_airborne_landing', position: currentFeet })}`);
+                        break;
+                    }
+                    waterExitStage = null;
+                    clearTimeout(waterExitTimer);
+                    waterExitTimer = null;
+                    movement = ordinaryMovement;
+                    bot.pathfinder.setMovements(ordinaryMovement);
+                    log(bot, '[reachPosition-departure] {"policy":"ordinary","reason":"safe_surface_reached"}');
+                }
+                if (!waterExitStage && finalDistance() <= tolerance) {
+                    status = 'reached';
+                    reason = 'Reached the requested feet position after safe water departure.';
+                    break;
+                }
                 const unknownNeighbor = reachPositionHasUnknownNeighbor(bot, bot.entity.position);
                 searchDiagnostic.unknownNeighbor = unknownNeighbor;
                 if (unknownNeighbor) {
@@ -3184,6 +3608,12 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
         }
     }
     const finalPosition = snapshotPosition();
+    if (status === 'blocked' && initialHazard === 'shallow_water' && finalDistance() <= tolerance
+        && reachPositionWaterExitSafeLanding(bot, bot.entity.position.floored())
+        && !cancelled() && !budgetExpired && !unconfirmedScaffolds.length && !cleanupRequired.length) {
+        status = 'reached';
+        reason = 'Reached the requested feet position after a grounded, dry shallow-water departure.';
+    }
     if (status === 'reached' && cleanupRequired.length && requireScaffoldCleanup) {
         status = 'blocked';
         reason = `Reached the target, but ${cleanupRequired.length} owned scaffold(s) could not be removed.`;

@@ -59,11 +59,11 @@ export function mustCollectManually() { return false; }
 
 function makeBot({ gap = [], wall = [], hazards = [], unknown = [], solidBlocks = [], platform = false, corridor = false,
   loadedMaxX = 16, floorY = 63, startY = floorY + 1, rejectScaffoldRemoval = false, navigationDelay = 0,
-  airborneArrival = false } = {}) {
+  airborneArrival = false, scaffoldInventory = { dirt: 16, cobblestone: 16 } } = {}) {
   const bot = new EventEmitter()
   const world = new EventEmitter()
   const states = new Map()
-  const inventory = { dirt: 16, cobblestone: 16 }
+  const inventory = { ...scaffoldInventory }
   const edits = []
   let loadedThroughX = loadedMaxX
   let placementMode = 'accept'
@@ -964,6 +964,93 @@ async function main() {
     assert.ok(ordinaryRouteLogs.some(entry => entry.path?.some(node => node.x >= 3)), 'ordinary navigation resumes toward the requested destination')
     assert.equal(ordinaryRouteLogs.some(entry => entry.path?.some(node => node.x <= 1 && node.y === 63)), false,
       'ordinary routing does not re-enter the departed water')
+
+    const stagingWalls = [
+      { x: -1, y: 64, z: 0 }, { x: 0, y: 64, z: -1 }, { x: 0, y: 64, z: 1 },
+      { x: 1, y: 64, z: -1 }, { x: 1, y: 64, z: 1 },
+    ]
+    const oneBlockWaterExit = makeBot({ floorY: 62, startY: 64, wall: stagingWalls, hazards: [
+      { x: 0, y: 64, z: 0, name: 'water' }, { x: 0, y: 63, z: 0, name: 'water' },
+      { x: 1, y: 64, z: 0, name: 'water' }, { x: 1, y: 63, z: 0, name: 'water' },
+    ] })
+    oneBlockWaterExit.testState.placementDelay = 50
+    const oneBlockResult = await reachPosition(oneBlockWaterExit, {
+      position: { x: 4.5, y: 63, z: 0.5 }, tolerance: 0.75, allowDig: false, allowScaffold: true,
+      scaffoldBlocks: ['dirt'],
+    })
+    assert.equal(oneBlockResult.status, 'reached', JSON.stringify({ result: oneBlockResult, output: oneBlockWaterExit.output, paths: oneBlockWaterExit.testState.paths }))
+    assert.equal(oneBlockResult.edits.filter(edit => edit.kind === 'scaffold_placed').length, 1,
+      'water departure uses one confirmed staging block')
+    assert.equal(oneBlockWaterExit.testState.placementAttempts, 1, 'the staging position is sent once')
+    assert.equal(oneBlockWaterExit.testState.pathAdvancedWhilePlacementPending, false, 'movement waits for staging confirmation')
+    assert.ok(oneBlockResult.edits.some(edit => edit.kind === 'scaffold_placed' && edit.position.x === 2 && edit.position.y === 63), JSON.stringify({ oneBlockResult, output: oneBlockWaterExit.output, paths: oneBlockWaterExit.testState.paths }))
+    assert.ok(oneBlockResult.edits.some(edit => edit.kind === 'scaffold_removed' && edit.position.x === 2 && edit.position.y === 63), JSON.stringify(oneBlockResult))
+    assert.equal(oneBlockWaterExit.testState.edits.filter(edit => edit.kind === 'server_place').length, 1)
+    assert.equal(oneBlockWaterExit.testState.edits.filter(edit => edit.kind === 'server_dig').length, 1)
+    assert.match(oneBlockWaterExit.output, /"staging":"server-confirmed".*"replanning":true/)
+    assert.match(oneBlockWaterExit.output, /"reason":"safe_surface_reached"/)
+
+    const noMaterialWaterExit = makeBot({ floorY: 62, startY: 64, wall: stagingWalls, scaffoldInventory: {}, hazards: [
+      { x: 0, y: 64, z: 0, name: 'water' }, { x: 0, y: 63, z: 0, name: 'water' },
+      { x: 1, y: 64, z: 0, name: 'water' }, { x: 1, y: 63, z: 0, name: 'water' },
+    ] })
+    const noMaterialExitResult = await reachPosition(noMaterialWaterExit, {
+      position: { x: 4.5, y: 63, z: 0.5 }, tolerance: 0.75, allowDig: false, allowScaffold: true,
+      scaffoldBlocks: ['dirt'],
+    })
+    assert.notEqual(noMaterialExitResult.status, 'reached', JSON.stringify(noMaterialExitResult))
+    assert.equal(noMaterialWaterExit.testState.placementAttempts, 0, 'missing material prevents a staging placement')
+    assert.equal(noMaterialWaterExit.testState.edits.length, 0)
+
+    const rejectedWaterStaging = makeBot({ floorY: 62, startY: 64, wall: stagingWalls, hazards: [
+      { x: 0, y: 64, z: 0, name: 'water' }, { x: 0, y: 63, z: 0, name: 'water' },
+      { x: 1, y: 64, z: 0, name: 'water' }, { x: 1, y: 63, z: 0, name: 'water' },
+    ] })
+    rejectedWaterStaging.testState.placementMode = 'reject'
+    const rejectedStagingResult = await reachPosition(rejectedWaterStaging, {
+      position: { x: 4.5, y: 63, z: 0.5 }, tolerance: 0.75, allowDig: false, allowScaffold: true,
+      scaffoldBlocks: ['dirt'],
+    })
+    assert.notEqual(rejectedStagingResult.status, 'reached', JSON.stringify(rejectedStagingResult))
+    assert.equal(rejectedWaterStaging.testState.placementAttempts, 1, 'an unconfirmed staging placement is never retried')
+    assert.equal(rejectedWaterStaging.testState.edits.filter(edit => edit.kind === 'server_place').length, 0)
+
+    const unsafeWaterStaging = makeBot({ floorY: 62, startY: 64, wall: stagingWalls,
+      solidBlocks: [{ x: 2, y: 62, z: 0, name: 'magma_block' }], hazards: [
+        { x: 0, y: 64, z: 0, name: 'water' }, { x: 0, y: 63, z: 0, name: 'water' },
+        { x: 1, y: 64, z: 0, name: 'water' }, { x: 1, y: 63, z: 0, name: 'water' },
+      ] })
+    const unsafeWaterStagingResult = await reachPosition(unsafeWaterStaging, {
+      position: { x: 4.5, y: 63, z: 0.5 }, tolerance: 0.75, allowDig: false, allowScaffold: true,
+      scaffoldBlocks: ['dirt'],
+    })
+    assert.notEqual(unsafeWaterStagingResult.status, 'reached', JSON.stringify(unsafeWaterStagingResult))
+    assert.equal(unsafeWaterStaging.testState.placementAttempts, 0, 'hazardous anchor faces are never used')
+    assert.equal(unsafeWaterStaging.testState.edits.length, 0)
+
+    const cancelledWaterStaging = makeBot({ floorY: 62, startY: 64, wall: stagingWalls, navigationDelay: 200,
+      hazards: [
+        { x: 0, y: 64, z: 0, name: 'water' }, { x: 0, y: 63, z: 0, name: 'water' },
+        { x: 1, y: 64, z: 0, name: 'water' }, { x: 1, y: 63, z: 0, name: 'water' },
+      ] })
+    const pendingStagedExit = reachPosition(cancelledWaterStaging, {
+      position: { x: 4.5, y: 63, z: 0.5 }, tolerance: 0.75, allowDig: false, allowScaffold: true,
+      scaffoldBlocks: ['dirt'],
+    })
+    const stagedPlacementDeadline = Date.now() + 3000
+    while (!cancelledWaterStaging.testState.edits.some(edit => edit.kind === 'server_place') && Date.now() < stagedPlacementDeadline) await delay(10)
+    assert.equal(cancelledWaterStaging.testState.edits.filter(edit => edit.kind === 'server_place').length, 1,
+      'staging placement is server-confirmed before exercising cancellation')
+    cancelledWaterStaging.interrupt_code = true
+    const cancelledStagedResult = await pendingStagedExit
+    assert.equal(cancelledStagedResult.status, 'cancelled', JSON.stringify(cancelledStagedResult))
+    assert.equal(cancelledWaterStaging.testState.edits.filter(edit => edit.kind === 'server_place').length, 1,
+      'cancellation preserves exactly the confirmed owned placement')
+    assert.equal(cancelledStagedResult.edits.filter(edit => edit.kind === 'scaffold_removed').length, 0,
+      'cancellation does not start an unsafe cleanup route')
+    assert.ok(cancelledStagedResult.cleanupRequired.some(edit => edit.x === 2 && edit.y === 63),
+      JSON.stringify(cancelledStagedResult))
+    assert.equal(cancelledWaterStaging.pathfinder.movements.original, true, 'cancellation restores movement policy')
 
     const cancelledWaterExit = makeBot({ floorY: 61, startY: 63, corridor: true, navigationDelay: 100,
       hazards: [
