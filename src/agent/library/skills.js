@@ -37,6 +37,14 @@ const REACH_POSITION_SEARCH_STEPS = 12;
 const REACH_POSITION_CHUNK_WAIT_MS = 5_000;
 const REACH_POSITION_NO_PROGRESS_LIMIT = 3;
 const REACH_POSITION_MAX_SAFE_FEET_DROP = 3;
+const REACH_POSITION_WATER_EXIT_RADIUS = 8;
+const REACH_POSITION_WATER_EXIT_MAX_DEPTH = 4;
+const REACH_POSITION_WATER_EXIT_MAX_NODES = 16;
+const REACH_POSITION_WATER_EXIT_MAX_DURATION_MS = 10_000;
+const REACH_POSITION_WATER_EXIT_SEARCH_TIMEOUT_MS = 250;
+const REACH_POSITION_WATER_EXIT_SEARCH_TICK_MS = 30;
+const REACH_POSITION_WATER_EXIT_SEARCH_STEPS = 4;
+const REACH_POSITION_CONTACT_EXIT_MIN_HEALTH = 4;
 const reachPositionMovementOwners = new WeakMap();
 const SURFACE_SEARCH_RADIUS = 16;
 const SURFACE_ARRIVAL_Y_TOLERANCE = 0.25;
@@ -2514,7 +2522,7 @@ function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safe
     const getLandingBlock = movements.getLandingBlock.bind(movements);
     movements.getLandingBlock = (node, direction) => {
         const landing = getLandingBlock(node, direction);
-        if (!landing || landing.liquid) return null;
+        if (!landing?.position || landing.liquid) return null;
         const supportPosition = landing.position.offset(0, -1, 0);
         const support = bot.blockAt(supportPosition);
         if (!support || support.liquid || avoidNameSet.has(support.name)) return null;
@@ -2605,20 +2613,133 @@ async function waitForReachPositionChunk(bot, operation, timeoutMs) {
     }
 }
 
-function reachPositionPath(bot, movements, goal) {
+function reachPositionPath(bot, movements, goal, {
+    timeout = REACH_POSITION_SEARCH_TIMEOUT_MS,
+    tickTimeout = REACH_POSITION_SEARCH_TICK_MS,
+    steps = REACH_POSITION_SEARCH_STEPS,
+} = {}) {
     if (typeof bot.pathfinder.getPathFromTo !== 'function') return { status: 'unavailable', path: [] };
     const generator = bot.pathfinder.getPathFromTo(movements, bot.entity.position, goal, {
-        timeout: REACH_POSITION_SEARCH_TIMEOUT_MS, tickTimeout: REACH_POSITION_SEARCH_TICK_MS,
+        timeout, tickTimeout,
         searchRadius: REACH_POSITION_SEARCH_RADIUS,
     });
     let result = { status: 'unavailable', path: [] };
-    for (let step = 0; step < REACH_POSITION_SEARCH_STEPS; step++) {
+    for (let step = 0; step < steps; step++) {
         const next = generator.next();
         if (next.done || !next.value?.result) break;
         result = next.value.result;
         if (result.status !== 'partial') break;
     }
     return result;
+}
+
+const REACH_POSITION_EXIT_HAZARDS = new Set([
+    'lava', 'flowing_lava', 'fire', 'soul_fire', 'magma_block', 'cactus', 'campfire', 'soul_campfire',
+    'bubble_column', 'powder_snow', 'sweet_berry_bush', 'wither_rose', 'pointed_dripstone',
+]);
+const REACH_POSITION_CONTACT_EXIT_HAZARDS = new Set([
+    'fire', 'soul_fire', 'magma_block', 'cactus', 'campfire', 'soul_campfire',
+    'sweet_berry_bush', 'wither_rose', 'pointed_dripstone',
+]);
+const REACH_POSITION_WATER_NAMES = new Set(['water', 'flowing_water']);
+const reachPositionBlockKey = position => `${position.x},${position.y},${position.z}`;
+
+function reachPositionStartHazard(bot) {
+    const feet = bot.entity.position.floored();
+    const current = bot.blockAt(feet);
+    const support = bot.blockAt(feet.offset(0, -1, 0));
+    if (current && REACH_POSITION_WATER_NAMES.has(current.name)) return 'shallow_water';
+    for (const block of [current, support]) {
+        if (!block) continue;
+        if (REACH_POSITION_EXIT_HAZARDS.has(block.name)) return block.name;
+    }
+    return null;
+}
+
+function reachPositionWaterExitRegion(bot) {
+    const start = bot.entity.position.floored();
+    const startBlock = bot.blockAt(start);
+    if (!startBlock || !['water', 'flowing_water'].includes(startBlock.name)) return { region: null, reason: 'start_not_water' };
+    const height = Number.isFinite(bot.entity.height) && bot.entity.height > 0 ? bot.entity.height : 1.8;
+    const head = bot.blockAt(start.offset(0, Math.max(1, Math.ceil(height - 0.01) - 1), 0));
+    if (!head || REACH_POSITION_WATER_NAMES.has(head.name) || head.shapes?.length) return { region: null, reason: 'head_submerged_or_unknown' };
+
+    const region = new Map();
+    const queue = [start];
+    while (queue.length) {
+        const current = queue.shift();
+        const key = `${current.x},${current.y},${current.z}`;
+        if (region.has(key) || Math.hypot(current.x - start.x, current.z - start.z) > REACH_POSITION_WATER_EXIT_RADIUS) continue;
+        const water = bot.blockAt(current);
+        if (!water || !REACH_POSITION_WATER_NAMES.has(water.name)) continue;
+        const currentHead = bot.blockAt(current.offset(0, Math.max(1, Math.ceil(height - 0.01) - 1), 0));
+        if (!currentHead || REACH_POSITION_WATER_NAMES.has(currentHead.name) || currentHead.shapes?.length) continue;
+        let support = bot.blockAt(current.offset(0, -1, 0));
+        let depth = 1;
+        while (support && REACH_POSITION_WATER_NAMES.has(support.name) && depth < REACH_POSITION_WATER_EXIT_MAX_DEPTH) {
+            depth++;
+            support = bot.blockAt(current.offset(0, -depth, 0));
+        }
+        if (!support || REACH_POSITION_WATER_NAMES.has(support.name) || REACH_POSITION_EXIT_HAZARDS.has(support.name)
+            || !support.shapes?.some(shape => shape[4] >= 0.99)) continue;
+        region.set(key, { position: current, depth });
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) queue.push(current.offset(dx, 0, dz));
+    }
+    if (!region.has(`${start.x},${start.y},${start.z}`)) return { region: null, reason: 'water_bottom_unknown_or_too_deep' };
+    return { region, reason: null };
+}
+
+function reachPositionWaterExitStage(bot, region) {
+    const start = bot.entity.position.floored();
+    const height = Number.isFinite(bot.entity.height) && bot.entity.height > 0 ? bot.entity.height : 1.8;
+    const candidates = [];
+    const adjacentWater = new Set();
+    for (const { position } of region.values()) {
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            adjacentWater.add(`${position.x + dx},${position.y},${position.z + dz}`);
+        }
+    }
+    for (const key of adjacentWater) {
+        const [x, y, z] = key.split(',').map(Number);
+        const distance = Math.hypot(x - start.x, y - start.y, z - start.z);
+        if (distance > REACH_POSITION_WATER_EXIT_RADIUS) continue;
+        const feet = bot.blockAt(new Vec3(x, y, z));
+        const head = bot.blockAt(new Vec3(x, y + Math.max(1, Math.ceil(height - 0.01) - 1), z));
+        const support = bot.blockAt(new Vec3(x, y - 1, z));
+        if (!feet || !head || !support || REACH_POSITION_WATER_NAMES.has(feet.name)
+            || REACH_POSITION_WATER_NAMES.has(head.name) || feet.shapes?.length || head.shapes?.length) continue;
+        if (REACH_POSITION_EXIT_HAZARDS.has(feet.name) || REACH_POSITION_EXIT_HAZARDS.has(head.name)
+            || REACH_POSITION_EXIT_HAZARDS.has(support.name) || !support.shapes?.some(shape => shape[4] >= 0.99)) continue;
+        candidates.push({ x, y, z, distance });
+    }
+    candidates.sort((a, b) => b.y - a.y || a.distance - b.distance || a.x - b.x || a.z - b.z);
+    if (!candidates.length) return null;
+    return {
+        candidates,
+        goal: new pf.goals.GoalCompositeAny(candidates.map(candidate => new pf.goals.GoalBlock(candidate.x, candidate.y, candidate.z))),
+    };
+}
+
+function reachPositionWaterExitMoves(bot, options, region) {
+    const movements = reachPositionMoves(bot, { ...options, safeWater: true });
+    const getBlock = movements.getBlock.bind(movements);
+    movements.getBlock = (position, dx, dy, dz) => {
+        const block = getBlock(position, dx, dy, dz);
+        if (!REACH_POSITION_WATER_NAMES.has(block.name)) return block;
+        const from = position.floored();
+        const to = block.position;
+        const fromAllowed = region.has(`${from.x},${from.y},${from.z}`);
+        const toAllowed = region.has(`${to.x},${to.y},${to.z}`);
+        if (!fromAllowed || !toAllowed || from.y !== to.y) {
+            block.safe = false;
+            block.physical = false;
+            return block;
+        }
+        block.safe = true;
+        block.physical = false;
+        return block;
+    };
+    return movements;
 }
 
 async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = false } = {}) {
@@ -2650,18 +2771,44 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
     const operation = operationContext();
     const actionContext = operation?.cancellation ?? getActionContext(bot);
     let budgetExpired = false;
+    let waterExitStage = null;
+    let waterExitStartedAt = 0;
+    let waterExitTimer;
+    let waterExitTried = false;
     let startedAt = 0;
     const cancelled = () => !!operation?.signal?.aborted || isActionCancelled(bot, actionContext);
     const active = () => {
         if (cancelled()) throw Object.assign(new Error('Reach cancelled.'), { name: 'ReachCancelledError' });
-        if (budgetExpired || startedAt && Date.now() - startedAt >= REACH_POSITION_MAX_DURATION_MS) {
+        if (budgetExpired || startedAt && Date.now() - startedAt >= REACH_POSITION_MAX_DURATION_MS
+            || waterExitStage && Date.now() - waterExitStartedAt >= REACH_POSITION_WATER_EXIT_MAX_DURATION_MS) {
             budgetExpired = true;
             throw Object.assign(new Error('Reach exceeded its elapsed-time budget.'), { name: 'ReachBudgetExpiredError' });
         }
     };
     const target = new Vec3(position.x, position.y, position.z);
+    const initialHazard = reachPositionStartHazard(bot);
     if (bot.game?.minY != null && (target.y < bot.game.minY || bot.game.height != null && target.y >= bot.game.minY + bot.game.height)) return early('Target is outside the loaded dimension height.');
     if (bot.entity.position.distanceTo(target) > REACH_POSITION_MAX_DISTANCE) return early(`Target exceeds the ${REACH_POSITION_MAX_DISTANCE}-block range limit.`);
+    if (initialHazard === 'shallow_water') {
+        const departure = reachPositionWaterExitRegion(bot);
+        if (!departure.region) {
+            const stopReason = departure.reason ?? 'water_departure_unavailable';
+            log(bot, `[reachPosition-departure] ${JSON.stringify({ policy: 'none', startHazard: initialHazard, stopReason })}`);
+            return early(stopReason === 'head_submerged_or_unknown'
+                ? 'Shallow-water departure requires a loaded air block above the bot.'
+                : 'Shallow-water departure requires a known full support within four water layers.');
+        }
+    }
+    if (['lava', 'flowing_lava', 'bubble_column', 'powder_snow'].includes(initialHazard)) {
+        const stopReason = `unsupported_start_hazard_${initialHazard}`;
+        log(bot, `[reachPosition-departure] ${JSON.stringify({ policy: 'none', startHazard: initialHazard, stopReason })}`);
+        return early(`Navigation cannot start from ${initialHazard}.`);
+    }
+    if (REACH_POSITION_CONTACT_EXIT_HAZARDS.has(initialHazard)
+        && (!Number.isFinite(bot.health) || bot.health <= REACH_POSITION_CONTACT_EXIT_MIN_HEALTH)) {
+        log(bot, `[reachPosition-departure] ${JSON.stringify({ policy: 'none', startHazard: initialHazard, stopReason: 'insufficient_health' })}`);
+        return early(`Contact-hazard departure requires more than ${REACH_POSITION_CONTACT_EXIT_MIN_HEALTH} health.`);
+    }
     const availableScaffoldBlocks = allowScaffold
         ? scaffoldBlocks.filter(name => bot.registry?.itemsByName?.[name] &&
             (bot.inventory?.items?.() ?? []).some(item => item.name === name && item.count > 0))
@@ -2686,7 +2833,8 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
         promise.then(() => { pendingNavigationEdits.delete(promise); releaseGate(); }, () => { pendingNavigationEdits.delete(promise); releaseGate(); });
         return promise;
     };
-    const movement = reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks: availableScaffoldBlocks, safeWater });
+    const ordinaryMovement = reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks: availableScaffoldBlocks, safeWater });
+    let movement = ordinaryMovement;
     ownedMovements.add(movement);
     reachPositionMovementOwners.set(bot.pathfinder, context ?? movement);
     const movementOwner = reachPositionMovementOwners.get(bot.pathfinder);
@@ -2840,6 +2988,14 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
 
         for (let segment = 0; segment < REACH_POSITION_MAX_SEGMENTS; segment++) {
             active();
+            if (waterExitStage && !waterExitStage.region.has(reachPositionBlockKey(bot.entity.position.floored()))) {
+                waterExitStage = null;
+                clearTimeout(waterExitTimer);
+                waterExitTimer = null;
+                movement = ordinaryMovement;
+                bot.pathfinder.setMovements(ordinaryMovement);
+                log(bot, '[reachPosition-departure] {"policy":"ordinary","reason":"safe_surface_reached"}');
+            }
             if (finalDistance() <= tolerance) {
                 status = 'reached';
                 reason = 'Reached the requested feet position.';
@@ -2849,7 +3005,73 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                 status = 'stalled'; reason = 'Reach exceeded its elapsed-time budget.'; break;
             }
             const start = bot.entity.position.floored();
-            const pathResult = reachPositionPath(bot, movement, goal);
+            let pathGoal = waterExitStage?.goal ?? goal;
+            const waterSearchOptions = waterExitStage ? {
+                timeout: REACH_POSITION_WATER_EXIT_SEARCH_TIMEOUT_MS,
+                tickTimeout: REACH_POSITION_WATER_EXIT_SEARCH_TICK_MS,
+                steps: REACH_POSITION_WATER_EXIT_SEARCH_STEPS,
+            } : undefined;
+            let pathResult = reachPositionPath(bot, movement, pathGoal, waterSearchOptions);
+            let startedWaterExitThisSegment = false;
+            if (!waterExitStage && initialHazard === 'shallow_water' && !waterExitTried && pathResult.status === 'noPath') {
+                waterExitTried = true;
+                const ordinarySearchStatus = pathResult.status;
+                const discovered = reachPositionWaterExitRegion(bot);
+                const stage = discovered.region && reachPositionWaterExitStage(bot, discovered.region);
+                if (stage) {
+                    waterExitStartedAt = Date.now();
+                    waterExitStage = { ...stage, kind: 'shallow-water-exit', region: discovered.region, nodesUsed: 0 };
+                    waterExitTimer = setTimeout(() => {
+                        budgetExpired = true;
+                        if (activeGoal && bot.pathfinder.goal === activeGoal) bot.pathfinder.stop();
+                    }, REACH_POSITION_WATER_EXIT_MAX_DURATION_MS);
+                    movement = reachPositionWaterExitMoves(bot, {
+                        allowDig: false, allowScaffold: false, scaffoldBlocks: [],
+                    }, discovered.region);
+                    ownedMovements.add(movement);
+                    bot.pathfinder.setMovements(movement);
+                    pathGoal = stage.goal;
+                    pathResult = reachPositionPath(bot, movement, pathGoal, {
+                        timeout: REACH_POSITION_WATER_EXIT_SEARCH_TIMEOUT_MS,
+                        tickTimeout: REACH_POSITION_WATER_EXIT_SEARCH_TICK_MS,
+                        steps: REACH_POSITION_WATER_EXIT_SEARCH_STEPS,
+                    });
+                    const nodeCount = Array.isArray(pathResult.path) ? pathResult.path.length : 0;
+                    waterExitStage.nodesUsed = nodeCount;
+                    startedWaterExitThisSegment = true;
+                    if (nodeCount > REACH_POSITION_WATER_EXIT_MAX_NODES) {
+                        waterExitStage = null;
+                        movement = ordinaryMovement;
+                        bot.pathfinder.setMovements(ordinaryMovement);
+                        pathResult = { status: 'noPath', path: [] };
+                    }
+                    log(bot, `[reachPosition-departure] ${JSON.stringify({
+                        policy: 'shallow-water-exit', start: { x: start.x, y: start.y, z: start.z },
+                        waterCells: discovered.region.size, candidateCount: stage.candidates.length,
+                        ordinarySearchStatus, searchStatus: pathResult.status, pathNodeCount: nodeCount,
+                        stopReason: nodeCount > REACH_POSITION_WATER_EXIT_MAX_NODES ? 'departure_path_budget_exceeded' : null,
+                    })}`);
+                } else {
+                    log(bot, `[reachPosition-departure] ${JSON.stringify({
+                        policy: 'none', start: { x: start.x, y: start.y, z: start.z },
+                        ordinarySearchStatus,
+                        stopReason: initialHazard && initialHazard !== 'shallow_water'
+                            ? `unsupported_start_hazard_${initialHazard}`
+                            : discovered.reason ?? 'no_supported_surface_candidate',
+                    })}`);
+                }
+            }
+            if (waterExitStage && !startedWaterExitThisSegment) {
+                waterExitStage.nodesUsed += Array.isArray(pathResult.path) ? pathResult.path.length : 0;
+                if (waterExitStage.nodesUsed > REACH_POSITION_WATER_EXIT_MAX_NODES) {
+                    waterExitStage = null;
+                    movement = ordinaryMovement;
+                    bot.pathfinder.setMovements(ordinaryMovement);
+                    status = 'blocked';
+                    reason = 'Shallow-water departure exceeded its bounded route-node budget.';
+                    break;
+                }
+            }
             if (pathResult.status === 'unavailable') { status = 'blocked'; reason = 'Bounded path search is unavailable.'; break; }
             const path = Array.isArray(pathResult.path) ? pathResult.path : [];
             const endpoint = path.at(-1);
@@ -2859,6 +3081,8 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                 path: path.slice(0, 128).map(node => ({ x: node.x, y: node.y, z: node.z })),
                 omittedPathNodeCount: Math.max(0, path.length - 128),
                 endpoint: endpoint ? { x: endpoint.x, y: endpoint.y, z: endpoint.z } : null,
+                departureRemainingNodes: waterExitStage ? Math.max(0, REACH_POSITION_WATER_EXIT_MAX_NODES - waterExitStage.nodesUsed) : null,
+                startHazard: segment === 0 ? initialHazard : null,
             };
             if (!endpoint || endpoint.x === start.x && endpoint.y === start.y && endpoint.z === start.z) {
                 const unknownNeighbor = reachPositionHasUnknownNeighbor(bot, bot.entity.position);
@@ -2884,7 +3108,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
             if (attempts >= REACH_POSITION_NO_PROGRESS_LIMIT) {
                 status = 'stalled'; reason = 'The same route segment failed repeatedly without progress.'; break;
             }
-            const checkpoint = pathResult.status === 'success' ? goal : new pf.goals.GoalBlock(endpoint.x, endpoint.y, endpoint.z);
+            const checkpoint = pathResult.status === 'success' ? pathGoal : new pf.goals.GoalBlock(endpoint.x, endpoint.y, endpoint.z);
             activeGoal = checkpoint;
             const before = bot.entity.position.clone();
             let navigationFailure = null;
@@ -2941,6 +3165,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
     } finally {
         await drainNavigationEdits();
         clearTimeout(hardTimer);
+        clearTimeout(waterExitTimer);
         restoreWrappers();
         if (reachPositionMovementOwners.get(bot.pathfinder) === movementOwner) {
             // Mineflayer-pathfinder leaves stateGoal set when goto rejects for

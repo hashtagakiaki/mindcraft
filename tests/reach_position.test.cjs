@@ -79,6 +79,7 @@ function makeBot({ gap = [], wall = [], hazards = [], unknown = [], solidBlocks 
   bot.interrupt_code = false
   bot.game = { minY: 60, height: 60, dimension: 'overworld', gameMode: 'survival' }
   bot.entity = { id: 1, position: new Vec3(0.5, startY, 0.5), onGround: true, eyeHeight: 1.62, effects: {}, velocity: { x: 0, z: 0 } }
+  bot.health = 20
   bot.entities = {}
   bot.world = world
   const loaded = (x, z) => x >= -8 && x <= loadedThroughX && z >= -4 && z <= 4
@@ -939,6 +940,99 @@ async function main() {
     ] })
     const deepWaterBlocked = await reachPosition(deepWater, { position: { x: 6.5, y: 64, z: 0.5 }, safeWater: true })
     assert.notEqual(deepWaterBlocked.status, 'reached', JSON.stringify(deepWaterBlocked))
+
+    // Disposable reproduction of the recorded start: two water layers around
+    // the feet, air above, solid bottom and a gravel shore one block east.
+    // The fixture teleports on path nodes, so it distinguishes A* policy only;
+    // it does not claim that water physics or climbing onto shore works.
+    const waterStart = makeBot({ floorY: 61, startY: 63, corridor: true, solidBlocks: [
+      { x: 3, y: 62, z: 0, name: 'stone' },
+    ], hazards: [
+      { x: 0, y: 63, z: 0, name: 'water' }, { x: 0, y: 62, z: 0, name: 'water' },
+      { x: 1, y: 63, z: 0, name: 'water' }, { x: 1, y: 62, z: 0, name: 'water' },
+      { x: 2, y: 62, z: 0, name: 'gravel' },
+    ] })
+    const waterStartResult = await reachPosition(waterStart, { position: { x: 3.5, y: 63, z: 0.5 }, tolerance: 0.75, allowScaffold: false })
+    assert.equal(waterStartResult.status, 'reached', JSON.stringify({ result: waterStartResult, output: waterStart.output }))
+    assert.equal(waterStart.testState.edits.length, 0, 'shallow-water departure reaches land without edits')
+    assert.match(waterStart.output, /"ordinarySearchStatus":"noPath"/, 'the original policy reproduces a noPath at the water start')
+    assert.match(waterStart.output, /"policy":"shallow-water-exit"/, 'the bounded departure policy finds a supported shoreline')
+    assert.match(waterStart.output, /"reason":"safe_surface_reached"/, 'departure permission ends as soon as the shoreline is reached')
+    const ordinaryRouteLogs = waterStart.output.split('\n').filter(line => line.startsWith('[reachPosition-route] '))
+      .map(line => JSON.parse(line.slice('[reachPosition-route] '.length)))
+      .filter(entry => entry.segment > 0)
+    assert.ok(ordinaryRouteLogs.some(entry => entry.path?.some(node => node.x >= 3)), 'ordinary navigation resumes toward the requested destination')
+    assert.equal(ordinaryRouteLogs.some(entry => entry.path?.some(node => node.x <= 1 && node.y === 63)), false,
+      'ordinary routing does not re-enter the departed water')
+
+    const cancelledWaterExit = makeBot({ floorY: 61, startY: 63, corridor: true, navigationDelay: 100,
+      hazards: [
+        { x: 0, y: 63, z: 0, name: 'water' }, { x: 0, y: 62, z: 0, name: 'water' },
+        { x: 1, y: 63, z: 0, name: 'water' }, { x: 1, y: 62, z: 0, name: 'water' },
+        { x: 2, y: 62, z: 0, name: 'gravel' },
+      ] })
+    const originalWaterMovements = cancelledWaterExit.pathfinder.movements
+    const pendingWaterExit = reachPosition(cancelledWaterExit, {
+      position: { x: 3.5, y: 63, z: 0.5 }, tolerance: 0.75, allowScaffold: false,
+    })
+    await delay(20)
+    cancelledWaterExit.interrupt_code = true
+    const cancelledWaterResult = await pendingWaterExit
+    assert.equal(cancelledWaterResult.status, 'cancelled', JSON.stringify(cancelledWaterResult))
+    assert.equal(cancelledWaterExit.testState.edits.length, 0, 'cancellation during water departure does not edit blocks')
+    assert.equal(cancelledWaterExit.pathfinder.movements, originalWaterMovements, 'cancellation restores ordinary movement policy')
+
+    for (const [name, options, reason] of [
+      ['unknown bottom', { floorY: 62, startY: 64, unknown: [{ x: 0, y: 62, z: 0 }], hazards: [
+        { x: 0, y: 64, z: 0, name: 'water' }, { x: 0, y: 63, z: 0, name: 'water' },
+        { x: 1, y: 63, z: 0, name: 'gravel' },
+      ] }, 'water_bottom_unknown_or_too_deep'],
+      ['deep water', { floorY: 60, startY: 65, hazards: [
+        { x: 0, y: 65, z: 0, name: 'water' }, { x: 0, y: 64, z: 0, name: 'water' },
+        { x: 0, y: 63, z: 0, name: 'water' }, { x: 0, y: 62, z: 0, name: 'water' },
+        { x: 0, y: 61, z: 0, name: 'water' }, { x: 1, y: 64, z: 0, name: 'gravel' },
+      ] }, 'water_bottom_unknown_or_too_deep'],
+      ['submerged head', { floorY: 62, startY: 64, hazards: [
+        { x: 0, y: 64, z: 0, name: 'water' }, { x: 0, y: 63, z: 0, name: 'water' },
+        { x: 0, y: 65, z: 0, name: 'water' }, { x: 1, y: 63, z: 0, name: 'gravel' },
+      ] }, 'head_submerged_or_unknown'],
+    ]) {
+      const blockedWaterStart = makeBot(options)
+      const result = await reachPosition(blockedWaterStart, {
+        position: { x: 4.5, y: options.startY, z: 0.5 }, tolerance: 0.75, allowScaffold: false,
+      })
+      assert.notEqual(result.status, 'reached', `${name}: ${JSON.stringify(result)}`)
+      assert.equal(blockedWaterStart.testState.edits.length, 0, `${name}: no edits are attempted`)
+      assert.ok(blockedWaterStart.output.includes(reason), `${name}: ${blockedWaterStart.output}`)
+    }
+
+    const contactHazardStart = makeBot({ floorY: 63, startY: 64, corridor: true,
+      hazards: [{ x: 0, y: 63, z: 0, name: 'magma_block' }] })
+    const contactHazardResult = await reachPosition(contactHazardStart, {
+      position: { x: 3.5, y: 64, z: 0.5 }, tolerance: 0.75, allowScaffold: false,
+    })
+    assert.equal(contactHazardResult.status, 'reached', JSON.stringify({ result: contactHazardResult, output: contactHazardStart.output }))
+    assert.equal(contactHazardStart.testState.edits.length, 0, 'direct contact-hazard departure requires no edits')
+    assert.match(contactHazardStart.output, /"startHazard":"magma_block"/)
+    assert.equal(contactHazardStart.testState.paths[0]?.path[0]?.x, 1, 'the first planned transition steps directly onto the adjacent safe surface')
+    assert.equal(contactHazardStart.testState.paths.flatMap(path => path.path).some(node => node.x === 0 && node.y === 64), false,
+      'the executed route does not remain on the starting hazard')
+
+    const lowHealthHazardStart = makeBot({ floorY: 63, startY: 64, corridor: true,
+      hazards: [{ x: 0, y: 63, z: 0, name: 'magma_block' }] })
+    lowHealthHazardStart.health = 4
+    const lowHealthHazardResult = await reachPosition(lowHealthHazardStart, {
+      position: { x: 3.5, y: 64, z: 0.5 }, tolerance: 0.75, allowScaffold: false,
+    })
+    assert.equal(lowHealthHazardResult.status, 'blocked', JSON.stringify(lowHealthHazardResult))
+    assert.equal(lowHealthHazardStart.testState.edits.length, 0)
+    assert.match(lowHealthHazardStart.output, /insufficient_health/)
+
+    const lavaStart = makeBot({ floorY: 63, startY: 64, hazards: [{ x: 0, y: 64, z: 0, name: 'lava' }] })
+    const lavaStartResult = await reachPosition(lavaStart, { position: { x: 3.5, y: 64, z: 0.5 } })
+    assert.equal(lavaStartResult.status, 'blocked', JSON.stringify(lavaStartResult))
+    assert.equal(lavaStart.testState.edits.length, 0)
+    assert.match(lavaStart.output, /unsupported_start_hazard_lava/)
 
     const lava = makeBot({ corridor: true, hazards: [{ x: 2, y: 64, z: 0, name: 'lava' }] })
     const lavaBlocked = await reachPosition(lava, { position: { x: 6.5, y: 64, z: 0.5 }, allowDig: true, safeWater: true })
