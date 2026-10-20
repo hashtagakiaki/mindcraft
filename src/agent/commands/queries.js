@@ -22,8 +22,8 @@ export const queryList = [
             res += `\n- Position: x: ${pos.x.toFixed(2)}, y: ${pos.y.toFixed(2)}, z: ${pos.z.toFixed(2)}`;
             // Gameplay
             res += `\n- Gamemode: ${bot.game.gameMode}`;
-            res += `\n- Health: ${Math.round(bot.health)} / 20`;
-            res += `\n- Hunger: ${Math.round(bot.food)} / 20`;
+            res += `\n- Health: ${bot.health} / 20`;
+            res += `\n- Hunger: ${bot.food} / 20`;
             res += `\n- Biome: ${world.getBiomeName(bot)}`;
             let weather = "Clear";
             if (bot.rainState > 0)

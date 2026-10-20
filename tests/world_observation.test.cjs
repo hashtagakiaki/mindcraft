@@ -39,7 +39,7 @@ export function getAllBiomes() { return [{ name: 'plains' }]; }
       inventory: { slots: [], items: () => [] },
       entities: {},
       world: { getBiome: () => 0 },
-      health: 20,
+      health: 9.5,
       food: 20,
       modes: { getMiniDocs: () => [] },
       blockAt: () => null,
@@ -76,6 +76,9 @@ export function getAllBiomes() { return [{ name: 'plains' }]; }
     assert.equal(state.observationScope.dimension, 'overworld')
     assert.equal(state.observationScope.managementConnectionGeneration, 7)
     assert.equal(state.observationScope.managementConnectionReady, true)
+    assert.equal(state.gameplay.health, 9.5, 'management observations preserve the same HP as native task results')
+    assert.equal(state.gameplay.health < 10, bot.health < 10, 'a threshold decision must not change at the management boundary')
+    assert.equal(state.gameplay.hunger, bot.food)
     console.log('world observation fixtures passed')
   } finally {
     await fs.rm(root, { recursive: true, force: true })
