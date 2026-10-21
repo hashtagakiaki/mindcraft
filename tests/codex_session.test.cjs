@@ -3,6 +3,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const os = require('node:os')
+const { spawn } = require('node:child_process')
 const { pathToFileURL } = require('node:url')
 const { moduleRoot } = require('./dependency_root.cjs')
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -555,6 +556,90 @@ for (let batch = 0; batch < 10; batch++) {
     } finally { await session.close() }
     await assert.rejects(fs.access(session.cwd), { code: 'ENOENT' })
     assert.equal(await fs.readFile(path.join(sourceHome, 'AGENTS.md'), 'utf8'), 'GLOBAL_DEVELOPMENT_MARKER')
+
+    // Session close must reap the helper without joining a tool call whose
+    // underlying Minecraft operation has not settled. The action stop path
+    // remains the owner of that operation and decides whether shutdown is needed.
+    const closeGate = deferred(), closeStarted = deferred()
+    let closeWorkSettled = false
+    const closingSession = new CodexSession({ model: 'gpt-6-luna', ...sdkFixture,
+      execute: async () => { closeStarted.resolve(); try { return await closeGate.promise } finally { closeWorkSettled = true } } })
+    try {
+      await closingSession.open(new AbortController().signal)
+      const turn = closingSession.runTurn('leave pending work').catch(() => null)
+      await closeStarted.promise
+      await closingSession.close()
+      assert.equal(closingSession.closed, true, 'close completes after the owned helper exits')
+      assert.equal(closeWorkSettled, false, 'session close does not pretend pending game work settled')
+      closeGate.resolve({ success: false, operationSettlement: 'pending' })
+      await closingSession.toolWork
+      assert.equal(closeWorkSettled, true)
+      await turn
+    } finally {
+      closeGate.resolve({ success: false, operationSettlement: 'pending' })
+      await closingSession.close()
+    }
+
+    const lifecycleWorker = path.join(root, 'stop-lifecycle-worker.mjs')
+    const lifecycleTrace = path.join(root, 'stop-lifecycle.trace')
+    const proxyStub = path.join(root, 'lifecycle-proxy.mjs')
+    await fs.writeFile(proxyStub, 'export const serverProxy = { async connect() {}, setAgent() {} }\n')
+    let lifecycleSource = await fs.readFile(path.join(repo, 'src/process/init_agent.js'), 'utf8')
+    lifecycleSource = lifecycleSource
+      .replace("import { Agent } from '../agent/agent.js';", `import { Agent } from './src/agent/agent.js';
+import { EventEmitter } from 'node:events';
+import { appendFileSync } from 'node:fs';
+import { ActionManager } from './src/agent/action_manager.js';
+import { CodexSession } from './src/process/codex_session.js';
+const realTimeout = setTimeout;
+globalThis.setTimeout = (callback, ms, ...args) => realTimeout(callback, ms === 10000 ? 80 : ms === 2800 ? 100 : ms, ...args);
+const recordLifecycle = value => appendFileSync(process.env.LIFECYCLE_TRACE, value + '\\n');
+Agent.prototype.start = async function() {
+  this.bot = Object.assign(new EventEmitter(), { output: '', interrupt_code: false, end() { recordLifecycle('bot-ended') } });
+  this.history = { beginShutdown() {}, async saveShutdownRecord(reason, outcome) {
+    recordLifecycle(JSON.stringify({ type: 'shutdown-record', reason, ...outcome }));
+    return { saved: true };
+  } };
+  this.self_prompter = { stopForRecovery() {} };
+  this.actions = new ActionManager(this);
+  this.requestInterrupt = () => { this.bot.interrupt_code = true };
+  let started;
+  const operationStarted = new Promise(resolve => { started = resolve });
+  const neverSettles = new Promise(() => {});
+  const session = new CodexSession({ model: 'gpt-6-luna', execute: async () => { recordLifecycle('tool-started'); started(); return neverSettles } });
+  await session.open(new AbortController().signal);
+  this.codexRuntime = { cancel: () => session.close() };
+  session.runTurn('fixture task').catch(() => null);
+  await operationStarted;
+  void this.actions.runAction('action:codex-code', () => neverSettles, { timeout: 0, stallTimeoutMs: 20 });
+  recordLifecycle('action-started');
+  await new Promise(() => {});
+};`)
+      .replace("import { serverProxy } from '../agent/mindserver_proxy.js';", "import { serverProxy } from './lifecycle-proxy.mjs';")
+    await fs.writeFile(lifecycleWorker, lifecycleSource)
+    const lifecycleChild = spawn(node, [lifecycleWorker, '-n', 'Fixture', '-p', '1', '-l', 'false', '-c', '0'], { cwd: root, stdio: 'ignore', env: {
+      ...process.env, CODEX_HOME: sourceHome, MINDCRAFT_CODEX_BIN: binary,
+      MINDCRAFT_CODEX_SESSIONS_DIR: path.join(root, 'lifecycle-sessions'), LIFECYCLE_TRACE: lifecycleTrace,
+    } })
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        lifecycleChild.kill('SIGKILL')
+        reject(new Error('uncooperative action shutdown fixture did not exit'))
+      }, 3000)
+      lifecycleChild.once('error', error => { clearTimeout(timer); reject(error) })
+      lifecycleChild.once('close', (code, signal) => {
+        clearTimeout(timer)
+        if (code === 1 && !signal) resolve()
+        else reject(new Error(`uncooperative action fixture exited with code=${code}, signal=${signal}`))
+      })
+    })
+    const lifecycleEvents = (await fs.readFile(lifecycleTrace, 'utf8')).trim().split('\n')
+    assert.ok(lifecycleEvents.includes('tool-started'), 'the fixture-owned helper delivered an actual pending tool call')
+    assert.ok(lifecycleEvents.includes('action-started'), 'the actual ActionManager owns the pending game operation')
+    assert.ok(lifecycleEvents.includes('bot-ended'), 'Agent.shutdown reached Minecraft connection teardown')
+    assert.ok(lifecycleEvents.some(line => line.includes('"stopped":false') && line.includes('"reason":"stop-failed"')),
+      'init_agent exits after Agent.shutdown records the still-pending operation as failed')
+
     const botInstructions = path.join(root, 'src/process/codex/AGENTS.md')
     const originalInstructions = await fs.readFile(botInstructions, 'utf8')
     const refreshedInstructions = originalInstructions + '\nBOT_INSTRUCTIONS_UPDATED_ON_RESUME\n'
@@ -698,6 +783,51 @@ for (let batch = 0; batch < 10; batch++) {
     assert.equal(await cappedAdmissionAgent.handleMessage('operator', 'new task at cap', null,
       { taskId: 'new-at-cap', onAccepted: value => { capacityAck = value } }), false)
     assert.equal(capacityAck.accepted, false, 'capacity exhaustion rejects new task IDs explicitly')
+
+    const blockedReplacementAgent = makeAgent('BlockedReplacement')
+    let releaseOldAction
+    const oldActionGate = new Promise(resolve => { releaseOldAction = resolve })
+    let cleanKills = 0
+    blockedReplacementAgent.cleanKill = () => { cleanKills++ }
+    blockedReplacementAgent.codexRuntime = { active: true, async cancel() {} }
+    const oldAction = blockedReplacementAgent.actions.runAction('unresponsive-old-action', () => oldActionGate, { timeout: 0 })
+    await until(() => blockedReplacementAgent.actions.executing)
+    let rejectedReplacement
+    const replacementTask = blockedReplacementAgent.handleMessage('operator', 'replacement request', null,
+      { taskId: 'replacement-while-pending', onAccepted: value => { rejectedReplacement = value } })
+    assert.equal(await replacementTask, false, 'a replacement is rejected while the previous operation remains unsettled')
+    assert.equal(rejectedReplacement.accepted, false)
+    assert.equal(rejectedReplacement.taskId, 'replacement-while-pending')
+    assert.match(rejectedReplacement.error, /previous Minecraft action did not settle/)
+    assert.match(rejectedReplacement.error, /will not be started later/)
+    assert.equal(blockedReplacementAgent.actions.executing, true, 'rejection does not pretend the old operation stopped')
+    releaseOldAction()
+    await oldAction
+    assert.equal(blockedReplacementAgent.actions.executing, false, 'the original action can still settle cooperatively')
+    assert.equal(cleanKills, 0, 'cooperative settlement does not cause a reconnect or process kill')
+    let duplicateReplacement
+    assert.equal(await blockedReplacementAgent.handleMessage('operator', 'retry rejected request', null,
+      { taskId: 'replacement-while-pending', onAccepted: value => { duplicateReplacement = value } }), false)
+    assert.equal(duplicateReplacement.accepted, false, 'settlement later does not run a task ID already rejected')
+    assert.match(duplicateReplacement.error, /already accepted or rejected/)
+
+    const cooperativeReplacementAgent = makeAgent('CooperativeReplacement')
+    await until(() => cooperativeReplacementAgent.coder.code_template && cooperativeReplacementAgent.coder.code_lint_template)
+    let releaseCooperativeAction
+    const cooperativeActionGate = new Promise(resolve => { releaseCooperativeAction = resolve })
+    let cooperativeCleanKills = 0
+    cooperativeReplacementAgent.cleanKill = () => { cooperativeCleanKills++ }
+    cooperativeReplacementAgent.codexRuntime = { active: true, async cancel() { this.active = false; releaseCooperativeAction() } }
+    const cooperativeOldAction = cooperativeReplacementAgent.actions.runAction('cooperative-old-action', () => cooperativeActionGate, { timeout: 0 })
+    await until(() => cooperativeReplacementAgent.actions.executing)
+    let acceptedReplacement
+    assert.equal(await cooperativeReplacementAgent.handleMessage('operator', 'cooperative replacement', null,
+      { taskId: 'cooperative-replacement', onAccepted: value => { acceptedReplacement = value } }), true)
+    assert.deepEqual(acceptedReplacement, { accepted: true, taskId: 'cooperative-replacement' },
+      'a quickly settled prior action does not turn ordinary replacement into rejection')
+    assert.equal((await cooperativeOldAction).success, true)
+    assert.equal(cooperativeCleanKills, 0, 'normal cooperative replacement does not restart the agent')
+
     const saveFailureAgent = makeAgent('SaveFailure')
     await until(() => saveFailureAgent.coder.code_template && saveFailureAgent.coder.code_lint_template)
     saveFailureAgent.history.save = async () => { throw new Error('fixture save failure') }

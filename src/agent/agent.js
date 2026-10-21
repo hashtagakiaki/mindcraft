@@ -26,6 +26,7 @@ const MAX_AUTOMATIC_RECOVERY_PLANS = 2;
 const MAX_RECOVERY_OUTPUT_CHARS = 500;
 const MAX_RECOVERY_EVENTS = 128;
 const AGENT_SHUTDOWN_STOP_GRACE_MS = 2800;
+const TASK_REPLACEMENT_ACK_DEADLINE_MS = 4000;
 const STANDALONE_EXIT_INTENT_FLUSH_MS = 500;
 const SHUTDOWN_MESSAGE_MAX_CHARS = 1000;
 const MAX_TASK_DISPATCH_IDS = 256;
@@ -695,7 +696,14 @@ export class Agent {
         admissions.set(taskId, entry);
         let acknowledged = false;
         const onAccepted = value => {
-            if (acknowledged || value?.accepted !== true || value.taskId !== taskId) return;
+            if (acknowledged || value?.taskId !== taskId) return;
+            if (value.accepted !== true) {
+                acknowledged = true;
+                entry.status = 'rejected';
+                settle();
+                acknowledge(value);
+                return;
+            }
             acknowledged = true;
             entry.status = 'accepted';
             settle();
@@ -718,6 +726,11 @@ export class Agent {
             if (acceptedAcknowledged || !isHumanIntent || typeof internalOptions.onAccepted !== 'function') return;
             acceptedAcknowledged = true;
             internalOptions.onAccepted({ accepted: true, taskId: this.currentTaskId });
+        };
+        const acknowledgeRejected = error => {
+            if (acceptedAcknowledged || !isHumanIntent || typeof internalOptions.onAccepted !== 'function') return;
+            acceptedAcknowledged = true;
+            internalOptions.onAccepted({ accepted: false, taskId: internalOptions.taskId, error });
         };
         const isHumanMessage = !!source && source !== 'system' && source !== this.name && !convoManager.isOtherAgent(source);
         const incomingCommand = isHumanMessage && typeof message === 'string' ? containsCommand(message) : null;
@@ -773,8 +786,26 @@ export class Agent {
             return false;
 
         if (isHumanIntent && this.actions.executing) {
-            const stopped = await this.actions.stop('superseded');
-            if (!isCurrent() || !stopped.stopped) return false;
+            const stopPromise = this.actions.stop('superseded');
+            let deadline;
+            const timedOut = Symbol('task-replacement-stop-deadline');
+            const stopped = await Promise.race([
+                stopPromise,
+                new Promise(resolve => { deadline = setTimeout(() => resolve(timedOut), TASK_REPLACEMENT_ACK_DEADLINE_MS); }),
+            ]);
+            clearTimeout(deadline);
+            if (stopped === timedOut) {
+                acknowledgeRejected(`Task ${internalOptions.taskId || '(unassigned)'} was rejected because the previous Minecraft action did not settle within ${TASK_REPLACEMENT_ACK_DEADLINE_MS} ms. It will not be started later.`);
+                return false;
+            }
+            if (!isCurrent()) {
+                acknowledgeRejected(`Task ${internalOptions.taskId || '(unassigned)'} was superseded before acceptance and will not be started.`);
+                return false;
+            }
+            if (!stopped.stopped) {
+                acknowledgeRejected(`Task ${internalOptions.taskId || '(unassigned)'} was rejected because the previous Minecraft action did not stop.`);
+                return false;
+            }
         }
         if (isUserStop) {
             this._activeRecoveryId = null;

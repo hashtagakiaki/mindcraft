@@ -236,7 +236,9 @@ export class CodexSession {
                 await this.exited;
             }
             this.lines?.close();
-            await this.toolWork;
+            // Tool work may be waiting for an uncooperative Minecraft operation.
+            // The action owner decides whether that operation settled or must
+            // escalate to process shutdown; session teardown must not wait on it.
             if (this.cwd) await rm(this.cwd, { recursive: true, force: true });
         })();
         return this.closing;
