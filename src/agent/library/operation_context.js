@@ -155,6 +155,11 @@ export function trackSkill(name, body) {
             try {
                 const value = await body.apply(this, args);
                 call.returnValue = typeof value === 'boolean' || typeof value === 'string' || typeof value === 'number' ? value : null;
+                if (value && typeof value === 'object' && typeof value.code === 'string' && value.diagnostics) {
+                    call.result = { ok: value.ok === true, status: value.status ?? null,
+                        arrivalReached: value.arrivalReached === true, code: value.code,
+                        reason: value.reason ?? null, diagnostics: value.diagnostics };
+                }
                 call.status = operation.signal.aborted ? 'cancelled' : value === false ? 'returned_false' : value === true ? 'returned_true' : 'returned';
                 return value;
             } catch (error) {

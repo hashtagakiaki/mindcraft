@@ -120,10 +120,10 @@ for (const name of ['putInChest', 'takeFromChest']) s(name, {
 }, 'Transfer quantity items; quantity:"all" explicitly requests all matching available items. chestPosition selects one chest; omission uses nearest. Returns server-confirmed requested, confirmed and remaining quantities; incomplete or unknown results stop the current code batch.', a => [a.itemName, allQuantity(a.quantity), has(a, 'chestPosition') ? { chestPosition: a.chestPosition, details: true } : { details: true }], { completion: 'complete' });
 s('consume', { itemName: field('stringValue', { default: '', description: 'Empty string selects available food.' }) }, 'Consume food or a potion. Returns boolean.', a => [a.itemName]);
 s('giveToPlayer', { itemName: text(), playerName: text(), quantity: positiveInt({ default: 1 }) }, 'Give quantity items to the visible player. Returns boolean.', a => [a.itemName, a.playerName, a.quantity]);
-s('goToPosition', { position: position() }, 'Reach an absolute feet position without digging. Confirmed dirt/cobblestone route scaffolds are removed before success. Returns {ok,status,arrivalReached,finalPosition,reason}; arrival alone is not success.', a => [{
+s('goToPosition', { position: position() }, 'Reach the requested Minecraft feet block (floor(x), floor(y), floor(z)); the exact coordinate within that block is not required. Success requires a loaded, grounded, safe arrival confirmed across two physics ticks. Confirmed dirt/cobblestone route scaffolds are removed before success. Returns {ok,status,arrivalReached,finalPosition,reason,code,diagnostics}. already_at_goal means the safe target block was already occupied; it does not mean movement occurred. route_not_found means no route was found with current loaded chunks, movement policy and search limits, not that the world destination is impossible.', a => [{
     position: a.position, allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt', 'cobblestone'],
 }]);
-s('reachPosition', { position: position() }, 'Reach an absolute feet position, permitting route digging and confirmed dirt/cobblestone scaffolds that may remain. Do not start route cleanup after arrival. Returns {ok,status,arrivalReached,finalPosition,reason}; route edits must be server-confirmed.', a => [{
+s('reachPosition', { position: position() }, 'Reach the requested Minecraft feet block (floor(x), floor(y), floor(z)); the exact coordinate within that block is not required. Success requires a loaded, grounded, safe arrival confirmed across two physics ticks. Route digging and confirmed dirt/cobblestone scaffolds may remain; route edits must be server-confirmed. Returns {ok,status,arrivalReached,finalPosition,reason,code,diagnostics}. already_at_goal means the safe target block was already occupied; it does not mean movement occurred. route_not_found means no route was found with current loaded chunks, movement policy and search limits, not that the world destination is impossible.', a => [{
     position: a.position, allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false, cleanupOwnedScaffolds: false,
 }]);
 s('goToNearestBlock', { blockType: text(), minDistance: distance({ default: 2 }), radius: radius(64) }, 'Navigate to the nearest matching block within radius. Returns boolean.', a => [a.blockType, a.minDistance, a.radius]);
@@ -377,9 +377,8 @@ function compactNavigationResult(value, requireCleanup = false) {
     if (requireCleanup && value.cleanupRequired?.length && value.ok === true) {
         result.ok = false;
         result.status = 'blocked';
+        result.code = 'cleanup_incomplete';
         result.reason = 'Required scaffold cleanup is incomplete.';
-    } else if (value.ok === true && value.status === 'reached' && typeof value.arrivalReached === 'boolean') {
-        result.reason = 'Reached the requested feet position.';
     }
     return result;
 }
@@ -407,10 +406,10 @@ export function createNativeSdk(bindings, config = {}) {
             let args;
             if (definition.namespace === 'skills' && definition.name === 'goToPosition') {
                 const policy = definition.navigationPolicy;
-                args = [{ position: input.position, allowDig: policy.allowDig, scaffold: policy.scaffold, scaffoldBlocks: [...policy.scaffoldBlocks] }];
+                args = [{ position: input.position, arrivalMode: 'block', allowDig: policy.allowDig, scaffold: policy.scaffold, scaffoldBlocks: [...policy.scaffoldBlocks] }];
             } else if (definition.namespace === 'skills' && definition.name === 'reachPosition') {
                 const policy = definition.navigationPolicy;
-                args = [{ position: input.position, allowDig: policy.allowDig, allowScaffold: policy.scaffold !== 'forbid', scaffoldBlocks: [...policy.scaffoldBlocks], safeWater: false, cleanupOwnedScaffolds: false }];
+                args = [{ position: input.position, arrivalMode: 'block', allowDig: policy.allowDig, allowScaffold: policy.scaffold !== 'forbid', scaffoldBlocks: [...policy.scaffoldBlocks], safeWater: false, cleanupOwnedScaffolds: false }];
             } else if (definition.namespace === 'skills' && definition.name === 'craftItem') {
                 args = [input.itemName, input.quantity];
             } else if (definition.namespace === 'skills' && definition.name === 'inspectChest') {

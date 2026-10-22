@@ -123,12 +123,12 @@ async function main() {
   invalid(sdk.skills.goToNearestBlock, [{ blockType: 'chest', navigation: { allowDig: true } }], 'navigation')
   invalid(sdk.skills.followPlayer, [{ username: 'Steve', preserveEnvironment: false }], 'preserveEnvironment')
   assert.deepEqual(sdk.skills.goToPosition({ position: input.position }), [botA, {
-    position: input.position, allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt', 'cobblestone'],
+    position: input.position, arrivalMode: 'block', allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt', 'cobblestone'],
   }])
   invalid(sdk.skills.goToPosition, [{ position: input.position, minDistance: 2 }], 'minDistance')
   invalid(sdk.skills.goToPosition, [{ position: input.position, allowDig: true }], 'allowDig')
   assert.deepEqual(sdk.skills.reachPosition({ position: input.position }), [botA, {
-    position: input.position, allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false, cleanupOwnedScaffolds: false,
+    position: input.position, arrivalMode: 'block', allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false, cleanupOwnedScaffolds: false,
   }])
   invalid(sdk.skills.reachPosition, [{ position: input.position, allowScaffold: false }], 'allowScaffold')
   assert.equal(sdk.skills.goToGoal, undefined)
@@ -136,16 +136,19 @@ async function main() {
 
   const detailedMove = {
     ok: true, status: 'reached', arrivalReached: true, finalPosition: input.position,
+    code: 'arrived', diagnostics: { phase: 'arrival', observedAt: '2026-10-22T00:00:00.000Z' },
     reason: 'Reached the target; 1 scaffold remains in cleanupRequired.',
     edits: [{ kind: 'scaffold_placed', block: 'dirt', position: input.position }],
     cleanupRequired: [{ ...input.position, block: 'dirt', reason: 'Supports the bot.' }],
   }
   const compactMove = {
     ok: true, status: 'reached', arrivalReached: true, finalPosition: input.position,
-    reason: 'Reached the requested feet position.',
+    code: 'arrived', diagnostics: { phase: 'arrival', observedAt: '2026-10-22T00:00:00.000Z' },
+    reason: 'Reached the target; 1 scaffold remains in cleanupRequired.',
   }
   const incompletePreservedMove = {
     ok: false, status: 'blocked', arrivalReached: true, finalPosition: input.position,
+    code: 'cleanup_incomplete', diagnostics: { phase: 'arrival', observedAt: '2026-10-22T00:00:00.000Z' },
     reason: 'Required scaffold cleanup is incomplete.',
   }
   const movementSdk = createNativeSdk({ bot: botA, skills: {

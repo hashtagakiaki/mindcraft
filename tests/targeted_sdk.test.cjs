@@ -75,7 +75,8 @@ function makeBot() {
   bot.version = '1.21.1'
   bot.username = 'targetFixture'; bot.output = ''; bot.interrupt_code = false
   bot.game = { dimension: 'overworld', gameMode: 'creative' }
-  bot.entity = { position: new Vec3(0.5, 64, 0.5), eyeHeight:1.62, height: 1.8 }
+  bot.entity = { position: new Vec3(0.5, 64, 0.5), eyeHeight:1.62, height: 1.8, onGround: true, velocity: { x: 0, y: 0, z: 0 } }
+  bot.waitForTicks = async count => { for (let tick = 0; tick < count; tick++) bot.emit('physicsTick') }
   bot.modes = { isOn: () => false, pause() {}, unpause() {}, flushBehaviorLog: () => '' }
   bot.inventory = { slots: [], items: () => [] }
   bot.getControlState = () => false
@@ -226,7 +227,7 @@ async function main() {
     assert.equal(bot.state.digs.length,0)
     bot.state.route = 'unreachable'
     const unreachable = await skills.inspectChestAt(bot,0,64,0)
-    assert.equal(unreachable.status,'blocked'); assert.match(unreachable.reason,/No path/)
+    assert.equal(unreachable.status,'blocked'); assert.match(unreachable.reason,/surface aim/)
     const opens = bot.state.opened.length
     bot.state.route = 'ready'; bot.state.visible = true
     let stopping
@@ -302,9 +303,9 @@ async function main() {
     assert.equal(scans,2)
     assert.equal(world.getPosition(bot).x,bot.entity.position.x,'internal bot-first API still works')
     agent.places.sdk.verify=async()=>({ok:true,status:'missing'})
-    bot.entity.position = new Vec3(0.5,64,0.5)
+    bot.entity.position = new Vec3(4.5,64,0.5)
     const movesBeforeAlreadyArrived=bot.state.moves.length
-    const observationFalse=await run('await Promise.resolve(); log(bot,JSON.stringify({entity:world.isEntityType({name:"dirt"})})); log(bot,JSON.stringify(await places.verify({placeId:"missing"}))); log(bot,JSON.stringify(await skills.goToPosition({position:{x:0,y:64,z:0}})));')
+    const observationFalse=await run('await Promise.resolve(); log(bot,JSON.stringify({entity:world.isEntityType({name:"dirt"})})); log(bot,JSON.stringify(await places.verify({placeId:"missing"}))); log(bot,JSON.stringify(await skills.goToPosition({position:{x:4.1,y:64,z:0.1}})));')
     assert.equal(observationFalse.success,true,'a false observation does not stop subsequent actions')
     assert.match(observationFalse.message,/"entity":false/)
     assert.equal(bot.state.moves.length,movesBeforeAlreadyArrived,'an already satisfied destination does not start pathfinding')
@@ -319,6 +320,10 @@ async function main() {
     assert.equal(failedReach.sdkFailure.method,'skills.reachPosition')
     assert.equal(failedReach.sdkFailure.result.status,'blocked')
     assert.equal(failedReach.sdkFailure.result.ok,false)
+    assert.equal(typeof failedReach.sdkFailure.result.code, 'string')
+    assert.ok(failedReach.sdkFailure.result.diagnostics)
+    assert.ok(failedReach.skillResults.some(call => call.result?.code === failedReach.sdkFailure.result.code),
+      'navigation code and diagnostics remain in the skill record and sdkFailure after batch stop')
     assert.equal(failedReach.skillResults.some(call=>call.skill==='skills.breakBlockAt'),false,'failed reach prevents a later SDK mutation')
     bot.__nativeTestFellTreeResult = { status:'complete', confirmedLogs:2 }
     const wrappedFellTree = await run('await skills.fellTree({});')

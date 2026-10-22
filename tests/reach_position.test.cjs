@@ -72,13 +72,14 @@ function makeBot({ gap = [], wall = [], hazards = [], unknown = [], solidBlocks 
   let pendingPlacementActions = 0
   let pathAdvancedWhilePlacementPending = false
   const paths = []
-  bot.testState = { edits, inventory, paths, equippedForBlocks: [], get placementMode() { return placementMode }, set placementMode(value) { placementMode = value }, set placementDelay(value) { placementDelay = value }, get placementAttempts() { return placementAttempts }, get pendingPlacementActions() { return pendingPlacementActions }, get pathAdvancedWhilePlacementPending() { return pathAdvancedWhilePlacementPending } }
+  bot.testState = { edits, inventory, paths, equippedForBlocks: [], setBlock(position, name) { states.set(key(position), { name }) }, get placementMode() { return placementMode }, set placementMode(value) { placementMode = value }, set placementDelay(value) { placementDelay = value }, get placementAttempts() { return placementAttempts }, get pendingPlacementActions() { return pendingPlacementActions }, get pathAdvancedWhilePlacementPending() { return pathAdvancedWhilePlacementPending } }
   bot.registry = registry
   bot.version = '1.21.1'
   bot.output = ''
   bot.interrupt_code = false
   bot.game = { minY: 60, height: 60, dimension: 'overworld', gameMode: 'survival' }
   bot.entity = { id: 1, position: new Vec3(0.5, startY, 0.5), onGround: true, eyeHeight: 1.62, effects: {}, velocity: { x: 0, z: 0 } }
+  bot.waitForTicks = async count => { for (let tick = 0; tick < count; tick++) bot.emit('physicsTick') }
   bot.health = 20
   bot.entities = {}
   bot.world = world
@@ -290,6 +291,24 @@ async function main() {
     const wall = []
     for (let z = -4; z <= 4; z++) for (const y of [64, 65]) wall.push({ x: 3, y, z, name: 'dirt' })
 
+    // Use the installed pathfinder plugin here so its default postProcessPath
+    // (including half-block/shape-aware feet positions) is part of the check.
+    const processedPathBot = makeBot()
+    pathfinder.pathfinder(processedPathBot)
+    const processedPathMovements = new pathfinder.Movements(processedPathBot)
+    const processedPathGoal = new pathfinder.goals.GoalBlock(-3, 64, -2)
+    const processedPath = processedPathBot.pathfinder.getPathFromTo(processedPathMovements,
+      processedPathBot.entity.position, processedPathGoal, { timeout: 1200, tickTimeout: 60, searchRadius: 64 }).next().value.result
+    assert.equal(processedPath.status, 'success', JSON.stringify(processedPath))
+    assert.ok(processedPath.path.some(node => node.x % 1 !== 0 || node.z % 1 !== 0),
+      'default postProcessPath returns feet positions rather than integer A* nodes')
+    const processedEndpoint = processedPath.path.at(-1)
+    assert.deepEqual([Math.floor(processedEndpoint.x), Math.floor(processedEndpoint.y), Math.floor(processedEndpoint.z)], [-3, 64, -2])
+    assert.equal(new pathfinder.goals.GoalBlock(Math.floor(processedEndpoint.x), Math.floor(processedEndpoint.y),
+      Math.floor(processedEndpoint.z)).isEnd({ x: Math.floor(processedEndpoint.x), y: Math.floor(processedEndpoint.y),
+      z: Math.floor(processedEndpoint.z) }), true,
+    'post-processed feet endpoints are floored exactly once before constructing an integer checkpoint')
+
     const nativeDefault = makeBot({ wall })
     const nativeDefaultResult = await skills.goToPosition(nativeDefault, {
       position: { x: 6.5, y: 64, z: 0.5 },
@@ -317,6 +336,58 @@ async function main() {
     assert.equal(Object.hasOwn(sdkRouteResult, 'cleanupRequired'), false)
     assert.ok(sdkTemporary.testState.edits.some(edit => edit.kind === 'server_place'), 'native goToPosition may use temporary route scaffolds')
     assert.ok(sdkTemporary.testState.edits.some(edit => edit.kind === 'server_dig'), 'native goToPosition removes its confirmed route scaffolds before success')
+
+    const inTargetBlock = makeBot()
+    const sameBlock = await createNativeSdk({ bot: inTargetBlock, skills }).skills.goToPosition({
+      position: { x: 5.01, y: 64, z: 0.01 },
+    })
+    assert.equal(sameBlock.ok, true, JSON.stringify(sameBlock))
+    assert.equal(Math.floor(sameBlock.finalPosition.x), 5)
+    assert.equal(sameBlock.code, 'arrived')
+
+    const alreadyAtTargetBlock = makeBot()
+    alreadyAtTargetBlock.entity.position = new Vec3(5.99, 64, 0.99)
+    const alreadyThere = await createNativeSdk({ bot: alreadyAtTargetBlock, skills }).skills.reachPosition({
+      position: { x: 5.01, y: 64, z: 0.01 },
+    })
+    assert.equal(alreadyThere.ok, true, JSON.stringify(alreadyThere))
+    assert.equal(alreadyThere.code, 'already_at_goal')
+    assert.equal(alreadyAtTargetBlock.testState.paths.length, 0, 'same-block arrival does not require movement')
+
+    const adjacentBlockTarget = makeBot()
+    const adjacentBlockResult = await createNativeSdk({ bot: adjacentBlockTarget, skills }).skills.reachPosition({
+      position: { x: 1.001, y: 64, z: 0.5 },
+    })
+    assert.equal(adjacentBlockResult.ok, true, JSON.stringify(adjacentBlockResult))
+    assert.equal(Math.floor(adjacentBlockResult.finalPosition.x), 1,
+      'a target one millimeter across the block boundary requires entering that block')
+
+    const negativeBoundary = makeBot()
+    const negativeBoundaryResult = await createNativeSdk({ bot: negativeBoundary, skills }).skills.goToPosition({
+      position: { x: -0.001, y: 64, z: 0.5 },
+    })
+    assert.equal(negativeBoundaryResult.ok, true, JSON.stringify(negativeBoundaryResult))
+    assert.equal(Math.floor(negativeBoundaryResult.finalPosition.x), -1,
+      'a negative coordinate just below zero belongs to block -1')
+
+    const halfBlockStanding = makeBot()
+    halfBlockStanding.testState.setBlock(new Vec3(5, 64, 0), 'stone_slab')
+    halfBlockStanding.entity.position = new Vec3(5.5, 64.5, 0.5)
+    const halfBlockArrival = await createNativeSdk({ bot: halfBlockStanding, skills }).skills.reachPosition({
+      position: { x: 5.9, y: 64.9, z: 0.1 },
+    })
+    assert.equal(halfBlockArrival.ok, true, JSON.stringify(halfBlockArrival))
+    assert.equal(halfBlockArrival.code, 'already_at_goal')
+    assert.equal(Math.floor(halfBlockArrival.finalPosition.y), 64)
+
+    const stairStanding = makeBot()
+    stairStanding.testState.setBlock(new Vec3(5, 64, 0), 'stone_brick_stairs')
+    stairStanding.entity.position = new Vec3(5.5, 64.5, 0.8)
+    const stairArrival = await createNativeSdk({ bot: stairStanding, skills }).skills.reachPosition({
+      position: { x: 5.9, y: 64.1, z: 0.1 },
+    })
+    assert.equal(stairArrival.ok, true, JSON.stringify(stairArrival))
+    assert.equal(stairArrival.code, 'already_at_goal')
 
     const nativeLeave = makeBot({ gap: [2, 3, 4], corridor: true })
     const nativeReachSdk = createNativeSdk({ bot: nativeLeave, skills })
@@ -587,6 +658,18 @@ async function main() {
     assert.equal(ordinaryMovement.allow1by1towers, false)
     assert.deepEqual(ordinaryMovement.scafoldingBlocks, [])
 
+    const { operationResult } = await import(pathToFileURL(path.join(root, 'src/agent/library/operation_context.js')))
+    const diagnosticBot = makeBot({ wall })
+    const diagnosticOwner = createOperationContext({ id: 'reach-position-diagnostics', controller: new AbortController() },
+      { bot: diagnosticBot }, { intentEpoch: 1 })
+    diagnosticOwner.nativeNavigationNoEdits = true
+    await runOwnedOperation(diagnosticOwner, () => skills.reachPosition(diagnosticBot, {
+      position: { x: 6.5, y: 64, z: 0.5 }, allowDig: false, allowScaffold: false,
+    }))
+    const diagnosticOperation = operationResult(diagnosticOwner)
+    assert.equal(diagnosticOperation.skillResults[0].result.code, 'route_not_found')
+    assert.equal(diagnosticOperation.skillResults[0].result.diagnostics.lastSearch.status, 'noPath')
+
     const policyMovement = makeBot({ wall })
     const policyOwner = createOperationContext({ id: 'route-policy-owner', controller: new AbortController() }, { bot: policyMovement }, { intentEpoch: 1 })
     policyOwner.nativeNavigationNoEdits = true
@@ -614,6 +697,22 @@ async function main() {
     await oldPolicy
     assert.equal(goalOwnerBot.pathfinder.goal, replacementGoal,
       'a settled old navigation policy cannot clear a replacement goal it does not own')
+
+    const emptyNoPath = makeBot()
+    emptyNoPath.pathfinder.getPathTo = async () => ({ status: 'noPath', path: [] })
+    emptyNoPath.pathfinder.goto = async () => {
+      emptyNoPath.emit('path_update', { status: 'noPath', path: [] })
+    }
+    await assert.rejects(() => skills.goToGoal(emptyNoPath, new pathfinder.goals.GoalBlock(6, 64, 0)),
+      error => error.name === 'NavigationArrivalUnconfirmedError' && error.navigation?.code === 'route_not_found')
+
+    const emptyPathAlreadyThere = makeBot()
+    emptyPathAlreadyThere.pathfinder.getPathTo = async () => ({ status: 'noPath', path: [] })
+    emptyPathAlreadyThere.pathfinder.goto = async () => {
+      emptyPathAlreadyThere.emit('path_update', { status: 'noPath', path: [] })
+    }
+    assert.equal(await skills.goToGoal(emptyPathAlreadyThere, new pathfinder.goals.GoalBlock(0, 64, 0)), true,
+      'empty route can resolve successfully only when the current position already satisfies its goal')
 
     const outerScaffoldBot = makeBot({ gap: [2, 3, 4], corridor: true })
     const outerScaffoldResult = await runWithNavigationPolicy(outerScaffoldBot,
@@ -962,6 +1061,25 @@ async function main() {
       'the recovery route leaves the water on the goal side')
     assert.ok(waterStart.testState.paths.some(path => path.path.some(node => node.x >= 3)),
       'ordinary navigation resumes toward the requested destination')
+
+    const waterGoalAfterRecovery = makeBot({ floorY: 61, startY: 63, corridor: true, solidBlocks: [
+      { x: 3, y: 62, z: 0, name: 'stone' },
+    ], hazards: [
+      { x: 0, y: 63, z: 0, name: 'water' }, { x: 0, y: 62, z: 0, name: 'water' },
+      { x: 1, y: 63, z: 0, name: 'water' }, { x: 1, y: 62, z: 0, name: 'water' },
+      { x: 2, y: 62, z: 0, name: 'gravel' },
+    ] })
+    const waterGoalRejected = await reachPosition(waterGoalAfterRecovery, {
+      position: { x: 1.5, y: 63, z: 0.5 }, tolerance: 0.75, allowScaffold: false,
+    })
+    assert.equal(waterGoalRejected.status, 'blocked', JSON.stringify({ result: waterGoalRejected, output: waterGoalAfterRecovery.output }))
+    assert.equal(waterGoalRejected.code, 'unsafe_state', JSON.stringify({ result: waterGoalRejected, output: waterGoalAfterRecovery.output }))
+    assert.match(waterGoalAfterRecovery.output, /"reason":"target_reentry_forbidden"/,
+      'water recovery refuses the requested water block after confirming a safe landing')
+    assert.ok(waterGoalAfterRecovery.testState.paths.some(path => path.path.some(node => node.x === 2 && node.y === 63)),
+      'the refusal occurs only after reaching the dry landing')
+    assert.equal(Math.floor(waterGoalRejected.finalPosition.x), 2,
+      'the bot remains at the safe gravel landing instead of returning to the requested water block')
 
     const stagingWalls = [
       ...[64, 65].flatMap(y => [
