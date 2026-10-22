@@ -18,7 +18,8 @@ const COLLECT_DROP_RADIUS = 0.5;
 const PLANT_CONFIRM_TIMEOUT_MS = 2000;
 const HARVEST_CONFIRM_TIMEOUT_MS = 2000;
 const INTERACTION_CONFIRM_TIMEOUT_MS = 2000;
-const COMBAT_CHECK_INTERVAL_MS = 100;
+const COMBAT_CHECK_INTERVAL_MS = 50;
+const COMBAT_SETTLE_MS = 1500;
 const FARM_SEARCH_RADIUS = 32;
 const FARM_SEED_RESERVE = 1;
 const FARM_CHEST_RADIUS = 32;
@@ -991,7 +992,7 @@ export async function attackEntity(bot, entity, kill=true) {
 
 // Self-defense shares the same uninterrupted attack loop, but leaves drops until
 // nearby threats are gone instead of moving to collect them between opponents.
-async function fightEntity(bot, entity, kill, collectDrops, range=24) {
+async function fightEntity(bot, entity, kill, collectDrops, range=24, defend=false) {
     bot.modes.pause('self_defense');
     bot.modes.pause('cowardice');
     if (bot.pathfinder) {
@@ -1025,45 +1026,127 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24) {
         return true;
     }
     else {
-        let targetDied = false;
-        let targetGone = false;
-        const onEntityDead = deadEntity => { if (entity.id != null && deadEntity?.id === entity.id) targetDied = true; };
-        const onEntityGone = goneEntity => { if (entity.id != null && goneEntity?.id === entity.id) targetGone = true; };
+        const defeated = new Set();
+        const observed = new Map();
+        let lastDeathAt = 0;
+        let died = false;
+        let targetLost = false;
+        let attackRunning = false;
+        let currentTarget = null;
+        let retargetAfter = 0;
+        let retreating = false;
+        let motionKey = null;
+        const stopAttack = () => {
+            if (attackRunning) {
+                bot.pvp.forceStop();
+                motionKey = null;
+            }
+            attackRunning = false;
+            currentTarget = null;
+        };
+        const onEntityDead = dead => {
+            if (!observed.has(dead?.id)) return;
+            defeated.add(dead.id);
+            lastDeathAt = Date.now();
+            if (currentTarget?.id === dead.id) stopAttack();
+        };
+        const onEntityGone = gone => {
+            if (observed.has(gone?.id) && !defeated.has(gone.id)) targetLost = true;
+            if (bot.pvp.target?.id === gone?.id) stopAttack();
+        };
+        const onDeath = () => { died = true; };
+        const onEnd = () => { targetLost = true; };
+        const onAttacked = () => {
+            retargetAfter = Date.now() + Math.max(1, bot.pvp.meleeAttackRate.getTicks(bot)) * 50;
+        };
         bot.on('entityDead', onEntityDead);
-        bot.on('entityGone', onEntityGone);
-        let pvpStopped = false;
+        // Stop before PVP's entityGone handler starts its delayed graceful stop.
+        bot.prependListener('entityGone', onEntityGone);
+        bot.on('death', onDeath);
+        bot.on('end', onEnd);
+        bot.on('attackedTarget', onAttacked);
         const unregisterScaffoldRestore = registerNavigationScaffoldSettledCallback(bot, () => restoreCombatWeapon());
         try {
-            await trackNavigationSegment(bot, async () => {
-                try {
-                    await bot.pvp.attack(entity);
-                    while (!targetDied && !targetGone && !bot.interrupt_code) {
-                        if (!world.getNearbyEntities(bot, range).some(nearby => nearby.id === entity.id)) break;
-                        await new Promise(resolve => setTimeout(resolve, COMBAT_CHECK_INTERVAL_MS));
+            const completed = await trackNavigationSegment(bot, async () => {
+                while (!bot.interrupt_code && !died && !targetLost) {
+                    // Admission radius selects new threats; an engaged enemy
+                    // can leave that radius during knockback or a retreat.
+                    const nearby = world.getNearbyEntities(bot, Math.max(range, 24));
+                    const targets = nearby.filter(candidate => !defeated.has(candidate.id) &&
+                        (defend ? mc.isHostile(candidate) && (observed.has(candidate.id) || bot.entity.position.distanceTo(candidate.position) <= range) : candidate.id === entity.id));
+                    for (const target of targets) observed.set(target.id, target);
+                    // Losing a loaded target does not confirm its death.
+                    if ([...observed.keys()].some(id => !defeated.has(id) && !nearby.some(candidate => candidate.id === id))) {
+                        log(bot, 'Combat target left the loaded tracking area without a confirmed death.');
+                        return false;
                     }
-                } finally {
-                    // stop() waits for path_stop, which Pathfinder never emits
-                    // when already stationary. Clear the combat goal directly;
-                    // trackNavigationSegment still drains owned scaffold edits.
-                    bot.pvp.forceStop();
-                    pvpStopped = true;
+                    targets.sort((left, right) => bot.entity.position.distanceTo(left.position) - bot.entity.position.distanceTo(right.position));
+                    if (!targets.length) {
+                        stopAttack();
+                        if (!observed.size) return false;
+                        // Death can spawn new opponents (slimes); observe that
+                        // server update before declaring the area defended.
+                        if (!defend || Date.now() - lastDeathAt >= COMBAT_SETTLE_MS) return true;
+                        await new Promise(resolve => setTimeout(resolve, COMBAT_CHECK_INTERVAL_MS));
+                        continue;
+                    }
+                    const target = targets[0];
+                    const distance = bot.entity.position.distanceTo(target.position);
+                    if (distance < 3.4) retreating = true;
+                    else if (distance > 4.4) retreating = false;
+                    if (currentTarget?.id !== target.id) {
+                        stopAttack();
+                        if (Date.now() >= retargetAfter) {
+                            await restoreCombatWeapon();
+                            if (bot.interrupt_code || died || targetLost) return false;
+                            if (defeated.has(target.id)) continue;
+                            attackRunning = true;
+                            await bot.pvp.attack(target);
+                            currentTarget = target;
+                            motionKey = null; // attack() installs PVP's own follow goal
+                            if (bot.interrupt_code || died || targetLost) return false;
+                        }
+                    }
+                    const key = retreating ? `away:${targets.map(target => target.id).sort((a, b) => a-b).join(',')}` : `toward:${target.id}`;
+                    if (key !== motionKey) {
+                        const follow = (opponent, radius) => {
+                            const goal = new pf.goals.GoalFollow(opponent, radius);
+                            // GoalFollow normally waits an entire radius before
+                            // refreshing. Close combat needs each moved block.
+                            goal.hasChanged = function () {
+                                const position = opponent.position.floored();
+                                if (this.x === position.x && this.y === position.y && this.z === position.z) return false;
+                                Object.assign(this, { x: position.x, y: position.y, z: position.z });
+                                return true;
+                            };
+                            return goal;
+                        };
+                        const goal = retreating
+                            ? new pf.goals.GoalCompositeAll(targets.map(opponent => new pf.goals.GoalInvert(follow(opponent, 3.9))))
+                            : follow(target, 2.9);
+                        bot.pathfinder.setGoal(goal, true);
+                        motionKey = key;
+                    }
+                    await new Promise(resolve => setTimeout(resolve, COMBAT_CHECK_INTERVAL_MS));
                 }
+                return false;
             });
-            if (!targetDied) return false;
-            log(bot, `Successfully killed ${entity.name}.`);
+            if (!completed) return false;
+            log(bot, defend ? `Successfully defended self against ${observed.size} enemies.` : `Successfully killed ${entity.name}.`);
             if (collectDrops) await pickupNearbyItems(bot);
             return true;
         } catch (err) {
-            log(bot, `Failed to kill ${entity.name}: ${err.message}.`);
+            log(bot, `Combat failed: ${err.message}.`);
             return false;
         } finally {
             unregisterScaffoldRestore();
-            try {
-                if (!pvpStopped) bot.pvp.forceStop();
-            } finally {
-                bot.removeListener('entityDead', onEntityDead);
-                bot.removeListener('entityGone', onEntityGone);
-            }
+            stopAttack();
+            bot.pathfinder.setGoal(null);
+            bot.removeListener('entityDead', onEntityDead);
+            bot.removeListener('entityGone', onEntityGone);
+            bot.removeListener('death', onDeath);
+            bot.removeListener('end', onEnd);
+            bot.removeListener('attackedTarget', onAttacked);
             await restoreCombatWeapon();
         }
     }
@@ -1071,32 +1154,19 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24) {
 
 export async function defendSelf(bot, range=9) {
     /**
-     * Defend yourself from all nearby hostile mobs until there are no more.
+     * Fight nearby hostile mobs, switching to the closest threat and maintaining
+     * distance from the group. Success requires confirmed deaths and a quiet
+     * interval for death-spawned enemies. Does not collect drops during combat.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @param {number} range, the range to look for mobs. Defaults to 8.
-     * @returns {Promise<boolean>} true if the bot found any enemies and has killed them, false if no entities were found.
-     * @example
-     * await skills.defendSelf(bot);
-     * **/
+     * @param {number} range, the range in which enemies are engaged.
+     * @returns {Promise<boolean>} true after the observed enemies are killed; false on no targets, loss, failure or interruption.
+     **/
     bot.modes.pause('self_defense');
     bot.modes.pause('cowardice');
-    let attacked = false;
-    const defeated = new Set();
-    const nextEnemy = () => world.getNearestEntityWhere(bot, entity => mc.isHostile(entity) && !defeated.has(entity.id), range);
-    let enemy = nextEnemy();
-    while (enemy) {
-        if (bot.interrupt_code || !await fightEntity(bot, enemy, true, false, range)) return false;
-        attacked = true;
-        defeated.add(enemy.id);
-        enemy = nextEnemy();
-    }
-    if (attacked)
-        log(bot, `Successfully defended self.`);
-    else
-        log(bot, `No enemies nearby to defend self from.`);
-    return attacked;
+    const enemy = world.getNearestEntityWhere(bot, candidate => mc.isHostile(candidate), range);
+    if (!enemy) { log(bot, 'No enemies nearby to defend self from.'); return false; }
+    return fightEntity(bot, enemy, true, false, range, true);
 }
-
 
 
 export async function collectBlock(bot, blockType, num=1, exclude=null) {

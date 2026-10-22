@@ -92,7 +92,7 @@ s('smeltItem', { itemName: text(), quantity: positiveInt({ default: 1, descripti
 s('clearNearestFurnace', { furnacePosition: optional(position({ description: 'Use this exact furnace; never substitute another.' })) }, 'Remove contents of the selected furnace; omission selects the nearest.', a => [a.furnacePosition ?? null]);
 s('attackNearest', { mobType: text(), kill: field('boolean', { default: true }) }, 'Attack the nearest matching mob; kill:false makes one attack. Returns boolean.', a => [a.mobType, a.kill]);
 s('attackEntity', { entity: field('entity'), kill: field('boolean', { default: true }) }, 'Attack an observed Entity reference; kill:false makes one attack. Returns boolean.', a => [a.entity, a.kill]);
-s('defendSelf', { radius: radius(9) }, 'Fight attacking enemies within radius. Returns boolean.', a => [a.radius]);
+s('defendSelf', { radius: radius(9) }, 'Defend against nearby hostile enemies, retargeting close threats and keeping distance from the group. radius admits new enemies; engaged targets remain tracked within max(radius,24). Returns true only after confirmed deaths and a quiet interval for death-spawned enemies; false on no targets, loss or interruption.', a => [a.radius]);
 s('collectBlock', { blockType: text(), count: positiveInt({ default: 1, description: 'Blocks to collect, not drop quantity.' }), exclude: field('positions', { default: null, nullable: true, description: 'Positions to skip, never positions to collect.' }) }, 'Collect matching blocks. Returns boolean.', a => [a.blockType, a.count, a.exclude]);
 s('pickupNearbyItems', {}, 'Pick up nearby dropped items. Returns boolean.', () => []);
 for (const [name, description] of [

@@ -131,17 +131,30 @@ async function testStationaryActionIsNotInterrupted() {
   } finally { await rm(fixture.root, { recursive: true, force: true }) }
 }
 
-async function testSingleZombieDefenseBeforeFlight() {
+async function testSingleMeleeDefenseBeforeFlight() {
   const zombie = { id: 1, name: 'zombie', type: 'hostile', metadata: { 16: false } }
   const scenarios = [
     { name: 'unarmed adult zombie', expected: 'self_defense' },
     { name: 'low health', health: 9.5, expected: 'cowardice' },
     { name: 'cannot sprint', food: 6, expected: 'cowardice' },
-    { name: 'baby zombie', enemies: [{ ...zombie, metadata: { 16: true } }], expected: 'cowardice' },
+    { name: 'baby zombie', enemies: [{ ...zombie, metadata: { 16: true } }], expected: 'self_defense' },
     { name: 'adult flag omitted at its protocol default', enemies: [{ ...zombie, metadata: {} }], expected: 'self_defense' },
-    { name: 'metadata unavailable', enemies: [{ ...zombie, metadata: undefined }], expected: 'cowardice' },
+    { name: 'age metadata is not required', enemies: [{ ...zombie, metadata: undefined }], expected: 'self_defense' },
+    ...['husk', 'zombie_villager', 'drowned', 'spider'].map(name => ({ name, enemies: [{ ...zombie, name }], expected: 'self_defense' })),
+    { name: 'ranged drowned', enemies: [{ ...zombie, name: 'drowned', heldItem: { name: 'trident' } }], expected: 'cowardice' },
+    { name: 'armed zombie', enemies: [{ ...zombie, heldItem: { name: 'iron_sword' } }], expected: 'cowardice' },
+    { name: 'swimming bot', swimming: true, expected: 'cowardice' },
+    { name: 'enemy in water', block: { name: 'water' }, expected: 'cowardice' },
+    { name: 'target terrain unknown', block: null, expected: 'cowardice' },
+    { name: 'ranged skeleton', enemies: [{ ...zombie, name: 'skeleton' }], expected: 'cowardice' },
     { name: 'creeper', enemies: [{ ...zombie, name: 'creeper' }], expected: 'cowardice' },
     { name: 'multiple enemies', enemies: [zombie, { ...zombie, id: 2 }], expected: 'cowardice' },
+    { name: 'healthy pair', health: 20, enemies: [zombie, { ...zombie, id: 2 }], expected: 'self_defense' },
+    { name: 'healthy group of three', health: 20, enemies: [zombie, { ...zombie, id: 2 }, { ...zombie, id: 3 }], expected: 'self_defense' },
+    { name: 'four opponents', health: 20, enemies: [1, 2, 3, 4].map(id => ({ ...zombie, id })), expected: 'cowardice' },
+    { name: 'mixed melee pair', health: 20, enemies: [zombie, { ...zombie, id: 2, name: 'spider' }], expected: 'self_defense' },
+    { name: 'poison mixed into a group', health: 20, enemies: [zombie, { ...zombie, id: 2, name: 'cave_spider' }], expected: 'cowardice' },
+    { name: 'ranged mixed into a group', health: 20, enemies: [zombie, { ...zombie, id: 2, name: 'skeleton' }], expected: 'cowardice' },
     { name: 'defense off', defense: false, expected: 'cowardice' },
     { name: 'defense paused by a skill', paused: true, expected: 'cowardice' }
   ]
@@ -151,6 +164,8 @@ async function testSingleZombieDefenseBeforeFlight() {
       const { agent } = fixture
       Object.assign(agent.bot, { health: scenario.health ?? 10, food: scenario.food ?? 7,
         fixtureEnemies: scenario.enemies ?? [zombie] })
+      agent.bot.entity.isInWater = scenario.swimming ?? false
+      agent.bot.blockAt = () => Object.hasOwn(scenario, 'block') ? scenario.block : { name: 'air' }
       agent.bot.modes.loadJson({ cowardice: true, self_defense: scenario.defense ?? true })
       if (scenario.paused) agent.bot.modes.pause('self_defense')
       await agent.bot.modes.update()
@@ -426,7 +441,7 @@ async function main() {
   assert.match(source, /finally \{\s*mode\.active = false;/, 'all recovery outcomes clear mode.active')
   assert.match(source, /agent\.handleMessage\('system'/, 'mode-generated replanning stays an internal message')
   await testStationaryActionIsNotInterrupted()
-  await testSingleZombieDefenseBeforeFlight()
+  await testSingleMeleeDefenseBeforeFlight()
   await testAgentIntentAndRecoveryAdmission()
   await testRecoveryDedupAndUserStopRace()
   await testActionTimeoutHasSingleRecoveryOwner()

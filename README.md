@@ -210,11 +210,11 @@ An eval-owned isolated CaseServer smoke on 2026-10-02, using source pin `d549e73
 
 ### Action cancellation and reconnect behavior
 
-自己防衛 `defendSelf` は、明示攻撃 `attackEntity` と同じ戦闘処理を使う。別の接近・後退を終えるまで攻撃を待たず、現在の敵の死亡を確認してから次の敵を選び、戦闘中のドロップ回収は行わない。死亡後に消失待ちの敵を再選択せず、消失だけ・取消・攻撃開始失敗は討伐成功にしない。攻撃終了時はPVPの戦闘目標を即時解除し、既存の経路処理が所有する足場操作の確定を待つ。PVPによる追跡にも、そのスキルの経路方針を引き継ぐ。武器は必須ではない。
+自己防衛 `defendSelf` は50msごとに近い脅威を選び直し、複数の敵すべてから距離を取る移動と攻撃を一つの戦闘ループで管理する。対象切替では既存PVPの武器別攻撃間隔を守り、PVPが設定する追従目標を戦闘用の移動目標へ置き換える。新しい敵は指定radius内で受け入れ、交戦済みの敵は `max(radius,24)` ブロック以内で追跡する。吹き飛ばしや退避で索敵範囲を出ただけでは中断しない。死亡確認後も1.5秒間は分裂などによる追加の敵を確認し、全対象の死亡を確認してから成功する。消失だけ・自分の死亡・切断・取消は成功扱いせず、終了時に戦闘目標と専用listenerを解除する。明示攻撃 `attackEntity` も同じ処理を使うが、攻撃対象は指定されたEntityだけとする。武器・防具は必須ではなく、自己防衛中のドロップ回収は行わない。経路編集方針と足場設置後の装備復元は維持する。
 
-`cowardice` と `self_defense` が両方有効な場合、16ブロック以内の敵が成体ゾンビ1体だけで、HPが10以上・空腹度が6より大きく、自己防衛が一時停止されていなければ、逃走より自己防衛を選ぶ。子供・年齢不明・複数敵・他の敵種・低HP・ダッシュできない空腹度では従来どおり退避する。これは単独の成体ゾンビを対象とした方針で、装備を判定条件にしない。
+`cowardice` と `self_defense` が両方有効なら、HP10以上・空腹度6超で、ゾンビ（子供を含む）、ハスク、村人ゾンビ、地上のドラウンド、クモへ共通の条件で反撃する。HP20なら最大3体、HP20未満なら単独を対象とする。16ブロック以内の敵全てがこの種類で、手にアイテムを持たず、既知の乾いた地面にいて、自分も泳いでおらず、自己防衛が一時停止されていないことが条件。毒・遠隔・爆発を持つ敵、武器持ち、水中、これを超える群れや低体力では退避を選ぶ。これは自動modeの開始判断であり、SDKの `defendSelf` 自体には3体の上限を設けない。
 
-2026-10-22の隔離vanilla 1.21.1 / Normal検証では、空の在庫・防具なし・HP20・自然回復なしの平坦な囲いで、自己防衛3戦と自動mode選択1戦の全4戦で成体ゾンビを討伐し、HP20を維持した。自動選択は約16秒、自己防衛単独は約15〜23秒。複数敵・狭所・遠隔敵への勝利を確認した結果ではない。[実測記録](../mindcraft-tools/results/combat-melee-20261022/summary.json)。
+2026-10-22の隔離vanilla 1.21.1 / Normalで、素手・防具なし・自然回復なしの単独戦と複数戦を確認した。旧処理ではゾンビ2体で死亡したが、新処理では2体・3体やクモとの混在を討伐できた。条件別の勝敗・残HPと限界は[戦闘検証記録](docs/melee-combat-20261022.md)を参照。個別の少数試行であり、全地形・全敵編成の勝率を保証する結果ではない。
 
 The `unstuck` mode has been removed. Staying at the same position no longer interrupts an action or starts an automatic escape movement. Mode listings and default profiles omit it; existing saved `unstuck` settings are ignored. Navigation progress checks and action deadlines still apply.
 

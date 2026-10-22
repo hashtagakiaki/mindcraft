@@ -3,6 +3,8 @@ import * as world from './library/world.js';
 import * as mc from '../utils/mcdata.js';
 import settings from './settings.js'
 
+const meleeMobs = new Set(['zombie', 'husk', 'zombie_villager', 'drowned', 'spider']);
+
 async function say(agent, message) {
     agent.bot.modes.behavior_log += message + '\n';
     if (agent.shut_up || !settings.narrate_behavior) return;
@@ -88,7 +90,7 @@ const modes_list = [
     },
     {
         name: 'cowardice',
-        description: 'Run away from dangerous encounters; let self-defense handle one adult zombie when healthy and able to sprint. Interrupts all actions.',
+        description: 'Run away from dangerous encounters; let self-defense handle unarmed ground melee enemies when healthy and able to sprint. Interrupts all actions.',
         interrupts: ['all'],
         on: true,
         active: false,
@@ -96,11 +98,15 @@ const modes_list = [
             const bot = agent.bot;
             const enemies = world.getNearbyEntities(bot, 16).filter(entity => mc.isHostile(entity));
             const enemy = enemies[0];
-            // No weapon/armor requirement: keep the tested single-zombie fight
-            // available, while cowardice still handles untested or weaker states.
+            const maxEnemies = bot.health >= 20 ? 3 : 1;
+            const groundMelee = enemies.length > 0 && enemies.length <= maxEnemies && enemies.every(opponent => {
+                const block = meleeMobs.has(opponent.name) ? bot.blockAt(opponent.position) : null;
+                return block && !opponent.heldItem && !['water', 'lava', 'bubble_column'].includes(block.name);
+            });
+            // One shared encounter rule, independent of this bot's equipment or
+            // the opponents' age. Poison, ranged weapons and water remain risks.
             if (modes_map.self_defense.on && !modes_map.self_defense.paused &&
-                enemies.length === 1 && enemy.name === 'zombie' && enemy.metadata &&
-                (enemy.metadata[16] === undefined || enemy.metadata[16] === false) &&
+                groundMelee && !bot.entity.isInWater &&
                 bot.health >= 10 && bot.food > 6) return;
             if (enemy && await world.isClearPath(agent.bot, enemy)) {
                 say(agent, `Aaa! A ${enemy.name.replace("_", " ")}!`);

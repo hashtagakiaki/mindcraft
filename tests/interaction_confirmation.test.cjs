@@ -58,14 +58,16 @@ function makeBot(options = {}) {
   bot.pathfinder = {
     async getPathTo() { return { status: 'success' } },
     setMovements() {},
+    setGoal(goal) { bot.combatGoals ??= []; bot.combatGoals.push(goal); this.goal = goal },
     async goto() {},
     stop() {}
   }
   bot.tool = { async equipForBlock() { bot.heldItem = { type: 1, enchants: [] } } }
   bot.pvp = {
-    attack(entity) { options.onAttack?.(entity, bot) },
+    meleeAttackRate: { getTicks() { return 5 } },
+    attack(entity) { this.target = entity; bot.pathfinder.setGoal({ pluginFollow: entity.id }); options.onAttack?.(entity, bot) },
     stop() { bot.pvpStopCount = (bot.pvpStopCount || 0) + 1 },
-    forceStop() { bot.pvpStopCount = (bot.pvpStopCount || 0) + 1 }
+    forceStop() { this.target = null; bot.pathfinder.setGoal(null); bot.pvpStopCount = (bot.pvpStopCount || 0) + 1 }
   }
   bot.blockStates = new Map()
   if (options.blockStates) for (const [position, block] of options.blockStates) bot.blockStates.set(key(position), block)
@@ -317,23 +319,77 @@ async function main() {
     assert.equal(defender.listenerCount('entityGone'), 0)
   }
 
-  for (const mode of ['gone', 'interrupt', 'attack-reject']) {
+  for (const mode of ['gone', 'interrupt', 'attack-reject', 'disconnect']) {
     const enemy = { id: 23, name: 'zombie', type: 'hostile', position: makePosition(0, 0, 3) }
     const defender = makeBot({ entities: [enemy] })
+    let stalePluginStop = false
+    defender.on('entityGone', gone => {
+      if (defender.pvp.target?.id === gone.id) stalePluginStop = true
+    })
     defender.pvp.attack = async () => {
+      defender.pvp.target = enemy
       if (mode === 'gone') { defender.emit('entityGone', enemy); defender.navigation.entities = [] }
       if (mode === 'interrupt') defender.interrupt_code = true
       if (mode === 'attack-reject') throw new Error('injected asynchronous attack rejection')
+      if (mode === 'disconnect') defender.emit('end')
     }
     let stopped = false
     defender.pvp.stop = () => { throw new Error('graceful PVP stop can wait five seconds at a reached goal') }
-    defender.pvp.forceStop = () => { stopped = true }
+    defender.pvp.forceStop = () => { stopped = true; defender.pvp.target = null }
     assert.equal(await skills.defendSelf(defender), false, `${mode} is not a confirmed defense`)
     assert.equal(stopped, true, 'combat goal is cleared before the skill returns')
+    assert.equal(stalePluginStop, false, 'PVP cannot start a delayed stop after the owned target is lost')
     assert.equal(defender.listenerCount('entityDead'), 0)
-    assert.equal(defender.listenerCount('entityGone'), 0)
+    assert.equal(defender.listenerCount('entityGone'), 1, 'the unrelated plugin listener is preserved')
+    assert.equal(defender.listenerCount('end'), 0)
     assert.equal(defender.output.includes('Successfully defended'), false)
   }
+
+  const firstThreat = { id: 31, name: 'zombie', type: 'hostile', position: makePosition(3, 0, 0) }
+  const secondThreat = { id: 32, name: 'zombie', type: 'hostile', position: makePosition(4, 0, 0) }
+  const switches = []
+  let firstStrikeAt
+  const crowd = makeBot({ entities: [firstThreat, secondThreat], onAttack(enemy, bot) {
+    switches.push(enemy.id)
+    bot.emit('attackedTarget')
+    setImmediate(() => assert.equal(crowd.pathfinder.goal?.pluginFollow, undefined, 'tactical movement replaces PVP pursuit after every target switch'))
+    if (switches.length === 1) {
+      firstStrikeAt = Date.now()
+      firstThreat.position.x = 9 // engaged target leaves the admission radius
+      secondThreat.position.x = 2
+    } else if (enemy.id === secondThreat.id) {
+      assert.ok(Date.now() - firstStrikeAt >= 250, 'switching does not reset the attack cooldown')
+      bot.emit('entityDead', enemy)
+    } else bot.emit('entityDead', enemy)
+  } })
+  crowd.entity.position.distanceTo = position => Math.abs(position.x)
+  const crowdDeadline = setTimeout(() => { crowd.interrupt_code = true }, 4500)
+  try {
+    assert.equal(await skills.defendSelf(crowd, 8), true)
+    assert.deepEqual(switches, [31, 32, 31], 'switch to the nearer threat before the first one dies, then finish the engaged target beyond the admission radius')
+    assert.ok(crowd.combatGoals.some(goal => goal?.goals?.length === 2), 'retreat keeps distance from both threats')
+  } finally { clearTimeout(crowdDeadline) }
+  assert.equal(crowd.pathfinder.goal, null)
+  assert.equal(crowd.listenerCount('attackedTarget'), 0)
+
+  const parentSlime = { id: 33, name: 'slime', type: 'hostile', position: makePosition(2, 0, 0) }
+  const childSlime = { id: 34, name: 'slime', type: 'hostile', position: makePosition(2, 0, 0) }
+  const splitTargets = []
+  let childTimer
+  const split = makeBot({ entities: [parentSlime], onAttack(enemy, bot) {
+    splitTargets.push(enemy.id)
+    bot.emit('entityDead', enemy)
+    if (enemy.id === parentSlime.id) childTimer = setTimeout(() => bot.navigation.entities.push(childSlime), 200)
+  } })
+  try {
+    assert.equal(await skills.defendSelf(split), true)
+    assert.deepEqual(splitTargets, [33, 34], 'defense observes delayed death-spawned enemies')
+  } finally { clearTimeout(childTimer) }
+
+  const killedDefender = makeBot({ entities: [target], onAttack(_enemy, bot) { bot.emit('death') } })
+  killedDefender.navigation.entities[0] = { ...target, type: 'hostile' }
+  assert.equal(await skills.defendSelf(killedDefender), false, 'death cannot become success after automatic respawn')
+  assert.equal(killedDefender.listenerCount('death'), 0)
 
   const chestBlock = makeBlock('chest', makePosition(1, 0, 0))
   const makeChestTransfer = ({ direction, available, requested, moved = requested, serverUpdates = true }) => {
