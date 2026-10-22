@@ -88,12 +88,20 @@ const modes_list = [
     },
     {
         name: 'cowardice',
-        description: 'Run away from enemies. Interrupts all actions.',
+        description: 'Run away from dangerous encounters; let self-defense handle one adult zombie when healthy and able to sprint. Interrupts all actions.',
         interrupts: ['all'],
         on: true,
         active: false,
         update: async function (agent) {
-            const enemy = world.getNearestEntityWhere(agent.bot, entity => mc.isHostile(entity), 16);
+            const bot = agent.bot;
+            const enemies = world.getNearbyEntities(bot, 16).filter(entity => mc.isHostile(entity));
+            const enemy = enemies[0];
+            // No weapon/armor requirement: keep the tested single-zombie fight
+            // available, while cowardice still handles untested or weaker states.
+            if (modes_map.self_defense.on && !modes_map.self_defense.paused &&
+                enemies.length === 1 && enemy.name === 'zombie' && enemy.metadata &&
+                (enemy.metadata[16] === undefined || enemy.metadata[16] === false) &&
+                bot.health >= 10 && bot.food > 6) return;
             if (enemy && await world.isClearPath(agent.bot, enemy)) {
                 say(agent, `Aaa! A ${enemy.name.replace("_", " ")}!`);
                 execute(this, agent, async () => {

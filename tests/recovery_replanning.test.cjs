@@ -25,9 +25,9 @@ async function makeModeFixture() {
   await writeFile(path.join(root, 'package.json'), '{"type":"module"}')
   await writeFile(path.join(agentDir, 'modes.js'), await readFile(path.join(__dirname, '../src/agent/modes.js')))
   await writeFile(path.join(agentDir, 'settings.js'), 'export default { narrate_behavior: false }\n')
-  await writeFile(path.join(agentDir, 'library/skills.js'), 'export async function moveAway(bot, distance) { bot.fixtureMoves.push(distance); if (bot.fixtureMoveError) throw bot.fixtureMoveError }\n')
-  await writeFile(path.join(agentDir, 'library/world.js'), 'export function getNearestBlock() { return null }\n')
-  await writeFile(path.join(root, 'src/utils/mcdata.js'), 'export function isHostile() { return false }; export function isHuntable() { return false }\n')
+  await writeFile(path.join(agentDir, 'library/skills.js'), 'export async function moveAway(bot, distance) { bot.fixtureMoves.push(distance); if (bot.fixtureMoveError) throw bot.fixtureMoveError } export async function defendSelf() {} export async function avoidEnemies() {}\n')
+  await writeFile(path.join(agentDir, 'library/world.js'), 'export function getNearestBlock() { return null } export function getNearbyEntities(bot) { return bot.fixtureEnemies || [] } export function getNearestEntityWhere(bot, predicate) { return getNearbyEntities(bot).find(predicate) } export async function isClearPath() { return true }\n')
+  await writeFile(path.join(root, 'src/utils/mcdata.js'), 'export function isHostile(entity) { return entity.type === "hostile" }; export function isHuntable() { return false }\n')
   const { initModes } = await import(pathToFileURL(path.join(agentDir, 'modes.js')))
   const position = vector()
   const recoveryResults = []
@@ -129,6 +129,36 @@ async function testStationaryActionIsNotInterrupted() {
     assert.deepEqual(fixture.automaticMessages, [])
     assert.equal(fixture.agent.actions.currentAction.id, 41)
   } finally { await rm(fixture.root, { recursive: true, force: true }) }
+}
+
+async function testSingleZombieDefenseBeforeFlight() {
+  const zombie = { id: 1, name: 'zombie', type: 'hostile', metadata: { 16: false } }
+  const scenarios = [
+    { name: 'unarmed adult zombie', expected: 'self_defense' },
+    { name: 'low health', health: 9.5, expected: 'cowardice' },
+    { name: 'cannot sprint', food: 6, expected: 'cowardice' },
+    { name: 'baby zombie', enemies: [{ ...zombie, metadata: { 16: true } }], expected: 'cowardice' },
+    { name: 'adult flag omitted at its protocol default', enemies: [{ ...zombie, metadata: {} }], expected: 'self_defense' },
+    { name: 'metadata unavailable', enemies: [{ ...zombie, metadata: undefined }], expected: 'cowardice' },
+    { name: 'creeper', enemies: [{ ...zombie, name: 'creeper' }], expected: 'cowardice' },
+    { name: 'multiple enemies', enemies: [zombie, { ...zombie, id: 2 }], expected: 'cowardice' },
+    { name: 'defense off', defense: false, expected: 'cowardice' },
+    { name: 'defense paused by a skill', paused: true, expected: 'cowardice' }
+  ]
+  for (const scenario of scenarios) {
+    const fixture = await makeModeFixture()
+    try {
+      const { agent } = fixture
+      Object.assign(agent.bot, { health: scenario.health ?? 10, food: scenario.food ?? 7,
+        fixtureEnemies: scenario.enemies ?? [zombie] })
+      agent.bot.modes.loadJson({ cowardice: true, self_defense: scenario.defense ?? true })
+      if (scenario.paused) agent.bot.modes.pause('self_defense')
+      await agent.bot.modes.update()
+      await updateUntil(() => fixture.calls.run.length > 0 && agent.actions.currentAction === null)
+      assert.equal(fixture.calls.run[0].label, `mode:${scenario.expected}`, scenario.name)
+      assert.equal(fixture.calls.run.length, 1, 'one behavior owns the encounter')
+    } finally { await rm(fixture.root, { recursive: true, force: true }) }
+  }
 }
 
 async function makeAgentFixture() {
@@ -396,6 +426,7 @@ async function main() {
   assert.match(source, /finally \{\s*mode\.active = false;/, 'all recovery outcomes clear mode.active')
   assert.match(source, /agent\.handleMessage\('system'/, 'mode-generated replanning stays an internal message')
   await testStationaryActionIsNotInterrupted()
+  await testSingleZombieDefenseBeforeFlight()
   await testAgentIntentAndRecoveryAdmission()
   await testRecoveryDedupAndUserStopRace()
   await testActionTimeoutHasSingleRecoveryOwner()

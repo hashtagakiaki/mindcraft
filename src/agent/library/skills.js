@@ -986,7 +986,20 @@ export async function attackEntity(bot, entity, kill=true) {
      * await skills.attackEntity(bot, entity);
      **/
 
-    if (bot.pathfinder) bot.pathfinder.setMovements(navigationMovements(bot));
+    return fightEntity(bot, entity, kill, true);
+}
+
+// Self-defense shares the same uninterrupted attack loop, but leaves drops until
+// nearby threats are gone instead of moving to collect them between opponents.
+async function fightEntity(bot, entity, kill, collectDrops, range=24) {
+    bot.modes.pause('self_defense');
+    bot.modes.pause('cowardice');
+    if (bot.pathfinder) {
+        const movements = navigationMovements(bot);
+        bot.pathfinder.setMovements(movements);
+        // PVP installs its own movements when an attack starts.
+        bot.pvp.movements = movements;
+    }
     const scaffoldsBeforeCombat = navigationScaffoldsPlaced(bot);
     let combatWeaponRestoredAt = scaffoldsBeforeCombat;
     const restoreCombatWeapon = async () => {
@@ -1023,19 +1036,22 @@ export async function attackEntity(bot, entity, kill=true) {
         try {
             await trackNavigationSegment(bot, async () => {
                 try {
-                    bot.pvp.attack(entity);
+                    await bot.pvp.attack(entity);
                     while (!targetDied && !targetGone && !bot.interrupt_code) {
-                        if (!world.getNearbyEntities(bot, 24).some(nearby => nearby.id === entity.id)) break;
+                        if (!world.getNearbyEntities(bot, range).some(nearby => nearby.id === entity.id)) break;
                         await new Promise(resolve => setTimeout(resolve, COMBAT_CHECK_INTERVAL_MS));
                     }
                 } finally {
-                    bot.pvp.stop();
+                    // stop() waits for path_stop, which Pathfinder never emits
+                    // when already stationary. Clear the combat goal directly;
+                    // trackNavigationSegment still drains owned scaffold edits.
+                    bot.pvp.forceStop();
                     pvpStopped = true;
                 }
             });
             if (!targetDied) return false;
             log(bot, `Successfully killed ${entity.name}.`);
-            await pickupNearbyItems(bot);
+            if (collectDrops) await pickupNearbyItems(bot);
             return true;
         } catch (err) {
             log(bot, `Failed to kill ${entity.name}: ${err.message}.`);
@@ -1043,7 +1059,7 @@ export async function attackEntity(bot, entity, kill=true) {
         } finally {
             unregisterScaffoldRestore();
             try {
-                if (!pvpStopped) bot.pvp.stop();
+                if (!pvpStopped) bot.pvp.forceStop();
             } finally {
                 bot.removeListener('entityDead', onEntityDead);
                 bot.removeListener('entityGone', onEntityGone);
@@ -1062,53 +1078,18 @@ export async function defendSelf(bot, range=9) {
      * @example
      * await skills.defendSelf(bot);
      * **/
-    const scaffoldsBeforeCombat = navigationScaffoldsPlaced(bot);
-    let combatWeaponRestoredAt = scaffoldsBeforeCombat;
-    const restoreCombatWeapon = async () => {
-        await awaitNavigationPlacementSettled(bot);
-        const placed = navigationScaffoldsPlaced(bot);
-        if (placed > combatWeaponRestoredAt) {
-            await equipHighestAttack(bot);
-            combatWeaponRestoredAt = placed;
-        }
-    };
     bot.modes.pause('self_defense');
     bot.modes.pause('cowardice');
     let attacked = false;
-    let enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
-    if (enemy && bot.pathfinder) bot.pathfinder.setMovements(navigationMovements(bot));
-    if (enemy) {
-        const unregisterScaffoldRestore = registerNavigationScaffoldSettledCallback(bot, () => restoreCombatWeapon());
-        let completed;
-        try {
-            completed = await trackNavigationSegment(bot, async () => {
-                try {
-                while (enemy) {
-                    await equipHighestAttack(bot);
-                    if (bot.entity.position.distanceTo(enemy.position) >= 4 && enemy.name !== 'creeper' && enemy.name !== 'phantom') {
-                        try { await goToGoal(bot, new pf.goals.GoalFollow(enemy, 3.5)); }
-                        catch (err) {/* might error if entity dies, ignore */}
-                    }
-                    if (bot.entity.position.distanceTo(enemy.position) <= 2) {
-                        try {
-                            let inverted_goal = new pf.goals.GoalInvert(new pf.goals.GoalFollow(enemy, 2));
-                            await goToGoal(bot, inverted_goal);
-                        } catch (err) {/* might error if entity dies, ignore */}
-                    }
-                    await restoreCombatWeapon();
-                    bot.pvp.attack(enemy);
-                    attacked = true;
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), range);
-                    if (bot.interrupt_code) return false;
-                }
-                return true;
-                } finally { bot.pvp.stop(); }
-            });
-        } finally { unregisterScaffoldRestore(); }
-        if (!completed) return false;
+    const defeated = new Set();
+    const nextEnemy = () => world.getNearestEntityWhere(bot, entity => mc.isHostile(entity) && !defeated.has(entity.id), range);
+    let enemy = nextEnemy();
+    while (enemy) {
+        if (bot.interrupt_code || !await fightEntity(bot, enemy, true, false, range)) return false;
+        attacked = true;
+        defeated.add(enemy.id);
+        enemy = nextEnemy();
     }
-    if (navigationScaffoldsPlaced(bot) > scaffoldsBeforeCombat) await equipHighestAttack(bot);
     if (attacked)
         log(bot, `Successfully defended self.`);
     else

@@ -64,7 +64,8 @@ function makeBot(options = {}) {
   bot.tool = { async equipForBlock() { bot.heldItem = { type: 1, enchants: [] } } }
   bot.pvp = {
     attack(entity) { options.onAttack?.(entity, bot) },
-    stop() { bot.pvpStopCount = (bot.pvpStopCount || 0) + 1 }
+    stop() { bot.pvpStopCount = (bot.pvpStopCount || 0) + 1 },
+    forceStop() { bot.pvpStopCount = (bot.pvpStopCount || 0) + 1 }
   }
   bot.blockStates = new Map()
   if (options.blockStates) for (const [position, block] of options.blockStates) bot.blockStates.set(key(position), block)
@@ -256,6 +257,7 @@ async function main() {
   assert.equal(movementSettings[0].canDig, false, 'combat route cannot dig')
   assert.equal(movementSettings[0].canPlaceOn, true, 'combat route can use owned scaffold inventory')
   assert.equal(movementSettings[0].allow1by1towers, false, 'combat route cannot create tall one-block pillars')
+  assert.equal(combat.pvp.movements, movementSettings[0], 'PVP pursuit uses the owned route policy too')
   assert.equal(combat.blockAt(scaffoldPosition).name, 'dirt', 'confirmed combat scaffold may remain')
   assert.deepEqual(equipped, ['iron_sword', 'dirt', 'iron_sword'], 'confirmed route scaffold restores the combat weapon')
   assert.deepEqual(combat.attackEquipment, ['iron_sword', 'iron_sword'], 'the next strike during the continuing fight uses the combat weapon')
@@ -273,6 +275,7 @@ async function main() {
       for (let attempt = 0; attempt < 100 && bot.heldItem?.name !== 'iron_sword'; attempt++)
         await new Promise(resolve => setTimeout(resolve, 10))
       bot.followupStrikeWeapon = bot.heldItem?.name ?? null
+      bot.emit('entityDead', defendingTarget)
       bot.navigation.entities = []
     }
   })
@@ -288,6 +291,49 @@ async function main() {
   }
   assert.equal(await navigation.runWithNavigationPolicy(defending, combatPolicy, () => skills.defendSelf(defending)), true)
   assert.equal(defending.followupStrikeWeapon, 'iron_sword', 'defendSelf re-equips before the next strike while combat continues')
+
+  // A bare-handed defender starts attacking immediately, even if an opponent
+  // starts close or needs pursuit. Navigation belongs to the combat plugin.
+  for (const distance of [1.5, 5]) {
+    const opponents = [21, 22].map(id => ({ id, name: 'zombie', type: 'hostile', position: makePosition(0, 0, distance) }))
+    const engaged = []
+    const defender = makeBot({
+      entities: [...opponents],
+      onAttack(enemy, bot) {
+        engaged.push(enemy.id)
+        assert.equal(bot.heldItem, undefined, 'no weapon is required')
+        bot.emit('entityDead', enemy)
+        // Minecraft can retain a dying entity until its later removal packet.
+      }
+    })
+    defender.entity.position.distanceTo = () => distance
+    let positioningCalls = 0
+    defender.pathfinder.goto = async () => { positioningCalls++; throw new Error('separate combat positioning') }
+    assert.equal(await skills.defendSelf(defender), true)
+    assert.equal(positioningCalls, 0, 'defense must not wait for separate positioning before an attack')
+    assert.deepEqual(engaged, opponents.map(enemy => enemy.id), 'finish each target before switching; no loot trip between targets')
+    assert.equal(defender.pvpStopCount, 2)
+    assert.equal(defender.listenerCount('entityDead'), 0)
+    assert.equal(defender.listenerCount('entityGone'), 0)
+  }
+
+  for (const mode of ['gone', 'interrupt', 'attack-reject']) {
+    const enemy = { id: 23, name: 'zombie', type: 'hostile', position: makePosition(0, 0, 3) }
+    const defender = makeBot({ entities: [enemy] })
+    defender.pvp.attack = async () => {
+      if (mode === 'gone') { defender.emit('entityGone', enemy); defender.navigation.entities = [] }
+      if (mode === 'interrupt') defender.interrupt_code = true
+      if (mode === 'attack-reject') throw new Error('injected asynchronous attack rejection')
+    }
+    let stopped = false
+    defender.pvp.stop = () => { throw new Error('graceful PVP stop can wait five seconds at a reached goal') }
+    defender.pvp.forceStop = () => { stopped = true }
+    assert.equal(await skills.defendSelf(defender), false, `${mode} is not a confirmed defense`)
+    assert.equal(stopped, true, 'combat goal is cleared before the skill returns')
+    assert.equal(defender.listenerCount('entityDead'), 0)
+    assert.equal(defender.listenerCount('entityGone'), 0)
+    assert.equal(defender.output.includes('Successfully defended'), false)
+  }
 
   const chestBlock = makeBlock('chest', makePosition(1, 0, 0))
   const makeChestTransfer = ({ direction, available, requested, moved = requested, serverUpdates = true }) => {

@@ -210,6 +210,12 @@ An eval-owned isolated CaseServer smoke on 2026-10-02, using source pin `d549e73
 
 ### Action cancellation and reconnect behavior
 
+自己防衛 `defendSelf` は、明示攻撃 `attackEntity` と同じ戦闘処理を使う。別の接近・後退を終えるまで攻撃を待たず、現在の敵の死亡を確認してから次の敵を選び、戦闘中のドロップ回収は行わない。死亡後に消失待ちの敵を再選択せず、消失だけ・取消・攻撃開始失敗は討伐成功にしない。攻撃終了時はPVPの戦闘目標を即時解除し、既存の経路処理が所有する足場操作の確定を待つ。PVPによる追跡にも、そのスキルの経路方針を引き継ぐ。武器は必須ではない。
+
+`cowardice` と `self_defense` が両方有効な場合、16ブロック以内の敵が成体ゾンビ1体だけで、HPが10以上・空腹度が6より大きく、自己防衛が一時停止されていなければ、逃走より自己防衛を選ぶ。子供・年齢不明・複数敵・他の敵種・低HP・ダッシュできない空腹度では従来どおり退避する。これは単独の成体ゾンビを対象とした方針で、装備を判定条件にしない。
+
+2026-10-22の隔離vanilla 1.21.1 / Normal検証では、空の在庫・防具なし・HP20・自然回復なしの平坦な囲いで、自己防衛3戦と自動mode選択1戦の全4戦で成体ゾンビを討伐し、HP20を維持した。自動選択は約16秒、自己防衛単独は約15〜23秒。複数敵・狭所・遠隔敵への勝利を確認した結果ではない。[実測記録](../mindcraft-tools/results/combat-melee-20261022/summary.json)。
+
 The `unstuck` mode has been removed. Staying at the same position no longer interrupts an action or starts an automatic escape movement. Mode listings and default profiles omit it; existing saved `unstuck` settings are ignored. Navigation progress checks and action deadlines still apply.
 
 Normal successful work, including smelting and furnace clearing, keeps the current Minecraft connection. A cooperative stop also keeps that connection. `!stop` suppresses automatic resume and goal retries; a later explicit user instruction may start new work after the old action settles. A replacement instruction waits for the prior action to settle before its body can mutate the world.
