@@ -229,19 +229,15 @@ export class MindServerProxy {
                 this.managementScope = scope;
                 setSettings(settings);
             }
-            // The server acknowledges identity-bound registration before management is ready.
-            if (this.managementCredential) {
-                const registration = await new Promise((resolve, reject) => {
-                    const timer = setTimeout(() => reject(new Error('MindServer agent registration was not acknowledged')), PLACE_RPC_TIMEOUT_MS);
-                    socket.emit('connect-agent-process', this.name, { connectionGeneration }, value => { clearTimeout(timer); resolve(value); });
-                });
-                if (!registration?.accepted || registration.agentName !== this.name
-                    || registration.spawnId !== this.managementCredential.spawnId
-                    || registration.connectionGeneration !== connectionGeneration) {
-                    throw new Error('MindServer rejected the authenticated child registration');
-                }
-            } else {
-                socket.emit('connect-agent-process', this.name);
+            // Both management modes bind worker handles to an acknowledged connection generation.
+            const registration = await new Promise((resolve, reject) => {
+                const timer = setTimeout(() => reject(new Error('MindServer agent registration was not acknowledged')), PLACE_RPC_TIMEOUT_MS);
+                socket.emit('connect-agent-process', this.name, { connectionGeneration }, value => { clearTimeout(timer); resolve(value); });
+            });
+            if (!registration?.accepted || registration.agentName !== this.name
+                || (this.managementCredential && registration.spawnId !== this.managementCredential.spawnId)
+                || registration.connectionGeneration !== connectionGeneration) {
+                throw new Error('MindServer rejected the agent registration');
             }
             if (socket !== this.socket || connectionGeneration !== this.connectionGeneration || !socket.connected) return;
             const isCurrentConnection = () => socket === this.socket && connectionGeneration === this.connectionGeneration && socket.connected;

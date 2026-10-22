@@ -48,6 +48,7 @@ async function main() {
   let commandsReceived = 0
   let agentInstructions = 0
   let activeSocket = null
+  let workerConnection = null
   const settings = { profile: { name: 'botA' }, place_memory_enabled: true, place_world_id: '33333333-3333-4333-8333-333333333333' }
   const control = { generation: randomUUID(), mismatch: false, settingsMismatch: false, metadataPatch: null, pauseResult: null, restoreReject: false, restoreGate: null, settings }
   try {
@@ -65,11 +66,21 @@ async function main() {
     await writeFile(path.join(proxyDir, 'full_state.js'), 'export function getFullState(){ return {}; }')
     await writeFile(path.join(proxyDir, 'place_rpc.js'), `export class PlaceRpcError extends Error { constructor(code, message) { super(message); this.code = code; } }\nexport function requestPlaceRpc(socket, operation, payload, expectedRevision, timeoutMs) { return new Promise((resolve, reject) => { const timer = setTimeout(() => reject(Object.assign(new Error('timeout'), { code: 'RPC_TIMEOUT' })), timeoutMs); socket.emit('place:request', { operation, payload, expectedRevision }, response => { clearTimeout(timer); response?.ok ? resolve(response) : reject(Object.assign(new Error(response?.error?.message || 'RPC failed'), { code: response?.error?.code })); }); }); }`)
     const { MindServerProxy } = await import(pathToFileURL(path.join(proxyDir, 'mindserver_proxy.mjs')).href)
+    const { attachWorkerTaskManagement } = await import('../src/mindcraft/worker_task_management.js')
+    const { WorkerTaskRegistry } = await import('../src/mindcraft/worker_task_registry.js')
+    let workerRegistry = new WorkerTaskRegistry(control.generation)
     MindServerProxy.instance = null
 
     httpServer = http.createServer()
     ioServer = new Server(httpServer, { transports: ['websocket'] })
     ioServer.on('connection', socket => {
+      if (socket.handshake.auth.fixtureRole === 'operator') {
+        attachWorkerTaskManagement(socket, {
+          registry: workerRegistry, allowed: () => true, deny: () => assert.fail('unexpected denial'),
+          getConnection: name => name === 'botA' ? workerConnection : null, isClosing: () => false
+        })
+        return
+      }
       connects++
       activeSocket = socket
       let registered = false
@@ -83,8 +94,14 @@ async function main() {
           settingsFingerprint: fingerprint(data), ...control.metadataPatch
         } })
       })
-      socket.on('connect-agent-process', name => { if (name === 'botA') { registered = true; registrations++ } })
-      socket.on('login-agent', name => { if (registered && name === 'botA') logins++ })
+      socket.on('connect-agent-process', (name, metadata, ack) => {
+        if (name !== 'botA') return
+        registered = true
+        registrations++
+        workerConnection = { socket, in_game: false, connectionGeneration: metadata?.connectionGeneration ?? null }
+        ack?.({ accepted: true, agentName: name, spawnId: null, connectionGeneration: workerConnection.connectionGeneration })
+      })
+      socket.on('login-agent', name => { if (registered && name === 'botA') { logins++; workerConnection.in_game = true } })
       socket.on('chat-message', () => { commandsReceived++ })
       socket.on('place:request', (_request, ack) => {
         mutationCount++
@@ -198,6 +215,29 @@ export async function executeCommand(agent, message) {
     proxy.login()
     await until(() => registrations === 1 && logins === 1, 'initial registration/login missing')
 
+    // Exercise the real worker admission guard using the generation registered by
+    // the real legacy proxy, rather than pre-populating a fixture generation.
+    const checkWorkerAdmission = async requestId => {
+      const operator = dependencyRequire('socket.io-client').io(`http://127.0.0.1:${port}`, {
+        transports: ['websocket'], auth: { fixtureRole: 'operator' }
+      })
+      clients.push(operator)
+      agent.acceptWorkerTask = ({ handle }, ack) => {
+        assert.equal(handle.connectionGeneration, proxy.connectionGeneration)
+        assert.equal(handle.hubGeneration, proxy.serverGeneration)
+        ack({ accepted: true, taskId: handle.taskId, handleId: handle.id })
+      }
+      try {
+        const result = await operator.timeout(1000).emitWithAck('worker-task-start', {
+          bot: 'botA', requestId, message: 'isolated acceptance check; no game action'
+        })
+        assert.equal(result.success, true, result.error)
+        assert.equal(result.accepted, true)
+        assert.equal(result.handle.connectionGeneration, proxy.connectionGeneration)
+      } finally { operator.close(); delete agent.acceptWorkerTask }
+    }
+    await checkWorkerAdmission('legacy-initial')
+
     // A mutation whose acknowledgement is lost is returned as uncertain and is never replayed.
     holdMutationAck = () => {}
     const uncertain = proxy.rememberPlace({ name: 'one shot' })
@@ -206,11 +246,13 @@ export async function executeCommand(agent, message) {
     const ack = holdMutationAck
     holdMutationAck = null
     control.generation = randomUUID()
+    workerRegistry = new WorkerTaskRegistry(control.generation)
     clients[0].io.engine.close()
     await until(() => !proxy.managementReady, 'proxy did not pause on disconnect')
     proxy.requestPlace('remember', { place: { name: 'must not buffer' } }).catch(() => {})
     proxy.socket.sendBuffer.push(['chat-message', 'botA', { message: 'old command' }])
     await until(() => proxy.managementReady && registrations === 2 && logins === 2, 'proxy did not re-register after reconnect')
+    await checkWorkerAdmission('legacy-reconnected')
     assert.equal(proxy.serverGeneration, control.generation, 'server generation rotation incorrectly prevented same-namespace recovery')
     await delay(100)
     assert.equal(mutationCount, 1, 'old mutation was replayed')
