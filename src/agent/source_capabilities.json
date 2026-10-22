@@ -6,6 +6,7 @@
     "navigation-progress-stall": 1,
     "codex-cli-profile-model": 1,
     "management-auth-bootstrap": 1,
-    "operator-task-context": 1
+    "operator-task-context": 1,
+    "operator-worker-tasks": 1
   }
 }

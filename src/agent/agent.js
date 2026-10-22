@@ -11,7 +11,7 @@ import { createObservationScope } from './library/observation_scope.js';
 import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
 import { createPlacesFacade } from './places.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { SelfPrompter } from './self_prompter.js';
 import convoManager from './conversation.js';
 import { handleTranslation, handleEnglishTranslation } from '../utils/translator.js';
@@ -80,6 +80,167 @@ export class Agent {
     }
 
     isShutdownStarted() { return this._shutdownStarted; }
+
+    _markWorkerTaskStopping(reason) {
+        const task = this._workerTask;
+        if (!task || task.terminal || task.cancelRequested) return false;
+        task.cancelRequested = true;
+        task.cancelReason = reason;
+        task.status = 'stopping';
+        void this._publishWorkerTaskEvent(task, 'stopping', { message: reason });
+        if (task.runtime) void task.runtime.cancel(reason === 'operator-cancel' ? 'worker-cancel' : 'superseded');
+        return true;
+    }
+
+    acceptWorkerTask(payload, acknowledge) {
+        const handle = payload?.handle;
+        const message = payload?.message;
+        if (settings.agent_runtime !== 'codex-session' || this._shutdownStarted || this.managementPaused
+            || !serverProxy.managementReady || !serverProxy.socket?.connected
+            || handle?.bot !== this.name || !handle.id || !handle.taskId || !handle.requestId
+            || handle.hubGeneration !== serverProxy.serverGeneration
+            || handle.connectionGeneration !== serverProxy.connectionGeneration
+            || typeof message !== 'string' || !message.trim() || message.length > 4000) {
+            acknowledge?.({ accepted: false, error: 'native worker task is unavailable or its runtime scope is stale' });
+            return false;
+        }
+        const admissions = this._workerTaskAdmissions ||= new Map();
+        const contentHash = createHash('sha256').update(message).digest('hex');
+        const previous = admissions.get(handle.id);
+        if (previous) {
+            if (previous.contentHash !== contentHash || previous.handle.requestId !== handle.requestId) {
+                acknowledge?.({ accepted: false, error: 'worker handle was reused with different task content' });
+                return false;
+            }
+            acknowledge?.({ accepted: previous.accepted, taskId: handle.taskId, handleId: handle.id,
+                duplicate: true, error: previous.accepted ? undefined : 'worker task was already rejected' });
+            return previous.accepted;
+        }
+        if (admissions.size >= MAX_TASK_DISPATCH_IDS) {
+            acknowledge?.({ accepted: false, error: 'worker task dedupe capacity reached' });
+            return false;
+        }
+        if (this._intentReservation || this._workerTask && !this._workerTask.terminal
+            || this.codexRuntime?.active || this.actions?.executing) {
+            const entry = { handle: { ...handle }, contentHash, accepted: false };
+            admissions.set(handle.id, entry);
+            acknowledge?.({ accepted: false, taskId: handle.taskId, handleId: handle.id,
+                error: 'bot is busy or another operator intent is being admitted' });
+            return false;
+        }
+        const task = { handle: { ...handle }, taskId: handle.taskId, requestId: handle.requestId,
+            message, contentHash, accepted: true, status: 'accepted', terminal: false,
+            connectionGeneration: handle.connectionGeneration, hubGeneration: handle.hubGeneration,
+            runtime: null, execution: null, cancelRequested: false, cancelReason: null };
+        admissions.set(handle.id, task);
+        this._workerTask = task;
+        this._intentReservation = task;
+        acknowledge?.({ accepted: true, taskId: task.taskId, handleId: handle.id });
+        void this._publishWorkerTaskEvent(task, 'accepted', {});
+        queueMicrotask(() => { void this._runWorkerTask(task); });
+        return true;
+    }
+
+    async _runWorkerTask(task) {
+        if (this._workerTask !== task || task.cancelRequested) {
+            await this._finishWorkerTask(task, { status: 'cancelled', completion: 'unknown',
+                terminationReason: task.cancelReason || 'cancelled-before-start', operationSettlement: 'settled' });
+            return;
+        }
+        try {
+            task.execution = this.handleMessage('ADMIN', task.message, null, {
+                taskId: task.taskId, workerTask: task, intentReservation: task, onAccepted: () => {}
+            });
+            await task.execution;
+        } catch (error) {
+            task.executionError = String(error?.message || error);
+        }
+        const outcome = task.runtime?.terminalOutcome;
+        await this._finishWorkerTask(task, outcome || {
+            status: task.cancelRequested ? 'cancelled' : 'unknown', completion: 'unknown',
+            terminationReason: task.cancelReason || task.executionError || 'runtime-ended-without-terminal-outcome',
+            operationSettlement: this.actions?.executing ? 'pending' : 'settled',
+        });
+    }
+
+    async _finishWorkerTask(task, outcome) {
+        if (task.terminal) return;
+        const settlement = outcome.operationSettlement || (this.actions?.executing ? 'pending' : 'settled');
+        const terminalOutcome = { ...outcome, operationSettlement: settlement };
+        const transportOutcome = {
+            status: terminalOutcome.status || 'unknown',
+            completion: terminalOutcome.completion,
+            terminationReason: String(terminalOutcome.terminationReason || '').slice(0, 1000) || undefined,
+            operationSettlement: settlement,
+            ...(typeof terminalOutcome.saveSucceeded === 'boolean' ? { saveSucceeded: terminalOutcome.saveSucceeded } : {}),
+            ...(typeof terminalOutcome.diagnosticSaveSucceeded === 'boolean' ? { diagnosticSaveSucceeded: terminalOutcome.diagnosticSaveSucceeded } : {}),
+            ...(typeof terminalOutcome.traceSaveSucceeded === 'boolean' ? { traceSaveSucceeded: terminalOutcome.traceSaveSucceeded } : {}),
+            ...(terminalOutcome.goal ? { goal: terminalOutcome.goal } : {}),
+            ...(terminalOutcome.taskBudget ? { taskBudget: terminalOutcome.taskBudget } : {}),
+            ...(terminalOutcome.error ? { error: String(terminalOutcome.error).slice(0, 1000) } : {}),
+        };
+        if (settlement !== 'settled') {
+            task.status = 'unknown';
+            await this._publishWorkerTaskEvent(task, 'terminal', { outcome: { ...transportOutcome, status: 'unknown' } });
+            return;
+        }
+        task.status = terminalOutcome.status || 'unknown';
+        task.terminal = true;
+        await this._publishWorkerTaskEvent(task, 'terminal', { outcome: transportOutcome });
+        if (this._workerTask === task) this._workerTask = null;
+        if (this._intentReservation === task) this._intentReservation = null;
+    }
+
+    async reportWorkerTask(message, phase = 'final_answer') {
+        const task = this._workerTask;
+        if (!task || task.terminal || !message || phase !== 'final_answer') return false;
+        const report = String(message);
+        return this._publishWorkerTaskEvent(task, 'report', {
+            message: report.length > 4000 ? `${report.slice(0, 3900)}\n[報告は4000文字で省略]` : report, phase
+        });
+    }
+
+    async reportWorkerTaskProgress(progress) {
+        const task = this._workerTask;
+        if (!task || task.terminal || !progress || typeof progress.kind !== 'string') return false;
+        return this._publishWorkerTaskEvent(task, 'progress', { progress });
+    }
+
+    async cancelWorkerTask(payload, acknowledge) {
+        const task = this._workerTask;
+        if (!task || task.handle.id !== payload?.handle?.id
+            || task.handle.bot !== payload.handle.bot
+            || task.taskId !== payload?.handle?.taskId
+            || task.requestId !== payload?.handle?.requestId
+            || task.handle.hubGeneration !== payload?.handle?.hubGeneration
+            || task.connectionGeneration !== payload?.handle?.connectionGeneration
+            || task.connectionGeneration !== serverProxy.connectionGeneration
+            || task.hubGeneration !== serverProxy.serverGeneration) {
+            acknowledge?.({ accepted: false, error: 'worker task handle is stale or no longer owns this runtime' });
+            return false;
+        }
+        if (task.terminal) {
+            acknowledge?.({ accepted: true, status: task.status, terminal: true });
+            return true;
+        }
+        task.cancelRequested = true;
+        task.cancelReason = 'operator-cancel';
+        task.status = 'stopping';
+        acknowledge?.({ accepted: true, status: 'stopping', reason: 'task cancellation requested' });
+        void this._publishWorkerTaskEvent(task, 'stopping', { message: 'operator requested cancellation' });
+        if (task.runtime) void task.runtime.cancel('worker-cancel');
+        if (this.actions?.executing) void this.actions.stop('worker-cancel');
+        return true;
+    }
+
+    async _publishWorkerTaskEvent(task, type, details) {
+        if (!task?.handle || !serverProxy.managementReady || !serverProxy.socket?.connected
+            || task.connectionGeneration !== serverProxy.connectionGeneration
+            || task.hubGeneration !== serverProxy.serverGeneration) return false;
+        return serverProxy.emitWorkerTaskEvent({ handle: { ...task.handle }, handleId: task.handle.id,
+            bot: this.name, taskId: task.taskId, hubGeneration: task.hubGeneration,
+            connectionGeneration: task.connectionGeneration, type, ...details });
+    }
 
     getObservationScope() {
         return createObservationScope(this.bot, {
@@ -431,8 +592,19 @@ export class Agent {
             const managementGeneration = this._managementGeneration || 0;
             const managementPausedAtReceipt = this.managementPaused || this.actions?.managementPaused;
             const preserveStopCommand = message === '!stop' || message === '!restart';
+            let intentReservation = null;
             try {
                 if (ignore_messages.some((m) => message.startsWith(m))) return;
+
+                if (!convoManager.isOtherAgent(username)) {
+                    const command = containsCommand(message);
+                    const supersedes = !command || isAction(command) || ['!stop', '!stfu', '!restart'].includes(command);
+                    if (supersedes) {
+                        intentReservation = { kind: 'operator', token: Symbol('operator-intent') };
+                        this._intentReservation = intentReservation;
+                        this._markWorkerTaskStopping('superseded-by-operator-intent');
+                    }
+                }
 
                 this.shut_up = false;
 
@@ -443,15 +615,17 @@ export class Agent {
                 }
                 else {
                     if (preserveStopCommand) {
-                        await this.handleMessage(username, message, null, { recipients, ...metadata, onAccepted });
+                        await this.handleMessage(username, message, null, { recipients, ...metadata, onAccepted, intentReservation });
                         return;
                     }
                     let translation = await handleEnglishTranslation(message);
                     if (this._shutdownStarted || managementPausedAtReceipt || managementGeneration !== (this._managementGeneration || 0)) return;
-                    await this.handleMessage(username, translation, null, { recipients, ...metadata, onAccepted });
+                    await this.handleMessage(username, translation, null, { recipients, ...metadata, onAccepted, intentReservation });
                 }
             } catch (error) {
                 console.error('Error handling message:', error);
+            } finally {
+                if (intentReservation && this._intentReservation === intentReservation) this._intentReservation = null;
             }
         }
 
@@ -664,6 +838,8 @@ export class Agent {
         this._recoveryReportId = this._activeRecoveryId;
         const report = `${message}\nCurrent position: ${positionSummary(this.bot)}. Current inventory view: ${inventorySummary(this.bot)}.`;
         console.warn(report);
+        const workerTask = this._workerTask;
+        if (workerTask && !workerTask.terminal) void this._publishWorkerTaskEvent(workerTask, 'support', { message: report });
         void this.openChat(report).catch(error => console.error('Recovery status report failed:', error));
     }
 
@@ -721,6 +897,7 @@ export class Agent {
 
     async _handleMessageInternal(source, message, max_responses=null, internalOptions={}) {
         if (this._shutdownStarted) return false;
+        const workerTask = internalOptions.workerTask || null;
         let acceptedAcknowledged = false;
         const acknowledgeAccepted = () => {
             if (acceptedAcknowledged || !isHumanIntent || typeof internalOptions.onAccepted !== 'function') return;
@@ -733,7 +910,7 @@ export class Agent {
             internalOptions.onAccepted({ accepted: false, taskId: internalOptions.taskId, error });
         };
         const isHumanMessage = !!source && source !== 'system' && source !== this.name && !convoManager.isOtherAgent(source);
-        const incomingCommand = isHumanMessage && typeof message === 'string' ? containsCommand(message) : null;
+        const incomingCommand = isHumanMessage && !workerTask && typeof message === 'string' ? containsCommand(message) : null;
         const isUserStop = isHumanMessage && incomingCommand === '!stop';
         const isUserRestart = isHumanMessage && incomingCommand === '!restart';
         const isUserStfu = isHumanMessage && incomingCommand === '!stfu';
@@ -744,11 +921,28 @@ export class Agent {
         }
         const isHumanIntent = isHumanMessage && !!message && !isUserStop && !isUserStfu &&
             (!incomingCommand || (commandExists(incomingCommand) && isAction(incomingCommand)));
+        const intentReservation = workerTask || internalOptions.intentReservation ||
+            ((isHumanIntent || isUserStop || isUserStfu) ? { kind: 'operator', token: Symbol('operator-intent') } : null);
+        if (workerTask) {
+            if (this._workerTask !== workerTask || workerTask.cancelRequested
+                || this._intentReservation !== workerTask) return false;
+        } else if (isHumanIntent || isUserStop || isUserStfu) {
+            if (internalOptions.intentReservation && this._intentReservation !== internalOptions.intentReservation) {
+                acknowledgeRejected('This operator intent was superseded before it could be applied.');
+                return false;
+            }
+            if (intentReservation) this._intentReservation = intentReservation;
+            this._markWorkerTaskStopping('superseded-by-operator-intent');
+        }
         if (this.managementPaused && !isUserStop && !isUserRestart && !isSafeQuery) return false;
         if (this.actions?.managementIntentRequired && !isHumanIntent && !isUserStop && !isUserRestart && !isSafeQuery) return false;
         let generation = internalOptions.generation ?? this._messageGeneration;
         if (isHumanIntent || isUserStop || isUserStfu) this.history?.invalidateSummaries?.();
         if (isHumanIntent || isUserStop || isUserStfu) await this.codexRuntime?.cancel(isHumanIntent ? 'superseded' : 'user');
+        if ((isHumanIntent || isUserStop || isUserStfu) && intentReservation && this._intentReservation !== intentReservation) {
+            acknowledgeRejected('This operator intent was superseded before it could be applied.');
+            return false;
+        }
         if (isHumanIntent) {
             this._userIntentGeneration = (this._userIntentGeneration || 0) + 1;
             generation = ++this._messageGeneration;
@@ -763,7 +957,8 @@ export class Agent {
         const isCurrent = () => !this._shutdownStarted && generation === this._messageGeneration && (!recoveryId || recoveryId === this._activeRecoveryId) &&
             (isUserStop || isUserRestart || isSafeQuery || ((!this.managementPaused && !this.actions?.managementPaused) && managementGeneration === (this._managementGeneration || 0)));
         if (!this.managementPaused && !this.actions?.managementIntentRequired) await this.checkTaskDone();
-        if (this._shutdownStarted || !isCurrent()) return false;
+        if (this._shutdownStarted || !isCurrent()
+            || ((isHumanIntent || isUserStop || isUserStfu) && intentReservation && this._intentReservation !== intentReservation)) return false;
         if (!source || !message) {
             console.warn('Received empty message from', source);
             return false;
@@ -817,7 +1012,7 @@ export class Agent {
             if (!isCurrent()) return false;
         }
 
-        if (!self_prompt && !from_other_bot) { // from user, check for forced commands
+        if (!workerTask && !self_prompt && !from_other_bot) { // from user, check for forced commands
             const user_command_name = containsCommand(message);
             if (user_command_name) {
                 if (!commandExists(user_command_name)) {
@@ -854,7 +1049,7 @@ export class Agent {
             this.last_sender = source;
 
         // Now translate the message
-        message = await handleEnglishTranslation(message);
+        if (!workerTask) message = await handleEnglishTranslation(message);
         if (!isCurrent()) return false;
         console.log('received message from', source, ':', message);
 
@@ -891,11 +1086,15 @@ export class Agent {
                 if (!isCurrent() || !stopped.stopped) return false;
             }
             const { CodexRuntime } = await import('./codex_runtime.js');
-            if (!isCurrent()) return false;
+            if (!isCurrent() || workerTask && (this._workerTask !== workerTask || workerTask.cancelRequested)
+                || intentReservation && this._intentReservation !== intentReservation) return false;
             const runtime = new CodexRuntime(this);
             this.codexRuntime = runtime;
+            if (workerTask) workerTask.runtime = runtime;
             acknowledgeAccepted();
-            return runtime.run(source, isCurrent, this.currentTaskId);
+            const running = runtime.run(source, isCurrent, this.currentTaskId);
+            if (intentReservation && this._intentReservation === intentReservation) this._intentReservation = null;
+            return running;
         }
 
         if (!self_prompt && this.self_prompter.isActive()) // message is from user during self-prompting

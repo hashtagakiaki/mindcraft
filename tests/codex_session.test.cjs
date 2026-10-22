@@ -533,6 +533,60 @@ for (let batch = 0; batch < 10; batch++) {
     assert.equal(sentNative.at(-1).payload.message, 'legacy conversation')
     Object.assign(serverProxy, savedProxy)
 
+    // Worker admission is synchronous, busy requests do not replace ownership, and cancel binds to one exact handle.
+    const workerProxyState = { socket: serverProxy.socket, managementReady: serverProxy.managementReady,
+      connectionGeneration: serverProxy.connectionGeneration, serverGeneration: serverProxy.serverGeneration }
+    const workerEvents = []
+    serverProxy.socket = { connected: true, emit(event, payload, acknowledge) {
+      workerEvents.push({ event, payload })
+      acknowledge({ accepted: true })
+    } }
+    serverProxy.managementReady = true
+    serverProxy.connectionGeneration = 21
+    serverProxy.serverGeneration = 'worker-fixture-hub'
+    const workerAgent = Object.create(Agent.prototype)
+    Object.assign(workerAgent, { name: 'WorkerLifecycle', _shutdownStarted: false, managementPaused: false,
+      _intentReservation: null, _workerTask: null, actions: { executing: false, stop: async () => ({ stopped: true }) } })
+    const workerRun = deferred()
+    let workerHandleMessageCalls = 0
+    workerAgent.handleMessage = (_source, _message, _limit, options) => {
+      workerHandleMessageCalls++
+      const runtime = { terminalOutcome: null, cancel: async reason => { runtime.cancelReason = reason } }
+      options.workerTask.runtime = runtime
+      workerAgent.codexRuntime = runtime
+      workerAgent._intentReservation = null
+      return workerRun.promise
+    }
+    const makeWorkerHandle = taskId => ({ id: `handle-${taskId}`, taskId, requestId: `request-${taskId}`,
+      bot: 'WorkerLifecycle', hubGeneration: 'worker-fixture-hub', connectionGeneration: 21 })
+    const primaryHandle = makeWorkerHandle('primary')
+    let acceptedWorker
+    assert.equal(workerAgent.acceptWorkerTask({ handle: primaryHandle, message: 'finish one result' }, value => { acceptedWorker = value }), true)
+    assert.deepEqual(acceptedWorker, { accepted: true, taskId: 'primary', handleId: 'handle-primary' })
+    const competingHandle = makeWorkerHandle('competing')
+    let rejectedWorker
+    assert.equal(workerAgent.acceptWorkerTask({ handle: competingHandle, message: 'replace current work' }, value => { rejectedWorker = value }), false)
+    assert.equal(rejectedWorker.accepted, false)
+    assert.equal(workerAgent._workerTask.handle.id, primaryHandle.id, 'busy admission preserves the current worker handle')
+    assert.equal(workerHandleMessageCalls, 0, 'accepted task begins in the queued boundary, after the immediate ACK')
+    await until(() => workerHandleMessageCalls === 1)
+    let staleCancel
+    assert.equal(await workerAgent.cancelWorkerTask({ handle: { ...primaryHandle, taskId: 'later-task' } }, value => { staleCancel = value }), false)
+    assert.equal(staleCancel.accepted, false, 'an altered old handle cannot cancel the worker')
+    let acceptedCancel
+    assert.equal(await workerAgent.cancelWorkerTask({ handle: primaryHandle }, value => { acceptedCancel = value }), true)
+    assert.equal(acceptedCancel.status, 'stopping')
+    assert.equal(workerAgent.codexRuntime.cancelReason, 'worker-cancel')
+    workerAgent.codexRuntime.terminalOutcome = { status: 'cancelled', completion: 'unknown', operationSettlement: 'settled', saveSucceeded: true }
+    workerRun.resolve(false)
+    await until(() => workerEvents.some(event => event.event === 'worker-task-event' && event.payload.type === 'terminal'))
+    assert.equal(workerEvents.filter(event => event.event === 'worker-task-event' && event.payload.type === 'terminal').length, 1)
+    assert.equal(workerEvents.at(-1).payload.outcome.status, 'cancelled')
+    const afterTerminalCancel = await workerAgent.cancelWorkerTask({ handle: primaryHandle })
+    assert.equal(afterTerminalCancel, false, 'the Agent no longer recognizes a completed worker as current')
+    assert.equal(workerAgent._workerTask, null)
+    Object.assign(serverProxy, workerProxyState)
+
     assert.equal(agent.bot.output, settledOutput, 'no late output mutates state after action settlement')
     const bad = await agent.actions.runAction('lint', () => agent.coder.executeCode('await skills.nonexistent(bot);'), { timeout: 0 })
     assert.equal(bad.success, false)

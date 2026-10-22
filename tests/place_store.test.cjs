@@ -263,6 +263,8 @@ async function runHubShutdownFixture(root) {
   let mindserverSource = await readFile(path.join(sourceRoot, 'mindcraft/mindserver.js'), 'utf8')
   mindserverSource = mindserverSource.replace('placeStoreLifecycle = attachPlaceStoreLifecycle({\n', 'placeStoreLifecycle = attachPlaceStoreLifecycle({\n        processObject: globalThis.__fixtureProcess,\n')
   await writeFile(path.join(mindcraftDir, 'mindserver.js'), mindserverSource)
+  await writeFile(path.join(mindcraftDir, 'worker_task_registry.js'), await readFile(path.join(sourceRoot, 'mindcraft/worker_task_registry.js')))
+  await writeFile(path.join(mindcraftDir, 'worker_task_management.js'), await readFile(path.join(sourceRoot, 'mindcraft/worker_task_management.js')))
   await writeFile(path.join(mindcraftDir, 'state_poller.js'), await readFile(path.join(sourceRoot, 'mindcraft/state_poller.js')))
   await writeFile(path.join(mindcraftDir, 'bot_output_history.js'), await readFile(path.join(sourceRoot, 'mindcraft/bot_output_history.js')))
   await mkdir(path.join(fixtureRoot, 'src/utils'), { recursive: true })

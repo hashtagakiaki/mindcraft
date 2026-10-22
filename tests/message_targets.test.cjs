@@ -77,15 +77,20 @@ async function main() {
   const chatEnd = agentSource.indexOf('\n        });', chatStart) + '\n        });'.length
   const received = []
   const bot = new EventEmitter()
-  const agent = { name: 'Bot2', bot, actions: {}, handleMessage: async (...args) => received.push(args) }
+  const stoppingWorkers = []
+  const agent = { name: 'Bot2', bot, actions: {}, _markWorkerTaskStopping: reason => stoppingWorkers.push(reason),
+    handleMessage: async (...args) => received.push(args) }
   const scope = { settings: { only_chat_with: ['ADMIN'] }, convoManager: { isOtherAgent: () => false }, handleEnglishTranslation: async text => text,
-    parseAddressedMessage, serverProxy: { getAgents: () => agents, getNumOtherAgents: () => 2 }, randomUUID: () => 'fixture-task', console }
+    parseAddressedMessage, containsCommand: text => text.startsWith('!') ? text.split('(')[0] : null,
+    isAction: () => true, serverProxy: { getAgents: () => agents, getNumOtherAgents: () => 2 },
+    randomUUID: () => 'fixture-task', console }
   const install = vm.runInNewContext(`(function() {${setup}${agentSource.slice(chatStart, chatEnd)}})`, scope)
   install.call(agent)
   bot.emit('chat', 'ADMIN', '@all !stop')
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(received[0][1], '!stop')
   assert.deepEqual(received[0][3].recipients, ['Bot2', 'Bot3'])
+  assert.equal(stoppingWorkers.length, 1, 'an explicit operator intent marks the current worker for cancellation')
   bot.emit('chat', 'ADMIN', '@Bot3 ignore Bot2')
   bot.emit('chat', 'stranger', '@all build')
   bot.emit('chat', 'ADMIN', 'unaddressed')
@@ -95,6 +100,8 @@ async function main() {
   bot.emit('whisper', 'ADMIN', 'private instruction')
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(received.at(-1)[1], 'private instruction', 'ordinary whispers still work')
+  assert.ok(received.at(-1)[3].intentReservation, 'operator intent reservation is passed through the same Agent boundary')
+  assert.equal(stoppingWorkers.length, 2)
 
   // Actual command path records recipient context without changing command parsing.
   const methodStart = agentSource.indexOf('    async handleMessage(')
@@ -117,8 +124,19 @@ async function main() {
     commandExists: () => true, isAction: () => true, settings: { max_commands: 1 }, recipientContext,
     executeCommand: async (_agent, message) => { commands.push(message); return null }, randomUUID: () => 'fixture-task', console
   })
+  const latestIntent = { token: 'newer' }
+  let staleIntentAck
+  let staleIntentStops = 0
+  const concurrentAgent = { name: 'Bot2', _messageGeneration: 0, _intentReservation: latestIntent,
+    _markWorkerTaskStopping() { staleIntentStops++ }, actions: {}, checkTaskDone: async () => {}, history: {}, routeResponse() {} }
+  assert.equal(await internalHandle.call(concurrentAgent, 'ADMIN', 'older delayed operator intent', null, {
+    intentReservation: { token: 'older' }, onAccepted: value => { staleIntentAck = value }
+  }), false, 'an earlier translation cannot replace a later synchronous operator reservation')
+  assert.equal(concurrentAgent._intentReservation, latestIntent)
+  assert.equal(staleIntentStops, 0)
+  assert.equal(staleIntentAck.accepted, false)
   const commandAgent = { name: 'Bot2', _messageGeneration: 0, actions: { beginUserIntent() {} }, checkTaskDone: async () => {},
-    history: { add: async (...args) => history.push(args) }, routeResponse() {}, _handleMessageInternal: internalHandle }
+    _markWorkerTaskStopping() {}, history: { add: async (...args) => history.push(args) }, routeResponse() {}, _handleMessageInternal: internalHandle }
   await handle.call(commandAgent, 'ADMIN', '!newAction("build")', null, { recipients: ['Bot2', 'Bot3'], taskId: 'command-task', onAccepted: value => accepted.push(value) })
   assert.match(history[0][1], /ADMIN.*Bot2, Bot3/)
   assert.equal(history[1][1], '!newAction("build")')

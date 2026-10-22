@@ -12,6 +12,8 @@ import { attachPlaceRpc } from './place_rpc.js';
 import { createHash, randomUUID, randomBytes, timingSafeEqual } from 'crypto';
 import { createStatePoller } from './state_poller.js';
 import { readBotOutputHistory } from './bot_output_history.js';
+import { WorkerTaskRegistry } from './worker_task_registry.js';
+import { attachWorkerTaskAgentEvents, attachWorkerTaskManagement } from './worker_task_management.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Mindserver is:
@@ -118,6 +120,7 @@ export function createMindServer(host_public = false, port = 8080) {
     let placeStoreLifecycle = null;
     let placeRpcClosing = false;
     let hubClosing = false;
+    const workerTasks = new WorkerTaskRegistry(managementGeneration);
     if (Boolean(settings.place_state_dir) !== Boolean(settings.place_world_id)) {
         placeStoreError = Object.assign(new Error('place_state_dir and place_world_id must be configured together'), { code: 'INVALID_CONFIG' });
         console.error('Place store configuration is incomplete:', placeStoreError.message);
@@ -140,6 +143,8 @@ export function createMindServer(host_public = false, port = 8080) {
 
         if (protectedMode && socket.data.identity.role === 'observer') {
             socket.on('send-task-context', (_target, _data, callback) => deny(callback));
+            for (const event of ['worker-task-start', 'worker-task-read', 'worker-task-wait', 'worker-task-cancel'])
+                socket.on(event, (...args) => deny(args.at(-1)));
             socket.on('readiness', callback => {
                 if (!allowed(socket, ['observer'])) return deny(callback);
                 callback?.({ ready: true, agents: Object.entries(agent_connections).map(([name, connection]) => ({
@@ -148,6 +153,21 @@ export function createMindServer(host_public = false, port = 8080) {
             });
             return;
         }
+
+        attachWorkerTaskManagement(socket, {
+            registry: workerTasks,
+            allowed: roles => allowed(socket, roles),
+            deny,
+            getConnection: name => agent_connections[name],
+            isClosing: () => hubClosing,
+        });
+        attachWorkerTaskAgentEvents(socket, {
+            registry: workerTasks,
+            getBot: () => processAgentName,
+            isCurrentConnection: name => allowedBot(socket, name) && agent_connections[name]?.socket === socket,
+            getConnectionGeneration: name => agent_connections[name]?.connectionGeneration,
+            getHubGeneration: () => managementGeneration,
+        });
 
         attachPlaceRpc(socket, {
             getAgentName: () => processAgentName && allowedBot(socket, processAgentName)
@@ -259,6 +279,7 @@ export function createMindServer(host_public = false, port = 8080) {
             const disconnectedName = curAgentName ?? processAgentName;
             if (disconnectedName && agent_connections[disconnectedName]?.socket === socket) {
                 console.log(`Agent ${disconnectedName} disconnected`);
+                workerTasks.markDisconnected(disconnectedName, agent_connections[disconnectedName].connectionGeneration);
                 agent_connections[disconnectedName].in_game = false;
                 agent_connections[disconnectedName].socket = null;
                 agent_connections[disconnectedName].connectionGeneration = null;

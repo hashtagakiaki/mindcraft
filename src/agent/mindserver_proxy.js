@@ -64,6 +64,23 @@ export class MindServerProxy {
         this.managementCredential = { spawnId: credential.spawnId, token: credential.token };
     }
 
+    emitWorkerTaskEvent(payload) {
+        if (!this.managementReady || !this.socket?.connected) return Promise.resolve(false);
+        const socket = this.socket;
+        const connectionGeneration = this.connectionGeneration;
+        return new Promise(resolve => {
+            let settled = false;
+            const timer = setTimeout(() => { if (!settled) { settled = true; resolve(false); } }, PLACE_RPC_TIMEOUT_MS);
+            socket.emit('worker-task-event', payload, result => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve(socket === this.socket && connectionGeneration === this.connectionGeneration
+                    && result?.accepted === true);
+            });
+        });
+    }
+
     _installListeners() {
         this.socket.on('disconnect', () => {
             this.connected = false;
@@ -104,6 +121,20 @@ export class MindServerProxy {
                 serverGeneration: this.serverGeneration,
             });
             acknowledge?.(result);
+        });
+        this.socket.on('worker-task-start', (payload, acknowledge) => {
+            if (!this.managementReady || !this.agent?.acceptWorkerTask) {
+                acknowledge?.({ accepted: false, error: 'native worker task is unavailable' });
+                return;
+            }
+            this.agent.acceptWorkerTask(payload, acknowledge);
+        });
+        this.socket.on('worker-task-cancel', (payload, acknowledge) => {
+            if (!this.managementReady || !this.agent?.cancelWorkerTask) {
+                acknowledge?.({ accepted: false, error: 'native worker task is unavailable' });
+                return;
+            }
+            void this.agent.cancelWorkerTask(payload, acknowledge);
         });
         this.socket.on('agents-status', (agents) => {
             if (!this.managementReady) {

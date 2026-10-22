@@ -245,6 +245,14 @@ export class CodexRuntime {
         const record = (type, detail = {}) => {
             try {
                 appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), taskId, type, ...detail }) + '\n');
+                if (this.taskId === taskId && type === 'operation_result') {
+                    void agent.reportWorkerTaskProgress?.({ kind: 'operation-result', operation: operationCount,
+                        success: detail.result?.success !== false,
+                        progressObserved: Boolean(detail.result?.progressObserved),
+                        confirmedChangeCount: Array.isArray(detail.result?.confirmedChanges) ? detail.result.confirmedChanges.length : 0 });
+                } else if (this.taskId === taskId && type === 'thread_checkpoint') {
+                    void agent.reportWorkerTaskProgress?.({ kind: 'thread-checkpoint', saved: detail.saved === true });
+                }
                 return true;
             } catch (error) {
                 traceWriteFailureCount++;
@@ -392,7 +400,11 @@ export class CodexRuntime {
                     turnCount++;
                 },
                 threadId: persistent ? agent.history.getCodexThread(scope) : null,
-                onMessage: message => { if (current()) sendOutputToServer(agent.name, message); } });
+                onMessage: (message, phase) => {
+                    if (!current()) return;
+                    sendOutputToServer(agent.name, message);
+                    if (this.taskId === taskId) void agent.reportWorkerTask?.(message, phase);
+                } });
             await this.session.open(this.abort.signal);
             const inputTurns = agent.history.getCodexInput?.(this.session.resumed)
                 ?? (this.session.resumed ? turns.slice(-1) : turns);

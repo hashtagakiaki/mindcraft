@@ -70,6 +70,8 @@ export async function shutdown(request) { return closeHandler?.(request) }
 `)
     const source = await readFile(path.join(sourceRoot, 'src/mindcraft/mindserver.js'))
     await write(root, 'src/mindcraft/mindserver.js', source)
+    await write(root, 'src/mindcraft/worker_task_registry.js', await readFile(path.join(sourceRoot, 'src/mindcraft/worker_task_registry.js')))
+    await write(root, 'src/mindcraft/worker_task_management.js', await readFile(path.join(sourceRoot, 'src/mindcraft/worker_task_management.js')))
     await write(root, 'src/mindcraft/state_poller.js', await readFile(path.join(sourceRoot, 'src/mindcraft/state_poller.js')))
     await write(root, 'src/mindcraft/bot_output_history.js', await readFile(path.join(sourceRoot, 'src/mindcraft/bot_output_history.js')))
     const fixtureSettings = await import(pathToFileURL(path.join(root, 'settings.js')).href)
@@ -168,6 +170,43 @@ export async function shutdown(request) { return closeHandler?.(request) }
       taskId: 'fixture-task-1', messageId: 'observer-facts', message: 'forged observer context'
     })
     assert.equal(observerContextAck.success, false, 'protected observers cannot use the operator context route')
+
+    let workerEnvelope
+    botB.on('worker-task-start', (envelope, acknowledge) => {
+      workerEnvelope = envelope
+      acknowledge({ accepted: true, taskId: envelope.handle.taskId, handleId: envelope.handle.id })
+      setTimeout(() => {
+        for (const [type, extra] of [
+          ['report', { message: '模擬workerの成果報告', phase: 'final_answer' }],
+          ['terminal', { outcome: { status: 'completed', completion: 'reported', operationSettlement: 'settled' } }],
+        ]) botB.emit('worker-task-event', { handle: envelope.handle, handleId: envelope.handle.id,
+          bot: 'botB', taskId: envelope.handle.taskId, hubGeneration: envelope.handle.hubGeneration,
+          connectionGeneration: envelope.handle.connectionGeneration, type, ...extra }, () => {} )
+      }, 20)
+    })
+    const startTask = await ack(operator, 'worker-task-start', {
+      bot: 'botB', requestId: 'worker-request-1', message: '共有倉庫の鉄を確認して報告する'
+    })
+    assert.equal(startTask.success, true)
+    assert.equal(startTask.accepted, true)
+    assert.equal(workerEnvelope.message, '共有倉庫の鉄を確認して報告する')
+    assert.equal(startTask.handle.connectionGeneration, 7)
+    const observerTask = await ack(observer, 'worker-task-read', { handle: startTask.handle })
+    assert.equal(observerTask.success, false, 'protected observer cannot read worker handles')
+    const peerTask = await ack(botA, 'worker-task-wait', { handles: [startTask.handle], timeoutMs: 0 })
+    assert.equal(peerTask.success, false, 'protected peer cannot wait for operator worker tasks')
+    const workerWait = await ack(operator, 'worker-task-wait', { handles: [startTask.handle], timeoutMs: 1000 })
+    assert.equal(workerWait.success, true)
+    assert.equal(workerWait.tasks[0].report.message, '模擬workerの成果報告')
+    assert.equal(workerWait.tasks[0].outcome.status, 'completed')
+    const duplicateStart = await ack(operator, 'worker-task-start', {
+      bot: 'botB', requestId: 'worker-request-1', message: '共有倉庫の鉄を確認して報告する'
+    })
+    assert.equal(duplicateStart.handle.id, startTask.handle.id, 'same request ID resolves to the same task')
+    const requestCollision = await ack(operator, 'worker-task-start', {
+      bot: 'botB', requestId: 'worker-request-1', message: '別の依頼'
+    })
+    assert.equal(requestCollision.success, false, 'same request ID with different content is rejected')
 
     const created = await ack(operator, 'create-agent', { profile: { name: 'operator-created' } })
     assert.equal(created.success, true, 'operator role retains authorized management control')

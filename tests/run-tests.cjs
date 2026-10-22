@@ -778,6 +778,7 @@ async function main() {
     'recovery_replanning.test.cjs',
     'management_reconnect.test.cjs',
     'management_auth.test.cjs',
+    'worker_task_registry.test.cjs',
     'agent_process.test.cjs',
     'agent_shutdown.test.cjs',
     'world_observation.test.cjs',
