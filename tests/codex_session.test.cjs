@@ -551,6 +551,7 @@ for (let batch = 0; batch < 10; batch++) {
     let workerHandleMessageCalls = 0
     workerAgent.handleMessage = (_source, _message, _limit, options) => {
       workerHandleMessageCalls++
+      workerAgent.currentTaskId = options.taskId
       const runtime = { terminalOutcome: null, cancel: async reason => { runtime.cancelReason = reason } }
       options.workerTask.runtime = runtime
       workerAgent.codexRuntime = runtime
@@ -585,6 +586,49 @@ for (let batch = 0; batch < 10; batch++) {
     const afterTerminalCancel = await workerAgent.cancelWorkerTask({ handle: primaryHandle })
     assert.equal(afterTerminalCancel, false, 'the Agent no longer recognizes a completed worker as current')
     assert.equal(workerAgent._workerTask, null)
+
+    // A superseded runtime can still be cleaning up while the replacement has
+    // already started an action. The old handle must never stop that action.
+    const replacementRuntime = { active: true, cancel: async () => { throw new Error('replacement runtime was cancelled') } }
+    const oldWorkerRuntime = { active: false, cancelCalls: 0, async cancel() { this.cancelCalls++ } }
+    const oldWorker = { handle: primaryHandle, taskId: primaryHandle.taskId, requestId: primaryHandle.requestId,
+      connectionGeneration: 21, hubGeneration: 'worker-fixture-hub', runtime: oldWorkerRuntime,
+      terminal: false, cancelRequested: false, status: 'running' }
+    let replacementActionStops = 0
+    workerAgent._workerTask = oldWorker
+    workerAgent.codexRuntime = replacementRuntime
+    workerAgent.currentTaskId = 'replacement-task'
+    workerAgent.actions.executing = true
+    workerAgent.actions.currentAction = { operation: { taskId: 'replacement-task' } }
+    workerAgent.actions.stop = async () => { replacementActionStops++; return { stopped: true } }
+    let racedCancel
+    assert.equal(await workerAgent.cancelWorkerTask({ handle: primaryHandle }, value => { racedCancel = value }), false,
+      'an old handle is rejected once a replacement runtime owns the Agent')
+    assert.equal(racedCancel.accepted, false)
+    assert.equal(oldWorker.cancelRequested, false, 'a stale cancellation does not mutate the old task')
+    assert.equal(oldWorkerRuntime.cancelCalls, 0, 'a stale cancellation does not cancel the replacement runtime')
+    assert.equal(replacementActionStops, 0, 'a stale cancellation does not stop the replacement action')
+
+    // The ordinary operator supersede path may leave its worker settlement
+    // pending while a new action starts. Its old handle must not stop it.
+    const oldSettlement = deferred()
+    oldWorkerRuntime.cancel = async () => { oldWorkerRuntime.cancelCalls++; await oldSettlement.promise }
+    workerAgent._workerTask = oldWorker
+    workerAgent.codexRuntime = oldWorkerRuntime
+    workerAgent.currentTaskId = oldWorker.taskId
+    workerAgent.actions.currentAction = { operation: { taskId: oldWorker.taskId } }
+    assert.equal(workerAgent._markWorkerTaskStopping('superseded-by-operator-intent'), true)
+    assert.equal(oldWorker.cancelRequested, true, 'operator supersede marks the old worker as stopping')
+    assert.equal(oldWorkerRuntime.cancelCalls, 1, 'the old runtime is still in cleanup when replacement starts')
+    workerAgent.codexRuntime = replacementRuntime
+    workerAgent.currentTaskId = 'replacement-task'
+    workerAgent.actions.currentAction = { operation: { taskId: 'replacement-task' } }
+    let supersededCancel
+    assert.equal(await workerAgent.cancelWorkerTask({ handle: primaryHandle }, value => { supersededCancel = value }), false,
+      'a superseded worker with pending settlement cannot stop the new operator task')
+    assert.equal(supersededCancel.accepted, false)
+    assert.equal(replacementActionStops, 0, 'pending old settlement never stops a newer action')
+    oldSettlement.resolve()
     Object.assign(serverProxy, workerProxyState)
 
     assert.equal(agent.bot.output, settledOutput, 'no late output mutates state after action settlement')

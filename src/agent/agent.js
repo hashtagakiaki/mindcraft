@@ -219,6 +219,18 @@ export class Agent {
             acknowledge?.({ accepted: false, error: 'worker task handle is stale or no longer owns this runtime' });
             return false;
         }
+        const ownsRuntime = task.runtime !== null && this.codexRuntime === task.runtime
+            && this.currentTaskId === task.taskId;
+        if (task.runtime && !ownsRuntime) {
+            acknowledge?.({ accepted: false, error: 'worker task handle is stale or no longer owns this runtime' });
+            return false;
+        }
+        const currentAction = this.actions?.currentAction;
+        const ownsCurrentAction = ownsRuntime && currentAction?.operation?.taskId === task.taskId;
+        if (this.actions?.executing && task.runtime && !ownsCurrentAction) {
+            acknowledge?.({ accepted: false, error: 'worker task no longer owns the active Minecraft action' });
+            return false;
+        }
         if (task.terminal) {
             acknowledge?.({ accepted: true, status: task.status, terminal: true });
             return true;
@@ -228,8 +240,8 @@ export class Agent {
         task.status = 'stopping';
         acknowledge?.({ accepted: true, status: 'stopping', reason: 'task cancellation requested' });
         void this._publishWorkerTaskEvent(task, 'stopping', { message: 'operator requested cancellation' });
-        if (task.runtime) void task.runtime.cancel('worker-cancel');
-        if (this.actions?.executing) void this.actions.stop('worker-cancel');
+        if (ownsRuntime) void task.runtime.cancel('worker-cancel');
+        if (ownsCurrentAction && this.actions?.executing) void this.actions.stop('worker-cancel');
         return true;
     }
 
