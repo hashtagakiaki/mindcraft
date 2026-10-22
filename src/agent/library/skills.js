@@ -1360,7 +1360,8 @@ export async function pickupNearbyItems(bot) {
 
 export async function breakBlockAt(bot, x, y, z) {
     /**
-     * Break the block at the given position. Will use the bot's equipped item.
+     * Break the block at the given position. Selects a harvest tool when available;
+     * if none can harvest it, uses an empty hand when the block is still breakable.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {number} x, the x coordinate of the block to break.
      * @param {number} y, the y coordinate of the block to break.
@@ -1403,8 +1404,15 @@ export async function breakBlockAt(bot, x, y, z) {
             await bot.tool.equipForBlock(block);
             const itemId = bot.heldItem ? bot.heldItem.type : null
             if (!block.canHarvest(itemId)) {
-                log(bot, `Don't have right tools to break ${block.name}.`);
-                return false;
+                const handDigTime = block.digTime(null, false,
+                    ['water', 'flowing_water'].includes(bot._getBlockAtEyeLevel?.()?.name),
+                    !bot.entity?.onGround, [], bot.entity?.effects ?? {});
+                if (!Number.isFinite(handDigTime)) {
+                    log(bot, `Don't have a harvest tool, and ${block.name} cannot be broken by hand.`);
+                    return false;
+                }
+                if (bot.heldItem) await bot.unequip('hand');
+                log(bot, `No harvest tool available; breaking ${block.name} by hand. It may drop nothing.`);
             }
         }
         requireActiveTarget(bot);

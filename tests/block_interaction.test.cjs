@@ -70,6 +70,7 @@ function scene({ feet = new Vec3(-2.9, 64, -2.1), name = 'spruce_log', obstructi
     await bot.onLook?.(point)
   }
   bot.tool = { equipForBlock: async () => {} }; bot.equip = async()=>{}
+  bot.unequip = async slot => { assert.equal(slot,'hand'); bot.heldItem=null; bot.unequipped=true }
   bot.swingArm = () => {}; bot._updateBlockState = ()=>{}
   bot._client = new EventEmitter()
   bot._client.write = (name, packet) => {
@@ -121,6 +122,18 @@ async function main() {
     const load=name=>import(pathToFileURL(path.join(root,`src/agent/library/${name}.js`)))
     const helper=await load('block_interaction'), mining=await load('mining_sync'), skills=await load('skills'), world=await load('world')
     const install=bot=>mining.installMiningSync(bot,{lookTimeoutMs:80,confirmationGraceMs:100})
+
+    {
+      const bot=scene({name:'stone',obstruction:false})
+      bot.heldItem={type:registry.itemsByName.wheat_seeds.id,name:'wheat_seeds'}
+      install(bot)
+      assert.equal(Boolean(bot.blockAt(target).canHarvest(bot.heldItem.type)),false,'seeds cannot harvest stone')
+      assert.equal(Number.isFinite(bot.blockAt(target).digTime(null,false,false,false,[],{})),true,'stone has a finite bare-hand dig time')
+      assert.equal(await skills.breakBlockAt(bot,target.x,target.y,target.z),true)
+      assert.equal(bot.unequipped,true,'remove the unrelated held item before hand mining')
+      assert.equal(starts(bot).length,1)
+      assert.equal(bot.blockAt(target).name,'air','hand mining waits for server confirmation')
+    }
 
     for(const [kind,feet] of [['face-center',new Vec3(-2.9,64,-2.9)],['face-edge',new Vec3(-2.9,64,-2.1)]]) {
       const bot=scene({feet}); install(bot)
