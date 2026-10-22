@@ -303,6 +303,43 @@ async function main() {
     const wall = []
     for (let z = -4; z <= 4; z++) for (const y of [64, 65]) wall.push({ x: 3, y, z, name: 'dirt' })
 
+    const digOnlyRoute = makeBot({ wall, scaffoldInventory: {} })
+    const noDigMovement = digOnlyRoute.pathfinder.movements
+    const digHint = await createNativeSdk({ bot: digOnlyRoute, skills }).skills.goToPosition({
+      position: { x: 6.5, y: 64, z: 0.5 },
+    })
+    assert.equal(digHint.ok, false)
+    assert.equal(digHint.code, 'digging_required', JSON.stringify(digHint))
+    assert.deepEqual(digOnlyRoute.testState.edits, [], 'diagnostic search does not dig or place')
+    assert.equal(digOnlyRoute.pathfinder.movements, noDigMovement, 'diagnostic search does not install its movements')
+    assert.ok(digOnlyRoute.testState.paths.every(route => route.path.every(node => !node.toBreak?.length)),
+      'no route with digging is passed to goto')
+
+    const unbreakableRoute = makeBot({ wall: wall.map(block => ({ ...block, name: 'bedrock' })), scaffoldInventory: {} })
+    const unbreakable = await createNativeSdk({ bot: unbreakableRoute, skills }).skills.goToPosition({
+      position: { x: 6.5, y: 64, z: 0.5 },
+    })
+    assert.equal(unbreakable.code, 'route_not_found', JSON.stringify(unbreakable))
+    assert.deepEqual(unbreakableRoute.testState.edits, [])
+
+    for (const diagnosticStatus of ['timeout', 'partial']) {
+      const limitedProbe = makeBot({ scaffoldInventory: {} })
+      const probes = []
+      limitedProbe.pathfinder.getPathFromTo = function* (movements, _start, _goal, options) {
+        probes.push({ canDig: movements.canDig, options })
+        yield { result: { status: movements.canDig ? diagnosticStatus : 'noPath', path: [] } }
+      }
+      const limitedHint = await createNativeSdk({ bot: limitedProbe, skills }).skills.goToPosition({
+        position: { x: 6.5, y: 64, z: 0.5 },
+      })
+      assert.equal(limitedHint.code, 'search_limit', JSON.stringify(limitedHint))
+      assert.equal(limitedHint.ok, false)
+      assert.equal(probes.filter(probe => probe.canDig).length, 1, 'one bounded diagnostic search')
+      assert.ok(probes.find(probe => probe.canDig).options.timeout <= 250)
+      assert.deepEqual(limitedProbe.testState.edits, [])
+      assert.deepEqual(limitedProbe.entity.position, new Vec3(0.5, 64, 0.5))
+    }
+
     // Use the installed pathfinder plugin here so its default postProcessPath
     // (including half-block/shape-aware feet positions) is part of the check.
     const processedPathBot = makeBot()
@@ -716,7 +753,7 @@ async function main() {
       position: { x: 6.5, y: 64, z: 0.5 }, allowDig: false, allowScaffold: false,
     }))
     const diagnosticOperation = operationResult(diagnosticOwner)
-    assert.equal(diagnosticOperation.skillResults[0].result.code, 'route_not_found')
+    assert.equal(diagnosticOperation.skillResults[0].result.code, 'digging_required')
     assert.equal(diagnosticOperation.skillResults[0].result.diagnostics.lastSearch.status, 'noPath')
     assert.equal(Object.hasOwn(diagnosticOperation.skillResults[0].result.diagnostics.lastSearch, 'path'), false,
       'public diagnostics omit the full search path')
@@ -725,8 +762,9 @@ async function main() {
     const obstructed = await skills.reachPosition(blockedTarget, {
       position: { x: 2.5, y: 64, z: 0.5 }, arrivalMode: 'block', allowDig: false, allowScaffold: false,
     })
-    assert.equal(obstructed.code, 'target_obstructed', JSON.stringify(obstructed))
-    assert.equal(obstructed.diagnostics.phase, 'target')
+    assert.equal(obstructed.code, 'route_not_found', JSON.stringify(obstructed))
+    assert.equal(obstructed.diagnostics.phase, 'search')
+    assert.equal(obstructed.diagnostics.lastSearch.targetBlocker.code, 'target_obstructed')
     const rangeLimited = await skills.reachPosition(makeBot(), {
       position: { x: 600, y: 64, z: 0.5 }, allowScaffold: false,
     })

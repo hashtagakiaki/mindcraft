@@ -35,6 +35,7 @@ const REACH_POSITION_SEARCH_RADIUS = 64;
 const REACH_POSITION_SEARCH_TIMEOUT_MS = 1_200;
 const REACH_POSITION_SEARCH_TICK_MS = 60;
 const REACH_POSITION_SEARCH_STEPS = 12;
+const REACH_POSITION_DIG_HINT_TIMEOUT_MS = 250;
 const REACH_POSITION_CHUNK_WAIT_MS = 5_000;
 const REACH_POSITION_NO_PROGRESS_LIMIT = 3;
 const REACH_POSITION_MAX_SAFE_FEET_DROP = 3;
@@ -4112,6 +4113,43 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                     status = 'blocked'; reason = blocker ? 'The target is not loaded.' : 'No newly loaded safe route segment appeared before the chunk wait deadline.'; break;
                 }
                 const blocker = reachPositionTargetBlocker(bot, target, allowDig);
+                if (!allowDig && pathResult.status === 'noPath' && !waterExitStage
+                    && !reachPositionStartHazard(bot) && blocker?.code !== 'target_unloaded') {
+                    // Search only: never install these movements or execute this path.
+                    // All restrictions except digging remain those of this call.
+                    active();
+                    const digMovements = reachPositionMoves(bot, {
+                        allowDig: true, allowScaffold, scaffoldBlocks: availableScaffoldBlocks, safeWater,
+                    });
+                    digMovements.digCost = ordinaryMovement.digCost;
+                    digMovements.placeCost = ordinaryMovement.placeCost;
+                    const digPath = reachPositionPath(bot, digMovements, goal, {
+                        timeout: Math.min(REACH_POSITION_DIG_HINT_TIMEOUT_MS,
+                            REACH_POSITION_MAX_DURATION_MS - (Date.now() - startedAt)),
+                        tickTimeout: 30, steps: 4,
+                    });
+                    active();
+                    if (digPath.status === 'success' && digPath.path?.some(node => node.toBreak?.length)) {
+                        resultCode = 'digging_required';
+                        diagnosticPhase = 'search';
+                        status = 'blocked';
+                        reason = '現在の探索条件では採掘を伴う経路が見つかりました。';
+                        break;
+                    }
+                    if (digPath.status === 'timeout' || digPath.status === 'partial') {
+                        resultCode = 'search_limit';
+                        diagnosticPhase = 'search';
+                        status = 'blocked';
+                        reason = '採掘ありの追加探索が探索上限に達しました。';
+                        break;
+                    }
+                    resultCode = 'route_not_found';
+                    diagnosticPhase = 'search';
+                    lastSearchDiagnostics = reachPositionSearchSummary({ ...searchDiagnostic, targetBlocker: blocker });
+                    status = 'blocked';
+                    reason = '採掘なしの経路は見つからず、採掘を要する候補も確認できませんでした。';
+                    break;
+                }
                 if (blocker) {
                     resultCode = blocker.code;
                     searchDiagnostic.targetBlocker = blocker;
