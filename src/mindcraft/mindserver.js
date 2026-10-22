@@ -139,6 +139,7 @@ export function createMindServer(host_public = false, port = 8080) {
         console.log('Client connected');
 
         if (protectedMode && socket.data.identity.role === 'observer') {
+            socket.on('send-task-context', (_target, _data, callback) => deny(callback));
             socket.on('readiness', callback => {
                 if (!allowed(socket, ['observer'])) return deny(callback);
                 callback?.({ ready: true, agents: Object.entries(agent_connections).map(([name, connection]) => ({
@@ -418,6 +419,47 @@ export function createMindServer(host_public = false, port = 8080) {
             } catch (error) {
                 if (typeof callback === 'function') callback({ success: false, error: error.message });
                 else console.warn('Cannot send message:', error.message);
+            }
+        });
+
+        socket.on('send-task-context', (target, data, callback) => {
+            if (!allowed(socket, ['operator', 'legacy'])) return deny(callback);
+            try {
+                if (hubClosing) throw new Error('MindServer is closing');
+                if (typeof target !== 'string' || !target.trim()) throw new Error('One bot recipient is required.');
+                if (!data || typeof data.taskId !== 'string' || !data.taskId.trim()
+                    || typeof data.messageId !== 'string' || !data.messageId.trim()
+                    || typeof data.message !== 'string' || !data.message.trim()) {
+                    throw new Error('Current task ID, unique message ID and context are required.');
+                }
+                if (data.messageId.length > 200) throw new Error('Message ID exceeds 200 characters.');
+                if (data.message.length > 4000) throw new Error('Context message exceeds 4000 characters.');
+                const connection = agent_connections[target];
+                if (!connection?.in_game || !connection.socket?.connected) throw new Error('Recipient is unavailable.');
+                const envelope = { from: 'ADMIN',
+                    taskId: data.taskId, messageId: data.messageId, message: data.message,
+                    receiverConnectionGeneration: connection.connectionGeneration,
+                    hubGeneration: managementGeneration };
+                let settled = false;
+                const timer = setTimeout(() => {
+                    if (settled) return;
+                    settled = true;
+                    callback?.({ success: false, accepted: false, taskId: data.taskId,
+                        messageId: data.messageId, error: 'task-context acceptance acknowledgement timed out' });
+                }, 5000);
+                connection.socket.emit('task-context', envelope, result => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    if (result?.accepted === true && result.messageId === data.messageId
+                        && result.receiverTaskId === data.taskId) {
+                        callback?.({ success: true, accepted: true, taskId: data.taskId,
+                            messageId: data.messageId, recipient: target, acceptance: 'receiver-inbox' });
+                    } else callback?.({ success: false, accepted: false, taskId: data.taskId,
+                        messageId: data.messageId, error: result?.error || 'recipient did not retain task context' });
+                });
+            } catch (error) {
+                callback?.({ success: false, accepted: false, error: error.message });
             }
         });
 

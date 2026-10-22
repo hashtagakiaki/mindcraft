@@ -147,6 +147,28 @@ export async function shutdown(request) { return closeHandler?.(request) }
     const groupTaskAck = await ack(operator, 'send-message', 'botA,botB', { from: 'ADMIN', message: 'ambiguous group task', taskId: 'fixture-task-group' })
     assert.equal(groupTaskAck.success, false, 'task-ID dispatch rejects multiple recipients instead of reporting the first ACK as group acceptance')
 
+    let receivedContext
+    botB.on('task-context', (envelope, acknowledge) => {
+      receivedContext = envelope
+      acknowledge({ accepted: true, messageId: envelope.messageId, receiverTaskId: envelope.taskId })
+    })
+    const contextAck = await ack(operator, 'send-task-context', 'botB', {
+      taskId: 'fixture-task-1', messageId: 'facts-1', message: 'BotA observed 12 iron ingots.'
+    })
+    assert.equal(contextAck.success, true, 'protected operator can send task-scoped context')
+    assert.equal(contextAck.acceptance, 'receiver-inbox')
+    assert.equal(receivedContext.from, 'ADMIN', 'context sender identity is assigned by MindServer')
+    assert.equal(receivedContext.receiverConnectionGeneration, 7)
+    assert.equal(receivedContext.hubGeneration, settingsA.management.generation)
+    const botContextAck = await ack(botA, 'send-task-context', 'botB', {
+      taskId: 'fixture-task-1', messageId: 'forged-facts', message: 'forged operator context'
+    })
+    assert.equal(botContextAck.success, false, 'protected peer identity cannot use the operator context route')
+    const observerContextAck = await ack(observer, 'send-task-context', 'botB', {
+      taskId: 'fixture-task-1', messageId: 'observer-facts', message: 'forged observer context'
+    })
+    assert.equal(observerContextAck.success, false, 'protected observers cannot use the operator context route')
+
     const created = await ack(operator, 'create-agent', { profile: { name: 'operator-created' } })
     assert.equal(created.success, true, 'operator role retains authorized management control')
     assert.equal(globalThis.__createdAgents, 1)

@@ -90,6 +90,21 @@ export class MindServerProxy {
             }
             convoManager.receiveFromBot(agentName, json);
         });
+        this.socket.on('task-context', (envelope, acknowledge) => {
+            const runtime = this.agent?.codexRuntime;
+            if (!this.managementReady || !runtime) {
+                acknowledge?.({ accepted: false, error: 'native task context is unavailable' });
+                return;
+            }
+            const result = runtime.acceptOperatorContext(envelope?.message, {
+                taskId: envelope?.taskId, messageId: envelope?.messageId,
+                receiverConnectionGeneration: envelope?.receiverConnectionGeneration,
+                hubGeneration: envelope?.hubGeneration,
+                connectionGeneration: this.connectionGeneration,
+                serverGeneration: this.serverGeneration,
+            });
+            acknowledge?.(result);
+        });
         this.socket.on('agents-status', (agents) => {
             if (!this.managementReady) {
                 this.pendingAgents = agents;

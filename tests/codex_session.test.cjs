@@ -45,9 +45,9 @@ async function main() {
           const session = factory(opts)
           const decide = session.runTurn.bind(session)
           session.threadId ||= 'fixture-thread'
-          session.runTurn = async input => {
+          session.runTurn = async (input, runOptions) => {
             while (true) {
-              const decision = await decide(input)
+              const decision = await decide(input, runOptions)
               if (!decision.operation) return decision
               const result = await decision.operation
               input = (await opts.prepareResult(result)).contentItems[0].text
@@ -373,10 +373,20 @@ for (let batch = 0; batch < 10; batch++) {
             { connectionGeneration: 5 })
           assert.equal(duplicate.accepted, true)
           assert.equal(duplicate.duplicate, true, 'same sender/message ID is accepted idempotently')
-          for (let index = nativeRuntime.seenNativeMessageIds.size; index < 256; index++) nativeRuntime.seenNativeMessageIds.add(`filled-${index}`)
-          const oldAfterCapacity = nativeRuntime.acceptPeerMessage('PeerReceiver', 'duplicate', native,
+          const contextEnvelope = { taskId: 'peer-sender-task', messageId: 'operator-context-1',
+            receiverConnectionGeneration: 5, connectionGeneration: 5,
+            serverGeneration: 'synthetic-hub-generation', hubGeneration: 'synthetic-hub-generation' }
+          assert.equal(nativeRuntime.acceptOperatorContext('iron stock increased at the shared base', contextEnvelope).accepted, true)
+          assert.equal(nativeRuntime.acceptOperatorContext('iron stock increased at the shared base', contextEnvelope).duplicate, true)
+          assert.equal(nativeRuntime.acceptOperatorContext('different facts', contextEnvelope).accepted, false,
+            'the same message ID cannot be reused with different content')
+          assert.equal(nativeRuntime.acceptOperatorContext('wrong task', { ...contextEnvelope, taskId: 'another-task' }).accepted, false)
+          for (let index = nativeRuntime.seenNativeMessageIds.size; index < 256; index++) nativeRuntime.seenNativeMessageIds.set(`filled-${index}`, 'fixture-hash')
+          const oldAfterCapacity = nativeRuntime.acceptPeerMessage('PeerReceiver', 'please inspect the chest', native,
             { connectionGeneration: 5 })
           assert.equal(oldAfterCapacity.duplicate, true, 'seen IDs remain retained at the dedupe cap')
+          assert.equal(nativeRuntime.acceptPeerMessage('PeerReceiver', 'changed body', native,
+            { connectionGeneration: 5 }).accepted, false, 'peer IDs cannot be reused with different content')
           const overCapacity = nativeRuntime.acceptPeerMessage('PeerReceiver', 'new', { ...native, id: 'new-at-cap' },
             { connectionGeneration: 5 })
           assert.equal(overCapacity.accepted, false, 'new IDs are rejected instead of evicting replay protection')
@@ -391,6 +401,8 @@ for (let batch = 0; batch < 10; batch++) {
     assert.equal(await nativeRuntime.run('operator', () => true, 'peer-sender-task'), true)
     assert.equal(peerInputs.filter(input => input.includes('please inspect the chest')).length, 1,
       'an accepted peer message appears once at the following native turn')
+    assert.equal(peerInputs.filter(input => input.includes('iron stock increased at the shared base')).length, 1,
+      'operator context is delivered once without replacing the current task')
     assert.equal(peerInputs[1].includes('sender task other-task'), true, 'sender task identity is distinct from receiver task')
     assert.equal(peerAgent.currentTaskId, 'peer-sender-task')
     const invalidatedAgent = makeAgent('NativeInboxInvalidation')
@@ -413,6 +425,40 @@ for (let batch = 0; batch < 10; batch++) {
       { connectionGeneration: 5 }).accepted, false, 'a superseded native task cannot accept more inbox messages')
     invalidatedRuntime.cancel('superseded')
     assert.equal(invalidatedRuntime.nativeInbox.length, 0, 'Stop/task replacement invalidates already queued inbox messages')
+
+    // The final operator-context admission check and inbox drain form one synchronous completion boundary.
+    const boundaryAgent = makeAgent('ContextBoundary')
+    boundaryAgent.currentTaskId = 'context-boundary-task'
+    const checkpointEntered = deferred(), releaseCheckpoint = deferred()
+    const originalCheckpointAdd = boundaryAgent.history.checkpointAdd
+    boundaryAgent.history.checkpointAdd = async (...args) => {
+      checkpointEntered.resolve()
+      await releaseCheckpoint.promise
+      return originalCheckpointAdd(...args)
+    }
+    let boundaryTurn = 0
+    const boundaryInputs = []
+    const boundaryRuntime = new CodexRuntime(boundaryAgent, { makeSession: () => ({
+      open: async () => {}, close: async () => {},
+      runTurn: async input => { boundaryInputs.push(input); boundaryTurn++; return { messages: [`response ${boundaryTurn}`] } }
+    }) })
+    boundaryAgent.codexRuntime = boundaryRuntime
+    const boundaryRun = boundaryRuntime.run('operator', () => true, 'context-boundary-task')
+    await checkpointEntered.promise
+    const beforeBoundary = boundaryRuntime.acceptOperatorContext('new stock observation', {
+      taskId: 'context-boundary-task', messageId: 'before-boundary', receiverConnectionGeneration: 5,
+      connectionGeneration: 5, serverGeneration: 'synthetic-hub-generation', hubGeneration: 'synthetic-hub-generation'
+    })
+    assert.equal(beforeBoundary.accepted, true, 'context is accepted while history persistence is pending')
+    releaseCheckpoint.resolve()
+    assert.equal(await boundaryRun, true)
+    assert.equal(boundaryInputs.length, 2, 'accepted context causes a new judgment turn before reporting')
+    assert.match(boundaryInputs[1], /new stock observation/)
+    assert.equal(boundaryRuntime.acceptingNativeInbox, false)
+    assert.equal(boundaryRuntime.acceptOperatorContext('too late', {
+      taskId: 'context-boundary-task', messageId: 'after-boundary', receiverConnectionGeneration: 5,
+      connectionGeneration: 5, serverGeneration: 'synthetic-hub-generation', hubGeneration: 'synthetic-hub-generation'
+    }).accepted, false, 'context after the completion boundary is explicitly rejected')
 
     const nativeSendAgent = makeAgent('NativeSend')
     await until(() => nativeSendAgent.coder.code_template && nativeSendAgent.coder.code_lint_template)
@@ -675,13 +721,9 @@ Agent.prototype.start = async function() {
     goalSession.send = message => goalReplies.push(message)
     goalSession.request = async (method, params) => {
       if (method === 'thread/goal/set') {
-        if (params.status === 'active') {
-          assert.equal(params.origin, 'user')
-          return { goal: { status: 'active', objective: params.objective } }
-        }
-        assert.equal(params.status, 'complete')
-        assert.equal(params.objective, undefined, 'updating the current objective preserves Goal usage')
-        return { goal: { status: 'complete', objective: 'counter = 2' } }
+        assert.equal(params.status, 'active')
+        assert.equal(params.origin, 'user')
+        return { goal: { status: 'active', objective: params.objective } }
       }
       assert.equal(method, 'turn/start')
       queueMicrotask(async () => {
@@ -693,7 +735,6 @@ Agent.prototype.start = async function() {
         await notify('turn/started', { turn: { id: 'goal-2' } })
         await goalSession.receive({ id: 901, method: 'item/tool/call', params: {
           threadId: 'goal-thread', turnId: 'goal-2', tool: 'minecraft_execute', arguments: { code: 'await Promise.resolve();' } } })
-        assert.equal(await goalSession.completeGoalAfterWait(), true)
         await notify('thread/goal/updated', { goal: { status: 'complete' } })
         await notify('item/completed', { item: { type: 'agentMessage', text: '観測して完了', phase: 'final_answer' } })
         await notify('turn/completed', { turn: { id: 'goal-2', status: 'completed' } })
@@ -1281,17 +1322,15 @@ Agent.prototype.start = async function() {
     repairAgent.codexRuntime = repairRuntime
     assert.equal(await repairRuntime.run('operator', () => true, 'distinct-repairs'), true)
 
-    // An isolated successful wait closes an active Goal while preserving one final report turn.
+    // A standalone successful wait does not bypass the normal Goal judgment.
     settings.codex_session = { ...unlimitedSettings, goals: true }
     const waitGoalAgent = makeAgent('StandaloneWaitGoal')
     waitGoalAgent.actions.runAction = async () => ({ success: true, progressObserved: false, confirmedChanges: [], skillResults: [
       { id: 'generated-stay', skill: 'generated_code', parentCallId: null, status: 'returned' },
       { id: 'stay-call', skill: 'skills.stay', parentCallId: 'generated-stay', status: 'returned_true' }
     ] })
-    let waitGoalCompletions = 0
     const waitGoalRuntime = new CodexRuntime(waitGoalAgent, { makeSession: ({ execute }) => {
       return { open: async () => {}, close: async () => {},
-        completeGoalAfterWait: async () => { waitGoalCompletions++; return true },
         runTurn: async () => {
           await execute('await skills.stay({seconds:30});')
           return { messages: ['待機状態を一度報告しました'] }
@@ -1299,8 +1338,59 @@ Agent.prototype.start = async function() {
     } })
     waitGoalAgent.codexRuntime = waitGoalRuntime
     assert.equal(await waitGoalRuntime.run('operator', () => true, 'standalone-wait-goal'), true)
-    assert.equal(waitGoalCompletions, 1)
-    assert.equal((await eventsFor('StandaloneWaitGoal')).filter(event => event.type === 'goal_wait_completed').length, 1)
+    assert.equal((await eventsFor('StandaloneWaitGoal')).filter(event => event.type === 'goal_wait_completed').length, 0)
+
+    // Operator context arriving during an owned operation preserves the active Goal, task, thread and operation.
+    const contextDuringOperationAgent = makeAgent('ContextDuringOperation')
+    const operationProxyState = { socket: serverProxy.socket, managementReady: serverProxy.managementReady,
+      connectionGeneration: serverProxy.connectionGeneration, serverGeneration: serverProxy.serverGeneration }
+    serverProxy.socket = { connected: true }
+    serverProxy.managementReady = true
+    serverProxy.connectionGeneration = 5
+    serverProxy.serverGeneration = 'synthetic-hub-generation'
+    contextDuringOperationAgent.currentTaskId = 'context-operation-task'
+    const operationInputs = [], goalObjectives = []
+    const actionEntered = deferred(), releaseAction = deferred()
+    contextDuringOperationAgent.coder.executeCode = async () => { actionEntered.resolve(); await releaseAction.promise; return true }
+    contextDuringOperationAgent.actions.runAction = async (_label, run) => {
+      contextDuringOperationAgent.actions.currentAction = { id: 'context-held-operation', controller: new AbortController() }
+      try {
+        await run()
+        return { success: true, progressObserved: false, confirmedChanges: [], skillResults: [] }
+      } finally { contextDuringOperationAgent.actions.currentAction = null }
+    }
+    let operationSession
+    const contextDuringOperationRuntime = new CodexRuntime(contextDuringOperationAgent, { makeSession: opts => {
+      let decisions = 0
+      operationSession = { threadId: 'context-operation-thread', open: async () => {}, close: async () => {},
+        runTurn: async (input, turnOptions) => {
+          operationInputs.push(input)
+          goalObjectives.push(turnOptions.goalObjective)
+          if (decisions++ === 0) return { operation: opts.execute('await skills.wait({milliseconds:200}); log(bot, "wait completed");') }
+          return { operation: null, messages: ['original task complete'] }
+        } }
+      return operationSession
+    } })
+    contextDuringOperationAgent.codexRuntime = contextDuringOperationRuntime
+    const contextDuringOperationRun = contextDuringOperationRuntime.run('operator', () => true, 'context-operation-task')
+    await actionEntered.promise
+    const heldOperationId = contextDuringOperationAgent.actions.currentAction.id
+    const contextDuringOperationAck = contextDuringOperationRuntime.acceptOperatorContext('shared base inventory changed', {
+      taskId: 'context-operation-task', messageId: 'operation-facts', receiverConnectionGeneration: 5,
+      connectionGeneration: 5, serverGeneration: 'synthetic-hub-generation', hubGeneration: 'synthetic-hub-generation'
+    })
+    assert.equal(contextDuringOperationAck.accepted, true)
+    assert.equal(contextDuringOperationAgent.actions.currentAction.id, heldOperationId,
+      'context admission leaves the in-flight Minecraft operation running')
+    assert.equal(contextDuringOperationAgent.currentTaskId, 'context-operation-task')
+    releaseAction.resolve()
+    assert.equal(await contextDuringOperationRun, true)
+    assert.equal(operationSession.threadId, 'context-operation-thread')
+    assert.equal(goalObjectives.length, 2)
+    assert.equal(goalObjectives[0], goalObjectives[1], 'the original Goal remains active after context delivery')
+    assert.match(operationInputs[1], /shared base inventory changed/)
+    assert.equal(contextDuringOperationAgent.currentTaskId, 'context-operation-task')
+    Object.assign(serverProxy, operationProxyState)
 
     // A stay embedded in a compound operation does not complete the task Goal.
     const compoundStayAgent = makeAgent('CompoundStayGoal')
@@ -1309,10 +1399,8 @@ Agent.prototype.start = async function() {
       { id: 'stay-compound', skill: 'skills.stay', parentCallId: 'generated-compound', status: 'returned_true' },
       { id: 'observe-after-stay', skill: 'world.getPosition', parentCallId: 'generated-compound', status: 'returned' }
     ] })
-    let compoundWaitCompletions = 0
     const compoundStayRuntime = new CodexRuntime(compoundStayAgent, { makeSession: ({ execute }) => ({
       open: async () => {}, close: async () => {},
-      completeGoalAfterWait: async () => { compoundWaitCompletions++; return true },
       runTurn: async () => {
         await execute('await skills.stay({seconds:30}); world.getPosition();')
         return { messages: ['compound operation completed'] }
@@ -1320,7 +1408,6 @@ Agent.prototype.start = async function() {
     }) })
     compoundStayAgent.codexRuntime = compoundStayRuntime
     assert.equal(await compoundStayRuntime.run('operator', () => true, 'compound-stay-goal'), true)
-    assert.equal(compoundWaitCompletions, 0)
     settings.codex_session = unlimitedSettings
 
     const taskBudgets = { ...settings.codex_session, task_budget_ms: 30, max_operations: 24, max_turns: 30 }
@@ -1432,11 +1519,11 @@ Agent.prototype.start = async function() {
     const capabilityProxy = { socket: serverProxy.socket, managementReady: serverProxy.managementReady,
       managementCredential: serverProxy.managementCredential }
     for (const scenario of [
-      { connected: true, ready: true, authenticated: false, places: true, expectedPeer: false, expectedPlaces: true },
-      { connected: true, ready: true, authenticated: true, places: true, expectedPeer: true, expectedPlaces: true },
-      { connected: false, ready: true, authenticated: true, places: true, expectedPeer: false, expectedPlaces: false },
-      { connected: true, ready: false, authenticated: true, places: true, expectedPeer: false, expectedPlaces: false },
-      { connected: true, ready: true, authenticated: true, places: false, expectedPeer: true, expectedPlaces: false }
+      { connected: true, ready: true, authenticated: false, places: true, expectedPeer: false, expectedPlaces: true, expectedContext: true },
+      { connected: true, ready: true, authenticated: true, places: true, expectedPeer: true, expectedPlaces: true, expectedContext: true },
+      { connected: false, ready: true, authenticated: true, places: true, expectedPeer: false, expectedPlaces: false, expectedContext: false },
+      { connected: true, ready: false, authenticated: true, places: true, expectedPeer: false, expectedPlaces: false, expectedContext: false },
+      { connected: true, ready: true, authenticated: true, places: false, expectedPeer: true, expectedPlaces: false, expectedContext: true }
     ]) {
       serverProxy.socket = { connected: scenario.connected }
       serverProxy.managementReady = scenario.ready
@@ -1454,6 +1541,7 @@ Agent.prototype.start = async function() {
       assert.equal(await capabilityRuntime.run('operator', () => true, capabilityAgent.currentTaskId), true)
       assert.equal(observedCapabilities.native_peer_messages, scenario.expectedPeer)
       assert.equal(observedCapabilities.place_memory, scenario.expectedPlaces)
+      assert.equal(observedCapabilities.operator_task_context, scenario.expectedContext)
     }
     Object.assign(serverProxy, capabilityProxy)
     // Stop/new intent/management/shutdown invalidate retained work; stale result cannot resume.

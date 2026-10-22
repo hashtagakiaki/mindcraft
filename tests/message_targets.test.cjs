@@ -31,13 +31,16 @@ async function main() {
   socket.data = { identity: { role: 'legacy' } }
   const deliveries = []
   const connections = Object.fromEntries(agents.map(agent => [agent.name, {
-    in_game: agent.in_game, socket: { connected: true, emit: (event, data, acknowledge) => {
+    in_game: agent.in_game, connectionGeneration: agent.name === 'Bot2' ? 2 : 3,
+    socket: { connected: true, emit: (event, data, acknowledge) => {
       deliveries.push({ name: agent.name, event, data })
-      if (data.taskId && typeof acknowledge === 'function') acknowledge({ accepted: true, taskId: data.taskId })
+      if (event === 'task-context') acknowledge?.({ accepted: true, messageId: data.messageId, receiverTaskId: data.taskId })
+      else if (data.taskId && typeof acknowledge === 'function') acknowledge({ accepted: true, taskId: data.taskId })
     } }
   }]))
   vm.runInNewContext(handler, { socket, agent_connections: connections, resolveMessageTargets, parseAddressedMessage,
-    allowed: () => true, protectedMode: false, console, setTimeout, clearTimeout })
+    allowed: () => true, protectedMode: false, hubClosing: false, managementGeneration: 'legacy-hub-generation',
+    console, setTimeout, clearTimeout })
   let result
   const send = (targets, message) => socket.emit('send-message', targets, { from: 'ADMIN', message, recipients: ['forged'] }, value => { result = value })
   send('@all', '!stop')
@@ -59,6 +62,14 @@ async function main() {
   assert.equal(result.success, true)
   assert.deepEqual(Array.from(result.recipients), ['Bot2'])
   assert.equal(result.taskId, 'dispatch-task', 'dispatch ACK echoes the accepted task ID')
+  socket.emit('send-task-context', 'Bot2', { taskId: 'dispatch-task', messageId: 'legacy-facts', message: 'Observed inventory facts.' }, value => { result = value })
+  assert.equal(result.success, true, 'legacy operator management can route context through its existing boundary')
+  assert.equal(result.acceptance, 'receiver-inbox')
+  assert.equal(deliveries.at(-1).event, 'task-context')
+  assert.equal(deliveries.at(-1).data.receiverConnectionGeneration, 2)
+  assert.equal(deliveries.at(-1).data.hubGeneration, 'legacy-hub-generation')
+  socket.emit('send-task-context', ['Bot2', 'Bot3'], { taskId: 'dispatch-task', messageId: 'group-facts', message: 'ambiguous' }, value => { result = value })
+  assert.equal(result.success, false, 'context route requires exactly one explicit recipient')
 
   const agentSource = await fs.readFile(path.join(repo, 'src/agent/agent.js'), 'utf8')
   const setup = agentSource.slice(agentSource.indexOf('        const ignore_messages = ['), agentSource.indexOf('        this.bot.on(\'chat\''))

@@ -5,6 +5,7 @@
     "generated-code-false-mode": 1,
     "navigation-progress-stall": 1,
     "codex-cli-profile-model": 1,
-    "management-auth-bootstrap": 1
+    "management-auth-bootstrap": 1,
+    "operator-task-context": 1
   }
 }

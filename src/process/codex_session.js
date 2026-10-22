@@ -217,13 +217,6 @@ export class CodexSession {
         } finally { clearTimeout(this.modelTimer); this.turn = null; }
     }
 
-    async completeGoalAfterWait() {
-        if (!this.goalMode || !this.threadId || this.goal?.status !== 'active') return false;
-        const response = await this.request('thread/goal/set', { threadId: this.threadId, status: 'complete' });
-        this.goal = response.goal ?? { ...this.goal, status: 'complete' };
-        return this.goal.status === 'complete';
-    }
-
     close() {
         if (this.closing) return this.closing;
         this.closing = (async () => {
