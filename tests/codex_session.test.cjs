@@ -426,7 +426,7 @@ for (let batch = 0; batch < 10; batch++) {
     invalidatedRuntime.cancel('superseded')
     assert.equal(invalidatedRuntime.nativeInbox.length, 0, 'Stop/task replacement invalidates already queued inbox messages')
 
-    // The final operator-context admission check and inbox drain form one synchronous completion boundary.
+    // Operator and peer messages share the final inbox admission/drain boundary.
     const boundaryAgent = makeAgent('ContextBoundary')
     boundaryAgent.currentTaskId = 'context-boundary-task'
     const checkpointEntered = deferred(), releaseCheckpoint = deferred()
@@ -450,15 +450,28 @@ for (let batch = 0; batch < 10; batch++) {
       connectionGeneration: 5, serverGeneration: 'synthetic-hub-generation', hubGeneration: 'synthetic-hub-generation'
     })
     assert.equal(beforeBoundary.accepted, true, 'context is accepted while history persistence is pending')
+    const peerBeforeBoundary = boundaryRuntime.acceptPeerMessage('PeerReceiver', 'peer boundary observation', {
+      id: 'peer-before-boundary', senderTaskId: 'peer-task', senderActionId: 'peer-action',
+      senderConnectionGeneration: 4, senderManagementGeneration: 2, senderAgent: 'PeerReceiver',
+      senderSpawnId: 'peer-spawn', receiverConnectionGeneration: 5, hubGeneration: 'synthetic-hub-generation'
+    }, { connectionGeneration: 5 })
+    assert.equal(peerBeforeBoundary.accepted, true, 'peer context is accepted before the shared completion boundary')
     releaseCheckpoint.resolve()
     assert.equal(await boundaryRun, true)
     assert.equal(boundaryInputs.length, 2, 'accepted context causes a new judgment turn before reporting')
     assert.match(boundaryInputs[1], /new stock observation/)
+    assert.match(boundaryInputs[1], /peer boundary observation/)
     assert.equal(boundaryRuntime.acceptingNativeInbox, false)
     assert.equal(boundaryRuntime.acceptOperatorContext('too late', {
       taskId: 'context-boundary-task', messageId: 'after-boundary', receiverConnectionGeneration: 5,
       connectionGeneration: 5, serverGeneration: 'synthetic-hub-generation', hubGeneration: 'synthetic-hub-generation'
     }).accepted, false, 'context after the completion boundary is explicitly rejected')
+    assert.equal(boundaryRuntime.acceptPeerMessage('PeerReceiver', 'too late peer context', {
+      id: 'peer-after-boundary', senderTaskId: 'peer-task', senderActionId: 'peer-action',
+      senderConnectionGeneration: 4, senderManagementGeneration: 2, senderAgent: 'PeerReceiver',
+      senderSpawnId: 'peer-spawn', receiverConnectionGeneration: 5, hubGeneration: 'synthetic-hub-generation'
+    }, { connectionGeneration: 5 }).accepted, false,
+    'peer context after the shared completion boundary is explicitly rejected')
 
     const nativeSendAgent = makeAgent('NativeSend')
     await until(() => nativeSendAgent.coder.code_template && nativeSendAgent.coder.code_lint_template)
