@@ -19,7 +19,7 @@ let fixtureRuntime
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const TEST_WATCHDOG_MS = 10_000
 
-function fixture({ digMs = 40, groundTimeoutMs = 40, lookTimeoutMs = 20, confirmationGraceMs = 30 } = {}) {
+function fixture({ digMs = 40, groundTimeoutMs = 40, lookTimeoutMs = 20, confirmationGraceMs } = {}) {
   const bot = new EventEmitter()
   const position = new Vec3(1, 64, 0)
   let currentBlock
@@ -59,7 +59,9 @@ function fixture({ digMs = 40, groundTimeoutMs = 40, lookTimeoutMs = 20, confirm
     stop() { bot.emit('path_stop') }
   }
   injectDigging(bot)
-  const state = mining.installMiningSync(bot, { groundTimeoutMs, lookTimeoutMs, confirmationGraceMs })
+  const config = { groundTimeoutMs, lookTimeoutMs }
+  if (confirmationGraceMs !== undefined) config.confirmationGraceMs = confirmationGraceMs
+  const state = mining.installMiningSync(bot, config)
   return { bot, block, state, setCurrentBlock: value => { currentBlock = value } }
 }
 
@@ -194,6 +196,18 @@ async function main() {
     serverAir(bot, block)
     await digging
     assert.equal(mining.getMiningState(bot), null)
+  }
+  // Production default leaves five seconds for delayed authoritative updates
+  // after Mineflayer's calculated dig duration has elapsed.
+  {
+    const { bot, block } = fixture({ digMs: 20 })
+    const digging = bot.dig(block, 'ignore')
+    await sleep(0)
+    const state = mining.getMiningState(bot)
+    assert.equal(state.deadline - state.startedAt, 5_020)
+    await sleep(55)
+    serverAir(bot, block)
+    await digging
   }
   // Finish has nulled target/face, so external stop must restore them before delegating.
   {
