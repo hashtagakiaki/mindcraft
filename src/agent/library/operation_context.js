@@ -166,6 +166,10 @@ export function trackSkill(name, body) {
                 call.status = operation.signal.aborted ? 'cancelled'
                     : name === 'generated_code' && error === operation.executionYieldError ? 'yielded' : 'error';
                 call.error = String(error);
+                if (error?.navigation && typeof error.navigation.code === 'string') {
+                    call.result = { ok: false, status: 'error', code: error.navigation.code,
+                        reason: call.error, diagnostics: error.navigation };
+                }
                 throw error;
             } finally {
                 call.accepting = false;

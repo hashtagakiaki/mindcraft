@@ -59,8 +59,20 @@ export function mustCollectManually() { return false; }
 
 function makeBot({ gap = [], wall = [], hazards = [], unknown = [], solidBlocks = [], platform = false, corridor = false,
   loadedMaxX = 16, floorY = 63, startY = floorY + 1, rejectScaffoldRemoval = false, navigationDelay = 0,
-  airborneArrival = false, scaffoldInventory = { dirt: 16, cobblestone: 16 } } = {}) {
+  airborneArrival = false, arrivalTickPositions = null, scaffoldInventory = { dirt: 16, cobblestone: 16 } } = {}) {
   const bot = new EventEmitter()
+  const eventOn = bot.on.bind(bot)
+  bot.on = (event, listener) => {
+    eventOn(event, listener)
+    if (event === 'physicsTick' && listener.isArrivalConfirmationObserver) {
+      const sequence = arrivalTickPositions ?? [null, null]
+      sequence.forEach((point, index) => setTimeout(() => {
+        if (point) bot.entity.position = new Vec3(point.x, point.y, point.z)
+        bot.emit('physicsTick')
+      }, index * 5))
+    }
+    return bot
+  }
   const world = new EventEmitter()
   const states = new Map()
   const inventory = { ...scaffoldInventory }
@@ -353,6 +365,43 @@ async function main() {
     assert.equal(alreadyThere.ok, true, JSON.stringify(alreadyThere))
     assert.equal(alreadyThere.code, 'already_at_goal')
     assert.equal(alreadyAtTargetBlock.testState.paths.length, 0, 'same-block arrival does not require movement')
+    assert.equal(alreadyThere.diagnostics.physicsTicks, 2, 'arrival is observed on two consecutive physics ticks')
+    assert.deepEqual(alreadyThere.diagnostics.finalPosition, alreadyThere.finalPosition,
+      'the public final position is the same snapshot used by arrival diagnostics')
+
+    const leavesAndReturns = makeBot({ arrivalTickPositions: [
+      { x: 1.5, y: 64, z: 0.5 }, { x: 0.5, y: 64, z: 0.5 },
+    ] })
+    const listenersBeforeSettle = leavesAndReturns.listenerCount('physicsTick')
+    const oneTickDeparture = await createNativeSdk({ bot: leavesAndReturns, skills }).skills.reachPosition({
+      position: { x: 0.5, y: 64, z: 0.5 },
+    })
+    assert.equal(oneTickDeparture.ok, false, 'one tick outside the requested block breaks consecutive arrival confirmation')
+    assert.equal(leavesAndReturns.listenerCount('physicsTick'), listenersBeforeSettle,
+      'settle removes its physicsTick observer after an early failure')
+    await delay(15)
+    assert.equal(Math.floor(leavesAndReturns.entity.position.x), 0, 'the fixture returned to the target block after the excursion')
+
+    const cancelledArrival = makeBot({ arrivalTickPositions: [] })
+    const arrivalListenerCount = cancelledArrival.listenerCount('physicsTick')
+    const pendingArrival = createNativeSdk({ bot: cancelledArrival, skills }).skills.reachPosition({
+      position: { x: 0.5, y: 64, z: 0.5 },
+    })
+    await delay(40)
+    cancelledArrival.interrupt_code = true
+    const cancelledArrivalResult = await pendingArrival
+    assert.equal(cancelledArrivalResult.status, 'cancelled')
+    assert.equal(cancelledArrival.listenerCount('physicsTick'), arrivalListenerCount,
+      'cancellation removes the pending physicsTick observer')
+
+    const timedOutArrival = makeBot({ arrivalTickPositions: [] })
+    const timeoutListenerCount = timedOutArrival.listenerCount('physicsTick')
+    const timedOutArrivalResult = await createNativeSdk({ bot: timedOutArrival, skills }).skills.reachPosition({
+      position: { x: 0.5, y: 64, z: 0.5 },
+    })
+    assert.equal(timedOutArrivalResult.status, 'blocked', 'missing physics ticks time out without confirming arrival')
+    assert.equal(timedOutArrival.listenerCount('physicsTick'), timeoutListenerCount,
+      'timeout removes the pending physicsTick observer')
 
     const adjacentBlockTarget = makeBot()
     const adjacentBlockResult = await createNativeSdk({ bot: adjacentBlockTarget, skills }).skills.reachPosition({
@@ -669,6 +718,19 @@ async function main() {
     const diagnosticOperation = operationResult(diagnosticOwner)
     assert.equal(diagnosticOperation.skillResults[0].result.code, 'route_not_found')
     assert.equal(diagnosticOperation.skillResults[0].result.diagnostics.lastSearch.status, 'noPath')
+    assert.equal(Object.hasOwn(diagnosticOperation.skillResults[0].result.diagnostics.lastSearch, 'path'), false,
+      'public diagnostics omit the full search path')
+
+    const blockedTarget = makeBot({ solidBlocks: [{ x: 2, y: 64, z: 0 }] })
+    const obstructed = await skills.reachPosition(blockedTarget, {
+      position: { x: 2.5, y: 64, z: 0.5 }, arrivalMode: 'block', allowDig: false, allowScaffold: false,
+    })
+    assert.equal(obstructed.code, 'target_obstructed', JSON.stringify(obstructed))
+    assert.equal(obstructed.diagnostics.phase, 'target')
+    const rangeLimited = await skills.reachPosition(makeBot(), {
+      position: { x: 600, y: 64, z: 0.5 }, allowScaffold: false,
+    })
+    assert.equal(rangeLimited.code, 'invalid_target', 'the explicit search distance limit is an invalid target')
 
     const policyMovement = makeBot({ wall })
     const policyOwner = createOperationContext({ id: 'route-policy-owner', controller: new AbortController() }, { bot: policyMovement }, { intentEpoch: 1 })
@@ -700,11 +762,25 @@ async function main() {
 
     const emptyNoPath = makeBot()
     emptyNoPath.pathfinder.getPathTo = async () => ({ status: 'noPath', path: [] })
-    emptyNoPath.pathfinder.goto = async () => {
+    emptyNoPath.pathfinder.goto = async goal => {
+      emptyNoPath.pathfinder.goal = goal
       emptyNoPath.emit('path_update', { status: 'noPath', path: [] })
     }
     await assert.rejects(() => skills.goToGoal(emptyNoPath, new pathfinder.goals.GoalBlock(6, 64, 0)),
-      error => error.name === 'NavigationArrivalUnconfirmedError' && error.navigation?.code === 'route_not_found')
+      error => error.name === 'NavigationArrivalUnconfirmedError'
+        && error.navigation?.code === 'route_not_found' && error.navigation?.phase === 'search')
+    assert.equal(emptyNoPath.pathfinder.goal, null, 'goToGoal clears its own rejected NoPath goal')
+
+    const replacementNoPath = makeBot()
+    const replacementNoPathGoal = new pathfinder.goals.GoalBlock(9, 64, 0)
+    replacementNoPath.pathfinder.getPathTo = async () => ({ status: 'noPath', path: [] })
+    replacementNoPath.pathfinder.goto = async goal => {
+      replacementNoPath.pathfinder.goal = goal
+      replacementNoPath.pathfinder.goal = replacementNoPathGoal
+      replacementNoPath.emit('path_update', { status: 'noPath', path: [] })
+    }
+    await assert.rejects(() => skills.goToGoal(replacementNoPath, new pathfinder.goals.GoalBlock(6, 64, 0)))
+    assert.equal(replacementNoPath.pathfinder.goal, replacementNoPathGoal, 'failure cleanup preserves a replacement goal')
 
     const emptyPathAlreadyThere = makeBot()
     emptyPathAlreadyThere.pathfinder.getPathTo = async () => ({ status: 'noPath', path: [] })
@@ -1080,6 +1156,20 @@ async function main() {
       'the refusal occurs only after reaching the dry landing')
     assert.equal(Math.floor(waterGoalRejected.finalPosition.x), 2,
       'the bot remains at the safe gravel landing instead of returning to the requested water block')
+
+    const sameCellWaterTarget = makeBot({ floorY: 61, startY: 63, corridor: true, hazards: [
+      { x: 0, y: 63, z: 0, name: 'water' }, { x: 0, y: 62, z: 0, name: 'water' },
+      { x: 1, y: 63, z: 0, name: 'water' }, { x: 1, y: 62, z: 0, name: 'water' },
+      { x: 2, y: 62, z: 0, name: 'gravel' },
+    ] })
+    const sameCellWaterResult = await reachPosition(sameCellWaterTarget, {
+      position: { x: 0.5, y: 63, z: 0.5 }, arrivalMode: 'block', allowScaffold: false,
+    })
+    assert.equal(sameCellWaterResult.status, 'blocked', 'same-cell water is not accepted as early arrival')
+    assert.equal(sameCellWaterResult.code, 'unsafe_state')
+    assert.match(sameCellWaterTarget.output, /"policy":"egress-before-goal"/)
+    assert.match(sameCellWaterTarget.output, /"reason":"target_reentry_forbidden"/)
+    assert.equal(Math.floor(sameCellWaterResult.finalPosition.x), 2, 'same-cell water target stops at safe landing')
 
     const stagingWalls = [
       ...[64, 65].flatMap(y => [

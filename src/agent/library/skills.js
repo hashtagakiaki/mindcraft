@@ -2334,14 +2334,14 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             try {
                 await goToGoal(bot, recovery.goal, recovery.movements);
                 const recoveryPosition = bot.entity.position.clone();
-                await settleReachPositionArrival(bot, recoveryPosition, () => {
+                const settledRecovery = await settleReachPositionArrival(bot, recoveryPosition, () => {
                     if (operationContext()?.signal?.aborted || bot.interrupt_code) {
                         const error = new Error('Navigation recovery landing confirmation cancelled.');
                         error.name = 'ReachCancelledError';
                         throw error;
                     }
-                });
-                if (!navigationRecoveryLanded(bot, bot.entity.position.floored())) {
+                }, 1200, { waitForSafeStart: true });
+                if (!settledRecovery || !navigationRecoveryLanded(bot, bot.entity.position.floored())) {
                     throw new Error(`Navigation recovery from ${recovery.kind} did not confirm a grounded safe landing.`);
                 }
                 log(bot, `[navigation-recovery] ${JSON.stringify({ kind: recovery.kind, policy: 'safe-landing-confirmed', position: bot.entity.position.floored() })}`);
@@ -2405,6 +2405,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     let lastProgressAt;
     let stallError = null;
     let navigationError = false;
+    let clearOwnedGoalOnFailure = false;
     let lastPathUpdate = null;
     const seenRouteSegments = new Set();
     let activeRouteNodes = [];
@@ -2488,26 +2489,32 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         } catch (err) {
             if (!stallError) {
                 navigationError = true;
+                clearOwnedGoalOnFailure = true;
+                const navigationCode = err.name === 'Timeout' || lastPathUpdate?.status === 'timeout' ? 'search_limit'
+                    : lastPathUpdate?.status === 'noPath' ? 'route_not_found'
+                        : err.name === 'NavigationStallTimeoutError' ? 'no_progress' : 'runtime_error';
                 err.navigation = {
-                    code: err.name === 'Timeout' || lastPathUpdate?.status === 'timeout' ? 'search_limit'
-                        : lastPathUpdate?.status === 'noPath' ? 'route_not_found'
-                            : err.name === 'NavigationStallTimeoutError' ? 'no_progress' : 'runtime_error',
-                    phase: 'movement', lastPathUpdate,
+                    code: navigationCode,
+                    phase: navigationCode === 'route_not_found' || navigationCode === 'search_limit' ? 'search' : 'movement',
+                    lastPathUpdate,
                     position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
                     observedAt: new Date().toISOString(),
                 };
                 throw err;
             }
         }
-        if (stallError) throw stallError;
+        if (stallError) { clearOwnedGoalOnFailure = true; throw stallError; }
         const endNode = bot.entity.position.floored();
         if (typeof goal.isEnd === 'function' && !goal.isEnd(endNode)) {
+            clearOwnedGoalOnFailure = true;
             const error = new Error(`Pathfinder resolved without satisfying its goal (last path status: ${lastPathUpdate?.status ?? 'unknown'}).`);
             error.name = 'NavigationArrivalUnconfirmedError';
+            const navigationCode = lastPathUpdate?.status === 'noPath' ? 'route_not_found'
+                : lastPathUpdate?.status === 'timeout' ? 'search_limit' : 'arrival_unconfirmed';
             error.navigation = {
-                code: lastPathUpdate?.status === 'noPath' ? 'route_not_found'
-                    : lastPathUpdate?.status === 'timeout' ? 'search_limit' : 'arrival_unconfirmed',
-                phase: 'arrival', lastPathUpdate,
+                code: navigationCode,
+                phase: navigationCode === 'route_not_found' || navigationCode === 'search_limit' ? 'search' : 'arrival',
+                lastPathUpdate,
                 position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
                 observedAt: new Date().toISOString(),
             };
@@ -2519,6 +2526,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         // we need to catch so we can clean up the door check interval, then rethrow the error
         throw err;
     } finally {
+        if (clearOwnedGoalOnFailure && bot.pathfinder.goal === goal) bot.pathfinder.setGoal(null);
         clearInterval(doorCheckInterval);
         if (timeoutHandle) clearInterval(timeoutHandle);
         bot.removeListener?.('path_update', onPathUpdate);
@@ -2610,6 +2618,43 @@ function reachPositionBlockMatches(position, target) {
         && Math.floor(position.y) === Math.floor(target.y) && Math.floor(position.z) === Math.floor(target.z);
 }
 
+function reachPositionSearchSummary(value) {
+    if (!value || typeof value !== 'object') return null;
+    return {
+        status: value.status ?? value.searchStatus ?? null,
+        code: value.code ?? null,
+        phase: value.phase ?? null,
+        pathNodeCount: Number.isFinite(value.pathNodeCount) ? value.pathNodeCount : null,
+        endpoint: value.endpoint && [value.endpoint.x, value.endpoint.y, value.endpoint.z].every(Number.isFinite)
+            ? { x: value.endpoint.x, y: value.endpoint.y, z: value.endpoint.z } : null,
+        limits: value.limits ?? null,
+        segment: Number.isFinite(value.segment) ? value.segment : null,
+        attempt: Number.isFinite(value.attempt) ? value.attempt : null,
+        start: value.start && [value.start.x, value.start.y, value.start.z].every(Number.isFinite)
+            ? { x: value.start.x, y: value.start.y, z: value.start.z } : null,
+        startHazard: value.startHazard ?? null,
+        unknownNeighbor: typeof value.unknownNeighbor === 'boolean' ? value.unknownNeighbor : null,
+        chunkWaitOutcome: value.chunkWaitOutcome ?? null,
+        position: value.position && [value.position.x, value.position.y, value.position.z].every(Number.isFinite)
+            ? { x: value.position.x, y: value.position.y, z: value.position.z } : null,
+        targetBlocker: value.targetBlocker && typeof value.targetBlocker.code === 'string'
+            ? { code: value.targetBlocker.code, feet: value.targetBlocker.feet ?? null, head: value.targetBlocker.head ?? null } : null,
+        observedAt: value.observedAt ?? null,
+    };
+}
+
+function reachPositionTargetBlocker(bot, target, allowDig) {
+    const feetPosition = new Vec3(Math.floor(target.x), Math.floor(target.y), Math.floor(target.z));
+    const feet = bot.blockAt(feetPosition);
+    const headOffset = Math.max(1, Math.ceil((Number.isFinite(bot.entity.height) ? bot.entity.height : 1.8) - 0.01) - 1);
+    const head = bot.blockAt(feetPosition.offset(0, headOffset, 0));
+    if (!feet || !head) return { code: 'target_unloaded', feet: feet?.name ?? null, head: head?.name ?? null };
+    if (!allowDig && [feet, head].some(reachPositionFullCollisionBlock)) {
+        return { code: 'target_obstructed', feet: feet.name, head: head.name };
+    }
+    return null;
+}
+
 function reachPositionSafeArrival(bot, target) {
     const position = bot.entity?.position;
     if (!reachPositionBlockMatches(position, target) || bot.entity?.onGround !== true) return false;
@@ -2656,27 +2701,77 @@ function reachPositionSafeArrival(bot, target) {
     return false;
 }
 
-async function settleReachPositionArrival(bot, target, active, timeoutMs = 1200) {
-    if (typeof bot.waitForTicks !== 'function') return false;
+async function settleReachPositionArrival(bot, target, active, timeoutMs = 1200, { waitForSafeStart = false } = {}) {
     let timer;
     let cancellationPoll;
-    const ticks = Promise.resolve().then(() => bot.waitForTicks(2)).then(() => true);
-    const timeout = new Promise(resolve => { timer = setTimeout(() => resolve(false), timeoutMs); });
+    let tickCount = 0;
     const operation = operationContext();
-    const cancellation = new Promise((_, reject) => {
-        cancellationPoll = setInterval(() => {
-            if (operation?.signal.aborted || bot.interrupt_code) {
-                const error = new Error('Arrival confirmation cancelled.');
-                error.name = 'ReachCancelledError';
-                reject(error);
+    if (typeof bot.on !== 'function' || typeof bot.removeListener !== 'function') return null;
+    let safeStartObserved = reachPositionSafeArrival(bot, target);
+    if (!safeStartObserved && !waitForSafeStart) return null;
+    let onPhysicsTick;
+    const confirmation = new Promise((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+            clearTimeout(timer);
+            clearInterval(cancellationPoll);
+            bot.removeListener('physicsTick', onPhysicsTick);
+        };
+        const finish = value => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(value);
+        };
+        const fail = error => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(error);
+        };
+        onPhysicsTick = function onArrivalPhysicsTick() {
+            try { active(); } catch (error) { fail(error); return; }
+            if (!reachPositionBlockMatches(bot.entity?.position, target)) {
+                finish(null);
+                return;
             }
+            if (!reachPositionSafeArrival(bot, target)) {
+                if (!waitForSafeStart || safeStartObserved) finish(null);
+                return;
+            }
+            safeStartObserved = true;
+            tickCount++;
+            if (tickCount === 2) {
+                const position = { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z };
+                const feet = new Vec3(position.x, position.y, position.z).floored();
+                const headOffset = Math.max(1, Math.ceil((Number.isFinite(bot.entity.height) ? bot.entity.height : 1.8) - 0.01) - 1);
+                const velocity = bot.entity.velocity;
+                finish({ position, feet: bot.blockAt(feet)?.name ?? null,
+                    head: bot.blockAt(feet.offset(0, headOffset, 0))?.name ?? null,
+                    support: bot.blockAt(feet.offset(0, -1, 0))?.name ?? null,
+                    onGround: bot.entity.onGround === true,
+                    velocity: velocity ? { x: velocity.x, y: velocity.y, z: velocity.z } : null,
+                    observedAt: new Date().toISOString(), physicsTicks: tickCount });
+            }
+        };
+        onPhysicsTick.isArrivalConfirmationObserver = true;
+        bot.on('physicsTick', onPhysicsTick);
+        timer = setTimeout(() => finish(null), timeoutMs);
+        cancellationPoll = setInterval(() => {
+            if (!operation?.signal.aborted && !bot.interrupt_code) return;
+            const error = new Error('Arrival confirmation cancelled.');
+            error.name = 'ReachCancelledError';
+            fail(error);
         }, 25);
     });
     try {
-        const settled = await Promise.race([ticks, timeout, cancellation]);
         active();
-        return settled && reachPositionSafeArrival(bot, target);
-    } finally { clearTimeout(timer); clearInterval(cancellationPoll); }
+        return await confirmation;
+    } finally {
+        clearTimeout(timer);
+        clearInterval(cancellationPoll);
+        if (onPhysicsTick) bot.removeListener('physicsTick', onPhysicsTick);
+    }
 }
 
 function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safeWater }) {
@@ -3330,7 +3425,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
     if (!['distance', 'block'].includes(arrivalMode)) return early('Arrival mode is invalid.');
     const initialHazard = reachPositionStartHazard(bot);
     if (bot.game?.minY != null && (target.y < bot.game.minY || bot.game.height != null && target.y >= bot.game.minY + bot.game.height)) return early('Target is outside the loaded dimension height.', 'invalid_target');
-    if (bot.entity.position.distanceTo(target) > REACH_POSITION_MAX_DISTANCE) return early(`Target exceeds the ${REACH_POSITION_MAX_DISTANCE}-block range limit.`);
+    if (bot.entity.position.distanceTo(target) > REACH_POSITION_MAX_DISTANCE) return early(`Target exceeds the ${REACH_POSITION_MAX_DISTANCE}-block range limit.`, 'invalid_target');
     const availableScaffoldBlocks = allowScaffold
         ? scaffoldBlocks.filter(name => bot.registry?.itemsByName?.[name] &&
             (bot.inventory?.items?.() ?? []).some(item => item.name === name && item.count > 0))
@@ -3366,12 +3461,17 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
     let lastNavigationError = '';
     let status = 'blocked';
     let reason = 'No safe route was found.';
+    let diagnosticPhase = 'target';
     let hardTimer;
     startedAt = Date.now();
     let chunkWaitCount = 0;
     const routeAttempts = new Map();
     const finalDistance = () => bot.entity.position.distanceTo(target);
     const arrivalCandidate = () => arrivalMode === 'block' ? reachPositionBlockMatches(bot.entity.position, target) : finalDistance() <= tolerance;
+    const confirmArrival = async () => {
+        if (arrivalMode !== 'block') return { position: snapshotPosition(), observedAt: new Date().toISOString(), physicsTicks: 0 };
+        return await settleReachPositionArrival(bot, target, active);
+    };
     const goal = reachPositionGoal(target, tolerance, arrivalMode);
     let resultCode = null;
     let lastSearchDiagnostics = null;
@@ -3566,8 +3666,9 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                 bot.pathfinder.setMovements(ordinaryMovement);
                 log(bot, '[reachPosition-departure] {"policy":"ordinary","reason":"safe_surface_reached"}');
             }
-            if (arrivalCandidate()) {
-                if (arrivalMode !== 'block' || await settleReachPositionArrival(bot, target, active)) {
+            if (!initialHazard && arrivalCandidate()) {
+                diagnosticPhase = 'arrival';
+                if (await confirmArrival()) {
                     status = 'reached';
                     resultCode = reachPositionBlockMatches(bot.entity.position, target) && startedPosition.distanceTo(bot.entity.position) < 0.01
                         ? 'already_at_goal' : 'arrived';
@@ -3584,6 +3685,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
             const start = bot.entity.position.floored();
             let pathGoal = waterExitStage?.goal ?? goal;
             if (segment === 0 && initialHazard) {
+                diagnosticPhase = 'recovery';
                 const recovery = navigationRecovery(bot, movement, goal);
                 if (recovery?.goal && recovery.kind === 'water'
                     && recovery.blocks?.has(reachPositionBlockKey(target.floored()))) {
@@ -3617,7 +3719,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                     }
                     if (navigationFailure) throw navigationFailure;
                     active();
-                    if (arrivalCandidate() && (arrivalMode !== 'block' || await settleReachPositionArrival(bot, target, active))) {
+                    if (arrivalCandidate() && await confirmArrival()) {
                         status = 'reached';
                         resultCode = reachPositionBlockMatches(bot.entity.position, target) && startedPosition.distanceTo(bot.entity.position) < 0.01
                             ? 'already_at_goal' : 'arrived';
@@ -3740,6 +3842,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                 tickTimeout: REACH_POSITION_WATER_EXIT_SEARCH_TICK_MS,
                 steps: REACH_POSITION_WATER_EXIT_SEARCH_STEPS,
             } : undefined;
+            diagnosticPhase = waterExitStage || initialHazard ? 'recovery' : 'search';
             let pathResult = reachPositionPath(bot, movement, pathGoal, waterSearchOptions);
             lastSearchDiagnostics = { status: pathResult.status ?? 'unknown', pathNodeCount: pathResult.path?.length ?? 0,
                 endpoint: pathResult.path?.length ? { x: pathResult.path.at(-1).x, y: pathResult.path.at(-1).y, z: pathResult.path.at(-1).z } : null,
@@ -3974,7 +4077,8 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                     log(bot, '[reachPosition-departure] {"policy":"ordinary","reason":"safe_surface_reached"}');
                 }
                 if (!waterExitStage && arrivalCandidate()) {
-                    if (arrivalMode === 'block' && !await settleReachPositionArrival(bot, target, active)) {
+                    diagnosticPhase = 'arrival';
+                    if (arrivalMode === 'block' && !await confirmArrival()) {
                         status = 'blocked'; resultCode = 'unsafe_state';
                         reason = 'Arrival could not be confirmed as grounded, loaded, and safe for two physics ticks.';
                         break;
@@ -3988,17 +4092,35 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                 const unknownNeighbor = reachPositionHasUnknownNeighbor(bot, bot.entity.position);
                 searchDiagnostic.unknownNeighbor = unknownNeighbor;
                 if (unknownNeighbor) {
-                    resultCode = 'target_unloaded';
-                    if (++chunkWaitCount > REACH_POSITION_MAX_SEGMENTS) { status = 'stalled'; reason = 'Chunk loading retry limit reached.'; break; }
+                    diagnosticPhase = 'search';
+                    if (++chunkWaitCount > REACH_POSITION_MAX_SEGMENTS) {
+                        const blocker = reachPositionTargetBlocker(bot, target, allowDig);
+                        resultCode = blocker?.code ?? 'search_limit';
+                        diagnosticPhase = blocker ? 'target' : 'search';
+                        status = blocker?.code === 'target_unloaded' ? 'blocked' : 'stalled';
+                        reason = blocker ? 'The target remains unloaded after the bounded chunk wait.' : 'Chunk loading retry limit reached.';
+                        break;
+                    }
                     const loaded = await waitForReachPositionChunk(bot, context, REACH_POSITION_CHUNK_WAIT_MS);
                     searchDiagnostic.chunkWaitOutcome = loaded ? 'chunk_loaded' : 'deadline';
                     active();
                     log(bot, `[reachPosition-route] ${JSON.stringify(searchDiagnostic)}`);
                     if (loaded) continue;
-                    status = 'blocked'; reason = 'No newly loaded safe route segment appeared before the chunk wait deadline.'; break;
+                    const blocker = reachPositionTargetBlocker(bot, target, allowDig);
+                    resultCode = blocker?.code ?? 'search_limit';
+                    diagnosticPhase = blocker ? 'target' : 'search';
+                    status = 'blocked'; reason = blocker ? 'The target is not loaded.' : 'No newly loaded safe route segment appeared before the chunk wait deadline.'; break;
                 }
-                resultCode = pathResult.status === 'timeout' || pathResult.status === 'partial' ? 'search_limit'
-                    : pathResult.status === 'noPath' ? 'route_not_found' : 'arrival_unconfirmed';
+                const blocker = reachPositionTargetBlocker(bot, target, allowDig);
+                if (blocker) {
+                    resultCode = blocker.code;
+                    searchDiagnostic.targetBlocker = blocker;
+                    diagnosticPhase = 'target';
+                } else {
+                    resultCode = pathResult.status === 'timeout' || pathResult.status === 'partial' ? 'search_limit'
+                        : pathResult.status === 'noPath' ? 'route_not_found' : 'arrival_unconfirmed';
+                    diagnosticPhase = 'search';
+                }
                 log(bot, `[reachPosition-route] ${JSON.stringify(searchDiagnostic)}`);
                 status = 'blocked'; reason = `Path search ended ${pathResult.status} without a safe next segment.`; break;
             }
@@ -4007,7 +4129,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
             const attempts = (routeAttempts.get(routeKey) ?? 0) + 1;
             routeAttempts.set(routeKey, attempts);
             searchDiagnostic.attempt = attempts;
-            lastSearchDiagnostics = { ...searchDiagnostic, path: undefined, omittedPathNodeCount: undefined };
+            lastSearchDiagnostics = reachPositionSearchSummary(searchDiagnostic);
             log(bot, `[reachPosition-route] ${JSON.stringify(searchDiagnostic)}`);
             if (attempts >= REACH_POSITION_NO_PROGRESS_LIMIT) {
                 resultCode = 'no_progress';
@@ -4078,7 +4200,10 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
         if (cancelled() || error.name === 'ReachCancelledError') { status = 'cancelled'; reason = 'Action was cancelled; no further edits were started.'; }
         else if (budgetExpired || error.name === 'NavigationStallTimeoutError' || error.name === 'Timeout') { status = 'stalled'; reason = String(error.message ?? error); }
         else { status = 'blocked'; resultCode = error.navigation?.code ?? (error.name === 'NavigationArrivalUnconfirmedError' ? 'arrival_unconfirmed' : 'runtime_error'); reason = String(error.message ?? error); }
-        if (error.navigation) lastSearchDiagnostics = error.navigation;
+        if (error.navigation) {
+            lastSearchDiagnostics = error.navigation;
+            diagnosticPhase = error.navigation.phase ?? diagnosticPhase;
+        }
         if (cleanupOwnedScaffolds && status !== 'cancelled' && scaffoldRecords.length) await cleanupScaffolds();
         if (cleanupRequired.length && status === 'reached') status = 'blocked';
     } finally {
@@ -4102,7 +4227,8 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
             cleanupRequired.push({ ...scaffold.position, block: scaffold.block, reason: cancelled() ? 'Action cancelled before owned scaffold cleanup.' : 'Owned scaffold remains or became unobserved after route completion.' });
         }
     }
-    const finalPosition = snapshotPosition();
+    let finalPosition = snapshotPosition();
+    let finalObservedAt = new Date().toISOString();
     if (status === 'blocked' && !waterDepartureTargetRejected && initialHazard === 'shallow_water' && arrivalCandidate()
         && reachPositionWaterExitSafeLanding(bot, bot.entity.position.floored())
         && !cancelled() && !budgetExpired && !unconfirmedScaffolds.length && !cleanupRequired.length) {
@@ -4129,31 +4255,40 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
             reason = 'Reach exceeded its elapsed-time budget.';
         }
     }
-    if (status === 'reached' && arrivalCandidate()
-        && (arrivalMode !== 'block' || await settleReachPositionArrival(bot, target, active))) {
-        const diagnostics = { phase: 'arrival', target: { x: target.x, y: target.y, z: target.z,
+    if (status === 'reached' && arrivalCandidate()) {
+        diagnosticPhase = 'arrival';
+        const observation = await confirmArrival();
+        if (observation) {
+            finalPosition = observation.position;
+            finalObservedAt = observation.observedAt;
+            const observedPosition = new Vec3(finalPosition.x, finalPosition.y, finalPosition.z);
+            const diagnostics = { phase: 'arrival', target: { x: target.x, y: target.y, z: target.z,
                 block: { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z) } },
-            finalPosition, distance: finalDistance(), displacement: startedPosition.distanceTo(bot.entity.position),
-            feet: bot.blockAt(bot.entity.position.floored())?.name ?? null,
-            head: bot.blockAt(bot.entity.position.floored().offset(0, 1, 0))?.name ?? null,
-            support: bot.blockAt(bot.entity.position.floored().offset(0, -1, 0))?.name ?? null,
-            onGround: bot.entity.onGround === true, velocity: bot.entity.velocity ? { x: bot.entity.velocity.x, y: bot.entity.velocity.y, z: bot.entity.velocity.z } : null,
-            lastSearch: lastSearchDiagnostics, observedAt: new Date().toISOString() };
-        log(bot, `Reached ${target} within ${tolerance} blocks; confirmed ${edits.length} route edits.`);
-        return reachPositionResult('reached', finalPosition, reason, edits, cleanupRequired, true, resultCode ?? 'arrived', diagnostics);
+                finalPosition, distance: observedPosition.distanceTo(target), displacement: startedPosition.distanceTo(observedPosition),
+                feet: observation.feet ?? bot.blockAt(observedPosition.floored())?.name ?? null,
+                head: observation.head ?? bot.blockAt(observedPosition.floored().offset(0, 1, 0))?.name ?? null,
+                support: observation.support ?? bot.blockAt(observedPosition.floored().offset(0, -1, 0))?.name ?? null,
+                onGround: observation.onGround ?? bot.entity.onGround === true, velocity: observation.velocity ?? null,
+                lastSearch: reachPositionSearchSummary(lastSearchDiagnostics), physicsTicks: observation.physicsTicks,
+                observedAt: finalObservedAt };
+            log(bot, `Reached ${target} within ${tolerance} blocks; confirmed ${edits.length} route edits.`);
+            return reachPositionResult('reached', finalPosition, reason, edits, cleanupRequired, true, resultCode ?? 'arrived', diagnostics);
+        }
+        finalPosition = snapshotPosition();
+        finalObservedAt = new Date().toISOString();
     }
     if (status === 'reached') { status = 'blocked'; resultCode = arrivalMode === 'block' ? 'unsafe_state' : 'arrival_unconfirmed'; reason = 'Final arrival state was not confirmed.'; }
     if (cleanupRequired.length) reason += ` Cleanup required at ${cleanupRequired.map(item => `(${item.x}, ${item.y}, ${item.z})`).join(', ')}.`;
     log(bot, `Could not complete route to ${target}: ${reason}`);
     const code = resultCode ?? (status === 'cancelled' ? 'cancelled' : status === 'stalled' ? 'search_limit' : 'arrival_unconfirmed');
-    const diagnostics = { phase: cleanupRequired.length ? 'cleanup' : 'arrival', target: { x: target.x, y: target.y, z: target.z,
+    const diagnostics = { phase: cleanupRequired.length ? 'cleanup' : diagnosticPhase, target: { x: target.x, y: target.y, z: target.z,
             block: { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z) } },
         finalPosition, distance: finalDistance(), displacement: startedPosition.distanceTo(bot.entity.position),
         feet: bot.blockAt(bot.entity.position.floored())?.name ?? null,
         head: bot.blockAt(bot.entity.position.floored().offset(0, 1, 0))?.name ?? null,
         support: bot.blockAt(bot.entity.position.floored().offset(0, -1, 0))?.name ?? null,
         onGround: bot.entity.onGround === true, velocity: bot.entity.velocity ? { x: bot.entity.velocity.x, y: bot.entity.velocity.y, z: bot.entity.velocity.z } : null,
-        lastSearch: lastSearchDiagnostics, observedAt: new Date().toISOString() };
+        lastSearch: reachPositionSearchSummary(lastSearchDiagnostics), observedAt: finalObservedAt };
     return reachPositionResult(status, finalPosition, reason, edits, cleanupRequired, arrivalCandidate(), code, diagnostics);
 }
 

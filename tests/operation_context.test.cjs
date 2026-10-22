@@ -39,6 +39,19 @@ async function main() {
   })
 
   await operation(async ({ trackSkill, runOwnedOperation, operationResult }, owner) => {
+    const error = Object.assign(new Error('NoPath'), { navigation: {
+      code: 'route_not_found', phase: 'search', lastPathUpdate: { status: 'noPath', pathNodeCount: 0 },
+      position: { x: 1.5, y: 64, z: 0.5 }, observedAt: '2026-10-23T00:00:00.000Z',
+    } })
+    await assert.rejects(() => runOwnedOperation(owner, () => trackSkill('goToGoal', async () => { throw error })()), /NoPath/)
+    const skill = operationResult(owner).skillResults[0]
+    assert.equal(skill.status, 'error')
+    assert.equal(skill.error, 'Error: NoPath')
+    assert.equal(skill.result.code, 'route_not_found')
+    assert.equal(skill.result.diagnostics.phase, 'search', 'navigation failure diagnostics survive the thrown SDK error')
+  })
+
+  await operation(async ({ trackSkill, runOwnedOperation, operationResult }, owner) => {
     let release
     const gate = new Promise(resolve => { release = resolve })
     let settled = false

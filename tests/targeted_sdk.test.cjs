@@ -69,6 +69,14 @@ export function mustCollectManually() { return false; }
 const key = p => `${p.x},${p.y},${p.z}`
 function makeBot() {
   const bot = new EventEmitter()
+  const eventOn = bot.on.bind(bot)
+  bot.on = (event, listener) => {
+    eventOn(event, listener)
+    if (event === 'physicsTick' && listener.isArrivalConfirmationObserver) {
+      setImmediate(() => { bot.emit('physicsTick'); bot.emit('physicsTick') })
+    }
+    return bot
+  }
   const state = { opened: [], closed: [], digs: [], moves: [], visible: true, unknown: false, route: 'ready' }
   bot.state = state
   bot.registry = registry
