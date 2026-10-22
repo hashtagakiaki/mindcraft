@@ -12,7 +12,7 @@ function digInteraction (bot, block, ignoreLook, aim = null) {
 
 export const DIG_GROUND_TIMEOUT_MS = 15_000
 export const DIG_LOOK_TIMEOUT_MS = 5_000
-export const DIG_CONFIRMATION_GRACE_MS = 5_000
+export const DIG_CONFIRMATION_GRACE_MS = 2_000
 
 const SPECIAL_MOVEMENT_BLOCKS = new Set([
   'water', 'flowing_water', 'bubble_column', 'ladder', 'vine', 'scaffolding'

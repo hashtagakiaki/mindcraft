@@ -197,14 +197,14 @@ async function main() {
     await digging
     assert.equal(mining.getMiningState(bot), null)
   }
-  // Production default leaves five seconds for delayed authoritative updates
+  // Production default leaves two seconds for delayed authoritative updates
   // after Mineflayer's calculated dig duration has elapsed.
   {
     const { bot, block } = fixture({ digMs: 20 })
     const digging = bot.dig(block, 'ignore')
     await sleep(0)
     const state = mining.getMiningState(bot)
-    assert.equal(state.deadline - state.startedAt, 5_020)
+    assert.equal(state.deadline - state.startedAt, 2_020)
     await sleep(55)
     serverAir(bot, block)
     await digging
