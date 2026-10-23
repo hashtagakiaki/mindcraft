@@ -67,6 +67,13 @@ function lock(root, timeoutMs = 500) {
     }
 }
 
+export function withDiagnosticQuotaLock(root, callback) {
+    if (typeof callback !== 'function') throw new TypeError('diagnostics lock callback is required');
+    const release = lock(path.resolve(root));
+    try { return callback(); }
+    finally { release(); }
+}
+
 function segmentFiles(poolRoot) {
     const dir = path.join(poolRoot, 'segments');
     if (!existsSync(dir)) return [];

@@ -73,6 +73,7 @@ export async function shutdown(request) { return closeHandler?.(request) }
     await write(root, 'src/mindcraft/worker_task_registry.js', await readFile(path.join(sourceRoot, 'src/mindcraft/worker_task_registry.js')))
     await write(root, 'src/mindcraft/worker_task_management.js', await readFile(path.join(sourceRoot, 'src/mindcraft/worker_task_management.js')))
     await write(root, 'src/mindcraft/state_poller.js', await readFile(path.join(sourceRoot, 'src/mindcraft/state_poller.js')))
+    await write(root, 'src/agent/diagnostics_store.js', await readFile(path.join(sourceRoot, 'src/agent/diagnostics_store.js')))
     await write(root, 'src/mindcraft/bot_output_history.js', await readFile(path.join(sourceRoot, 'src/mindcraft/bot_output_history.js')))
     const fixtureSettings = await import(pathToFileURL(path.join(root, 'settings.js')).href)
     sourceSettings = fixtureSettings.default

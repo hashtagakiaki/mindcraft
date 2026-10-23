@@ -520,8 +520,13 @@ export function createMindServer(host_public = false, port = 8080) {
 
         socket.on('get-bot-output-log', callback => {
             if (!allowed(socket, ['operator', 'legacy'])) return deny(callback);
-            const entries = readBotOutputHistory(process.cwd(), Object.keys(agent_connections));
-            if (typeof callback === 'function') callback({ success: true, entries });
+            try {
+                const entries = readBotOutputHistory(process.cwd(), Object.keys(agent_connections));
+                if (typeof callback === 'function') callback({ success: true, entries });
+            } catch (error) {
+                console.error('Could not read bot output history:', error);
+                if (typeof callback === 'function') callback({ success: false, entries: [], error: 'Bot output history is unavailable' });
+            }
         });
 
         socket.on('listen-to-agents', () => {
