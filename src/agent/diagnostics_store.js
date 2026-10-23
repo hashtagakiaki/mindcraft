@@ -1,5 +1,6 @@
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, statfsSync, writeSync, unlinkSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, statfsSync, unlinkSync, writeSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 
 const SEGMENT_BYTES = 16 * 1024 * 1024;
@@ -41,35 +42,26 @@ function processStartTicks(pid) {
 
 function lock(root, timeoutMs = 500) {
     const file = path.join(root, '.quota.lock');
-    const until = Date.now() + timeoutMs;
-    while (true) {
-        try {
-            const fd = openSync(file, 'wx', 0o600);
-            writeSync(fd, JSON.stringify({ pid: process.pid, startTicks: processStartTicks(process.pid), at: Date.now() }));
-            return () => { closeSync(fd); try { unlinkSync(file); } catch {} };
-        } catch (error) {
-            if (error.code !== 'EEXIST') throw error;
-            try {
-                const current = JSON.parse(readFileSync(file, 'utf8'));
-                const actual = processStartTicks(Number(current.pid));
-                if (actual !== null && actual !== current.startTicks) unlinkSync(file);
-                else if (actual === null) {
-                    try { process.kill(Number(current.pid), 0); }
-                    catch (probeError) { if (probeError.code === 'ESRCH') unlinkSync(file); }
-                }
-            } catch (readError) {
-                if (readError.code === 'ENOENT') continue;
-                throw new Error(`diagnostics quota lock is unreadable: ${file}`, { cause: readError });
-            }
-            if (Date.now() >= until) throw new Error(`diagnostics quota lock is busy: ${file}`);
-            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
-        }
+    const fd = openSync(file, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
+    if (!fstatSync(fd).isFile()) {
+        closeSync(fd);
+        throw new Error(`diagnostics quota lock is not a regular file: ${file}`);
     }
+    const result = spawnSync('flock', ['--exclusive', '--timeout', `${timeoutMs / 1000}`, '3'],
+        { stdio: ['ignore', 'ignore', 'pipe', fd], encoding: 'utf8' });
+    if (result.error || result.status !== 0) {
+        closeSync(fd);
+        const detail = result.error?.message || result.stderr?.trim() || `exit status ${result.status}`;
+        throw new Error(`diagnostics quota lock is ${result.status === 1 ? 'busy' : 'unavailable'}: ${file}: ${detail}`,
+            result.error ? { cause: result.error } : undefined);
+    }
+    // flock locks the shared open-file description; keeping this descriptor open holds the lock.
+    return () => closeSync(fd);
 }
 
-export function withDiagnosticQuotaLock(root, callback) {
+export function withDiagnosticQuotaLock(root, callback, timeoutMs = 500) {
     if (typeof callback !== 'function') throw new TypeError('diagnostics lock callback is required');
-    const release = lock(path.resolve(root));
+    const release = lock(path.resolve(root), timeoutMs);
     try { return callback(); }
     finally { release(); }
 }

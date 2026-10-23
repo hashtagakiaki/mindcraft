@@ -2,6 +2,8 @@
 
 const assert = require('node:assert/strict')
 const { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, mkdirSync, writeFileSync, existsSync } = require('node:fs')
+const { spawn, spawnSync } = require('node:child_process')
+const { once } = require('node:events')
 const os = require('node:os')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
@@ -23,12 +25,76 @@ async function main() {
   const root = mkdtempSync(path.join(os.tmpdir(), 'mindcraft-diagnostics-'))
   try {
     const { DiagnosticWriter, DiagnosticQuotaError, diagnosticPoolUsage, diagnosticsFreeSpace,
-      checkDiagnosticsSpace } = await import(pathToFileURL(
+      checkDiagnosticsSpace, withDiagnosticQuotaLock } = await import(pathToFileURL(
       path.resolve(__dirname, '../src/agent/diagnostics_store.js')))
     assert.ok(diagnosticsFreeSpace(root) > 0)
     assert.deepEqual(checkDiagnosticsSpace(root, { warningBytes: Number.MAX_SAFE_INTEGER,
       rejectBytes: Number.MAX_SAFE_INTEGER }), { freeBytes: diagnosticsFreeSpace(root), warning: true, rejected: true })
     assert.throws(() => checkDiagnosticsSpace(root, { warningBytes: 10, rejectBytes: 20 }), /reject <= warning/)
+
+    const partialLockRoot = path.join(root, 'partial-lock')
+    mkdirSync(partialLockRoot)
+    const partialLock = path.join(partialLockRoot, '.quota.lock')
+    const lockOwner = spawn('python3', ['-c', `
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+print('locked', flush=True)
+time.sleep(0.1)
+os.close(fd)
+`, partialLock], { stdio: ['ignore', 'pipe', 'inherit'] })
+    await once(lockOwner.stdout, 'data')
+    const beforeAcquire = Date.now()
+    let acquiredAfterPartialWrite = false
+    withDiagnosticQuotaLock(partialLockRoot, () => { acquiredAfterPartialWrite = true })
+    const [lockOwnerExit] = await once(lockOwner, 'exit')
+    assert.equal(lockOwnerExit, 0)
+    assert.equal(acquiredAfterPartialWrite, true, 'a competing writer waits for the Python flock owner')
+    assert.ok(Date.now() - beforeAcquire >= 50, 'the Node writer waits for the Python lock')
+    assert.equal(existsSync(partialLock), true, 'the persistent flock inode is not unlinked')
+    withDiagnosticQuotaLock(partialLockRoot, () => {
+      const contender = spawnSync('python3', ['-c', `
+import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print('busy')
+else:
+    print('UNEXPECTEDLY_ACQUIRED')
+`, partialLock], { encoding: 'utf8' })
+      assert.equal(contender.status, 0)
+      assert.equal(contender.stdout.trim(), 'busy', 'Python cannot enter while Node holds flock')
+    })
+
+    const nodeOwner = spawn(process.execPath, ['-e', `
+      import(${JSON.stringify(pathToFileURL(path.resolve(__dirname, '../src/agent/diagnostics_store.js')).href)})
+        .then(({ withDiagnosticQuotaLock }) => withDiagnosticQuotaLock(process.argv[1], () => {
+          console.log('locked')
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60_000)
+        }))
+    `, partialLockRoot], { stdio: ['ignore', 'pipe', 'inherit'] })
+    await once(nodeOwner.stdout, 'data')
+    nodeOwner.kill('SIGKILL')
+    const [nodeOwnerCode, nodeOwnerSignal] = await once(nodeOwner, 'exit')
+    assert.equal(nodeOwnerCode, null)
+    assert.equal(nodeOwnerSignal, 'SIGKILL')
+    let acquiredAfterCrash = false
+    withDiagnosticQuotaLock(partialLockRoot, () => { acquiredAfterCrash = true })
+    assert.equal(acquiredAfterCrash, true, 'the kernel releases flock when its owner is killed')
+
+    const heldLock = spawn('python3', ['-c', `
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+print('locked', flush=True)
+time.sleep(0.7)
+os.close(fd)
+`, partialLock], { stdio: ['ignore', 'pipe', 'inherit'] })
+    await once(heldLock.stdout, 'data')
+    assert.throws(() => withDiagnosticQuotaLock(partialLockRoot, () => {}, 50), /lock is busy/)
+    await once(heldLock, 'exit')
+
     let now = Date.parse('2026-10-23T00:00:00.000Z')
     const writer = new DiagnosticWriter({ root, pool: 'stream', limitBytes: 20_000, segmentBytes: 512,
       segmentMs: 3_600_000, clock: () => now, processRunId: 'fixture-run',

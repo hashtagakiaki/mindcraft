@@ -573,3 +573,5 @@ OllamaのHTTP/model失敗は通常回答文字列にせず失敗として返し�
 Offline fixtureは `node tests/codex_session.test.cjs`（上記Node20）で実行し、通常suiteにも含まれる。fake app-serverと所有helperで専用homeの共有範囲、file認証更新、削除後のthread再開とbot指示更新、AGENTS配置と標準読込設定、SDK名前一覧と遅延説明の分離・再開時の一覧復元、同一turn内のtool result待機、phase、thread再開とscope/reset、native画像と上限、高速完了、部分失敗、停滞、停止/差替え/管理切断/shutdownの結果破棄、本体message入口を確認する。実ゲーム結果はbenchmark repoの記録を参照。manual playのsource pinや稼働botはこの追加で自動更新されない。
 
 manual `settings.diagnostics` は空き10GiB未満をmaintenance eventへ記録し、5GiB未満では新しいCodex taskを拒否する。実行中のtaskはこの閾値だけでは停止しない。
+
+診断poolの共有排他にはLinux `flock` を使う。診断を有効にするruntime hostには既存のutil-linux `flock` コマンドが必要で、lock待ちは有限時間で明示エラーになる。共有inodeを保つためlock fileは残り、process異常終了時はOSがlockを解放する。
