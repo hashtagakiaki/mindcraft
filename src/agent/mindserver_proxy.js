@@ -122,6 +122,16 @@ export class MindServerProxy {
             });
             acknowledge?.(result);
         });
+        this.socket.on('diagnostic-capture', (request, acknowledge) => {
+            const runtime = this.agent?.codexRuntime;
+            if (!this.managementReady || !runtime) {
+                acknowledge?.({ accepted: false, error: 'native diagnostic storage is unavailable' });
+                return;
+            }
+            try { acknowledge?.(runtime.captureIncident(request?.requestId)); }
+            catch (error) { acknowledge?.({ accepted: false, requestId: request?.requestId ?? null,
+                error: String(error?.message ?? error) }); }
+        });
         this.socket.on('worker-task-start', (payload, acknowledge) => {
             if (!this.managementReady || !this.agent?.acceptWorkerTask) {
                 acknowledge?.({ accepted: false, error: 'native worker task is unavailable' });

@@ -143,6 +143,7 @@ export function createMindServer(host_public = false, port = 8080) {
 
         if (protectedMode && socket.data.identity.role === 'observer') {
             socket.on('send-task-context', (_target, _data, callback) => deny(callback));
+            socket.on('diagnostic-capture', (_target, _data, callback) => deny(callback));
             for (const event of ['worker-task-start', 'worker-task-read', 'worker-task-wait', 'worker-task-cancel'])
                 socket.on(event, (...args) => deny(args.at(-1)));
             socket.on('readiness', callback => {
@@ -482,6 +483,32 @@ export function createMindServer(host_public = false, port = 8080) {
             } catch (error) {
                 callback?.({ success: false, accepted: false, error: error.message });
             }
+        });
+
+        socket.on('diagnostic-capture', (target, data, callback) => {
+            if (!allowed(socket, ['operator', 'legacy'])) return deny(callback);
+            try {
+                if (hubClosing) throw new Error('MindServer is closing');
+                if (typeof target !== 'string' || !target.trim()
+                    || typeof data?.requestId !== 'string' || !data.requestId.trim() || data.requestId.length > 200)
+                    throw new Error('One bot recipient and a unique capture request ID are required.');
+                const connection = agent_connections[target];
+                if (!connection?.in_game || !connection.socket?.connected) throw new Error('Recipient is unavailable.');
+                let settled = false;
+                const timer = setTimeout(() => {
+                    if (settled) return;
+                    settled = true;
+                    callback?.({ accepted: false, requestId: data.requestId, error: 'diagnostic capture acknowledgement timed out' });
+                }, 5000);
+                connection.socket.emit('diagnostic-capture', { requestId: data.requestId }, result => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    callback?.(result?.accepted === true && result.requestId === data.requestId
+                        ? result : { accepted: false, requestId: data.requestId,
+                            error: result?.error || 'bot did not confirm diagnostic capture' });
+                });
+            } catch (error) { callback?.({ accepted: false, error: error.message }); }
         });
 
         socket.on('bot-output', (agentName, message) => {

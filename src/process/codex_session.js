@@ -107,15 +107,35 @@ export class CodexSession {
     request(method, params) {
         return new Promise((resolve, reject) => {
             const id = ++this.seq;
-            const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`${method} timed out`)); }, REQUEST_TIMEOUT_MS);
-            this.pending.set(id, { resolve, reject, timer });
+            const callId = `${this.requestId}:rpc:${id}`;
+            const startedAt = Date.now();
+            if (method === 'turn/start') this.currentTurnCallId = callId;
+            const timer = setTimeout(() => {
+                this.pending.delete(id);
+                this.record('codex_request_timeout', { callId, requestId: this.requestId, method,
+                    elapsedMs: Date.now() - startedAt });
+                reject(new Error(`${method} timed out`));
+            }, REQUEST_TIMEOUT_MS);
+            this.pending.set(id, { resolve, reject, timer, callId, startedAt, method });
+            this.record('codex_request_started', { callId, requestId: this.requestId, method, sequence: id });
             try { this.send({ id, method, params }); }
-            catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
+            catch (error) {
+                clearTimeout(timer); this.pending.delete(id);
+                this.record('codex_request_send_error', { callId, requestId: this.requestId, method,
+                    errorName: error?.name ?? 'Error' });
+                reject(error);
+            }
         });
     }
 
     fail(error) {
+        const firstFailure = !this.failure;
         this.failure ||= error;
+        if (firstFailure && this.turn) {
+            try { this.record('codex_session_interrupted', { callId: this.currentTurnCallId ?? null,
+                requestId: this.requestId, reason: this.signal?.aborted ? 'signal_aborted' : 'session_failure',
+                errorName: error?.name ?? 'Error' }); } catch {}
+        }
         for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
         this.pending.clear();
         clearTimeout(this.modelTimer);
@@ -127,6 +147,11 @@ export class CodexSession {
             const pending = this.pending.get(message.id);
             if (pending) {
                 clearTimeout(pending.timer); this.pending.delete(message.id);
+                this.record('codex_response_received', { callId: pending.callId, requestId: this.requestId,
+                    method: pending.method, status: message.error ? 'error' : 'received',
+                    elapsedMs: Date.now() - pending.startedAt,
+                    errorCode: message.error && (typeof message.error.code === 'string' || Number.isInteger(message.error.code))
+                        ? message.error.code : undefined });
                 message.error ? pending.reject(new Error(JSON.stringify(message.error))) : pending.resolve(message.result);
             }
             return;
@@ -134,6 +159,8 @@ export class CodexSession {
         if (message.method === 'item/tool/call') {
             const p = message.params;
             if (!this.turn || p.threadId !== this.threadId) throw new Error('Tool call outside the current thread');
+            const callId = typeof p.callId === 'string' ? p.callId : typeof p.id === 'string' ? p.id : `${this.requestId}:tool:${message.id}`;
+            const toolStartedAt = Date.now();
             this.waitingTools++;
             clearTimeout(this.modelTimer);
             // Serialize parallel model calls: the host still owns one game operation at a time.
@@ -141,15 +168,21 @@ export class CodexSession {
                 if (this.signal?.aborted || this.closed || this.failure) throw new Error('Stale tool call');
                 let result;
                 if (!p.namespace && p.tool === 'minecraft_execute' && typeof p.arguments?.code === 'string') {
-                    this.record('tool_call', { code: p.arguments.code });
+                    this.record('tool_call', { callId, parentCallId: this.currentTurnCallId ?? null, code: p.arguments.code });
                     result = await this.execute(p.arguments.code);
                 } else if (p.namespace === 'minecraft_sdk' && this.readDocumentation) {
-                    this.record('documentation_read', { name: p.tool });
+                    this.record('documentation_read', { callId, parentCallId: this.currentTurnCallId ?? null, name: p.tool });
                     result = { documentation: this.readDocumentation(p.tool) };
                 } else result = { success: false, error: 'Unknown Minecraft SDK tool or invalid arguments' };
                 // Fresh operation and inbox context belong in the actual tool result, before inference resumes.
                 const response = await this.prepareResult(result);
                 this.send({ id: message.id, result: response });
+                this.record('tool_response_sent', { callId, requestId: this.requestId,
+                    success: response.success !== false, elapsedMs: Date.now() - toolStartedAt });
+            }).catch(error => {
+                this.record('tool_call_interrupted', { callId, requestId: this.requestId,
+                    errorName: error?.name ?? 'Error', elapsedMs: Date.now() - toolStartedAt });
+                throw error;
             });
             this.toolWork = work.catch(error => this.fail(error)).finally(() => {
                 this.waitingTools--;
@@ -214,7 +247,7 @@ export class CodexSession {
             await this.request('turn/start', { threadId: this.threadId, effort: this.effort, input: [{ type: 'text', text: input }] });
             await done;
             return { messages: this.messages, ...(this.goalMode ? { goal: this.goal } : {}) };
-        } finally { clearTimeout(this.modelTimer); this.turn = null; }
+        } finally { clearTimeout(this.modelTimer); this.turn = null; this.currentTurnCallId = null; }
     }
 
     close() {

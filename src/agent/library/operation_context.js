@@ -5,6 +5,7 @@ const navigationEditOwnership = new AsyncLocalStorage();
 export const NATIVE_EXECUTION_WINDOW_MS = 45_000;
 
 export function operationContext() { return ownership.getStore()?.operation ?? null; }
+export function operationCallContext() { return ownership.getStore()?.call ?? null; }
 
 export function withNativeNavigationEditScope(body) {
     const operation = operationContext();
@@ -17,13 +18,21 @@ export function nativeNavigationEditScopeActive() {
 }
 
 export function createOperationContext(action, agent, manager, taskId = null) {
+    const taskRecord = (type, detail) => {
+        const runtime = agent.codexRuntime;
+        const event = { taskId: taskId ?? agent.currentTaskId ?? null, actionId: action.id, ...detail };
+        if (runtime?.active && runtime._taskScope?.record) return runtime._taskScope.record(type, event);
+        return runtime?.diagnosticRecorder?.(type, event) ?? false;
+    };
     return {
-        actionId: action.id, taskId: taskId ?? agent.currentTaskId ?? agent.task?.data?.task_id ?? null, intentEpoch: manager.intentEpoch,
+        actionId: action.id, actionLabel: action.label ?? null,
+        taskId: taskId ?? agent.currentTaskId ?? agent.task?.data?.task_id ?? null, intentEpoch: manager.intentEpoch,
         managementGeneration: agent._managementGeneration ?? null,
         connectionGeneration: agent.bot?.getActionCancellationContext?.()?.connectionGeneration ?? null,
         dimension: agent.bot?.game?.dimension ?? null,
         signal: action.controller.signal, bot: agent.bot,
         cancellation: agent.bot?.getActionCancellationContext?.() ?? null,
+        taskRecord,
         accepting: true, closed: false, sequence: 0, waitSequence: 0,
         calls: [], facts: [], uncertain: [], diagnostics: [], pending: new Set(),
         root: { id: null, activeChild: null, closed: false, phase: 'main' },
@@ -32,7 +41,12 @@ export function createOperationContext(action, agent, manager, taskId = null) {
 
 export async function runOwnedOperation(operation, body) {
     let value, error;
-    try { value = await ownership.run({ operation, call: operation.root }, body); }
+    try {
+        operation.taskRecord?.('action_started', { taskId: operation.taskId, actionId: operation.actionId,
+            actionLabel: operation.actionLabel, intentEpoch: operation.intentEpoch,
+            connectionGeneration: operation.connectionGeneration });
+        value = await ownership.run({ operation, call: operation.root }, body);
+    }
     catch (caught) { error = caught; }
     finally {
         operation.accepting = false;
@@ -41,6 +55,10 @@ export async function runOwnedOperation(operation, body) {
         // A child can delegate further owned work while draining. Repeat until all settle.
         while (operation.pending.size) await Promise.allSettled([...operation.pending]);
         operation.closed = true;
+        try {
+            operation.taskRecord?.('action_settled', { taskId: operation.taskId, actionId: operation.actionId,
+                settlement: error ? 'error' : 'settled', error: error ? String(error) : null });
+        } catch (recordError) { error ||= recordError; }
     }
     if (error) throw error;
     return value;
@@ -57,6 +75,7 @@ export function recordConfirmation(detail) {
         connectionGeneration: operation.connectionGeneration, ...detail };
     if (operation.closed || call.closed) operation.diagnostics.push({ kind: 'late_confirmation', event });
     else operation.facts.push(event);
+    operation.taskRecord?.('server_confirmation', event);
 }
 
 export function recordUncertainty(detail) {
@@ -68,6 +87,7 @@ export function recordUncertainty(detail) {
         phase: store.phase ?? call.phase, observedAt: new Date().toISOString(), dimension: operation.dimension,
         connectionGeneration: operation.connectionGeneration, ...detail };
     (operation.closed || call.closed ? operation.diagnostics : operation.uncertain).push(event);
+    operation.taskRecord?.('unconfirmed_change', event);
 }
 
 export function recordOwnedWait(detail) {
@@ -83,6 +103,8 @@ export function recordOwnedWait(detail) {
         phase: detail.phase ?? store.phase ?? call.phase,
         ...detail,
     });
+    operation.taskRecord?.('wait_phase', { actionId: operation.actionId, taskId: operation.taskId,
+        callId: call.id, parentCallId: call.parentCallId ?? null, ...detail });
 }
 
 export function beginOwnedWait(detail) {
@@ -100,6 +122,8 @@ export function beginOwnedWait(detail) {
     };
     call.waits.push(wait);
     call.activeWait = wait;
+    operation.taskRecord?.('wait_started', { actionId: operation.actionId, taskId: operation.taskId,
+        callId: call.id, parentCallId: call.parentCallId ?? null, ...detail });
     return wait;
 }
 
@@ -108,12 +132,17 @@ export function markOwnedWaitProgress(wait) {
     if (!wait || !store || store.operation.closed || store.call.closed || wait.status !== 'waiting') return;
     wait.progressCount++;
     wait.lastProgressAt = new Date().toISOString();
+    store.operation.taskRecord?.('wait_progress', { actionId: store.operation.actionId, taskId: store.operation.taskId,
+        callId: store.call.id, waitId: wait.waitId, phase: wait.phase, progressCount: wait.progressCount });
 }
 
 export function finishOwnedWait(wait, detail) {
     const store = ownership.getStore();
     if (!wait || !store || store.operation.closed || store.call.closed) return;
     Object.assign(wait, detail, { status: detail.outcome ?? 'settled', endedAt: detail.endedAt ?? new Date().toISOString() });
+    store.operation.taskRecord?.('wait_finished', { actionId: store.operation.actionId, taskId: store.operation.taskId,
+        callId: store.call.id, waitId: wait.waitId, phase: wait.phase, status: wait.status,
+        outcome: detail.outcome ?? null, reason: detail.reason ?? null });
     if (store.call.activeWait === wait) store.call.activeWait = null;
 }
 
@@ -138,10 +167,14 @@ export function trackSkill(name, body) {
         const call = { id: `${operation.actionId}:skill:${++operation.sequence}`,
             parentCallId: parent.id, skill: name, phase: store.phase ?? parent.phase,
             startedAt: new Date().toISOString(), closed: false, accepting: true, activeChild: null };
+        operation.taskRecord?.('sdk_call_started', { taskId: operation.taskId, actionId: operation.actionId,
+            callId: call.id, parentCallId: call.parentCallId ?? null, method: name, args });
         const reject = reason => {
             const rejected = { ...call, status: 'rejected', reason, endedAt: new Date().toISOString() };
             if (operation.closed || parent.closed) operation.diagnostics.push({ kind: 'late_sdk_call', call: rejected });
             else operation.calls.push(rejected);
+            operation.taskRecord?.('sdk_call_rejected', { taskId: operation.taskId, actionId: operation.actionId,
+                callId: call.id, parentCallId: call.parentCallId ?? null, method: name, reason });
             const promise = Promise.reject(new Error(reason));
             promise.catch(() => {}); // host records rejection even if generated code ignores its promise.
             return promise;
@@ -161,11 +194,17 @@ export function trackSkill(name, body) {
                         reason: value.reason ?? null, diagnostics: value.diagnostics };
                 }
                 call.status = operation.signal.aborted ? 'cancelled' : value === false ? 'returned_false' : value === true ? 'returned_true' : 'returned';
+                operation.taskRecord?.('sdk_call_result', { taskId: operation.taskId, actionId: operation.actionId,
+                    callId: call.id, parentCallId: call.parentCallId ?? null, method: name,
+                    status: call.status, result: call.result ?? call.returnValue ?? null });
                 return value;
             } catch (error) {
                 call.status = operation.signal.aborted ? 'cancelled'
                     : name === 'generated_code' && error === operation.executionYieldError ? 'yielded' : 'error';
                 call.error = String(error);
+                operation.taskRecord?.('sdk_call_error', { taskId: operation.taskId, actionId: operation.actionId,
+                    callId: call.id, parentCallId: call.parentCallId ?? null, method: name,
+                    status: call.status, error: call.error });
                 if (error?.navigation && typeof error.navigation.code === 'string') {
                     call.result = { ok: false, status: 'error', code: error.navigation.code,
                         reason: call.error, diagnostics: error.navigation };

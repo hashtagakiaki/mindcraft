@@ -1,4 +1,5 @@
 import { resolveBlockInteraction, interactionFaceVector, currentViewDirection, interactionEye } from './block_interaction.js'
+import { operationContext, operationCallContext } from './operation_context.js'
 
 const installedBots = new WeakMap()
 function digInteraction (bot, block, ignoreLook, aim = null) {
@@ -267,6 +268,11 @@ function installDigContract (bot, state, options) {
           bot.stopDigging()
         }, Math.max(0, active.deadline - Date.now()))
       }
+      if (name === 'block_dig' && packet?.location && active && samePosition(packet.location, active.position)) {
+        active.record?.('bot_dig_packet', { packetKind: 'block_dig', status: packet.status,
+          statusName: ({ 0: 'start', 1: 'cancel', 2: 'finish' })[packet.status] ?? 'other',
+          packetAt: new Date().toISOString(), startedAt: active.startedAt })
+      }
       return originalClientWrite.call(this, name, packet, ...args)
     }
   }
@@ -274,12 +280,31 @@ function installDigContract (bot, state, options) {
   const originalDig = bot.dig
   if (typeof originalDig !== 'function') return
   bot.dig = async function (block, forceLook, digFace) {
+    const owner = operationContext()
+    const ownerCall = operationCallContext()
+    const origin = !owner ? 'unattributed' : ownerCall?.skill === 'collectBlock' ? 'collect'
+      : ownerCall?.phase === 'navigation' || ownerCall?.skill?.toLowerCase().includes('goto') ? 'navigation'
+        : ownerCall?.id ? 'explicit_skill' : 'reflex'
+    const record = (type, detail = {}) => {
+      const payload = { taskId: owner?.taskId ?? null, actionId: owner?.actionId ?? null,
+        callId: ownerCall?.id ?? null, parentCallId: ownerCall?.parentCallId ?? null,
+        origin, target: block?.position && { x: block.position.x, y: block.position.y, z: block.position.z },
+        block: block?.name ?? null, ...detail }
+      const critical = ['bot_dig_requested', 'bot_dig_admitted', 'bot_dig_server_confirmation',
+        'bot_dig_result', 'bot_dig_error', 'bot_dig_packet'].includes(type)
+      if (owner?.taskRecord) return owner.taskRecord(type, payload)
+      try { return bot._mindcraftDiagnosticRecord?.(type, payload) }
+      catch (error) { if (critical) throw error; return false }
+    }
+    record('bot_dig_requested', { forceLook: typeof forceLook === 'string' ? forceLook : forceLook === true ? true : null })
     if (!block?.position) throw new Error('dig requires a block with a position')
     if (bot.interrupt_code) throw new Error('Digging aborted by interrupt')
     if (state.activeDig) bot.stopDigging()
 
     if (!bot.entity?.onGround && !isSpecialMovement(bot)) {
+      record('bot_dig_wait_ground_started', { phase: 'ground_contact', timeoutMs: options.groundTimeoutMs })
       await waitForGround(bot, options.groundTimeoutMs, state)
+      record('bot_dig_wait_ground_finished', { phase: 'ground_contact', grounded: bot.entity?.onGround === true })
     }
     if (bot.interrupt_code) throw new Error('Digging aborted by interrupt')
     block = decorateBlock(freshTargetBlock(bot, block))
@@ -290,6 +315,13 @@ function installDigContract (bot, state, options) {
 
     const expectedDigMs = bot.digTime(block)
     if (!Number.isFinite(expectedDigMs)) throw new Error(`Cannot dig ${block.name} with the current tool`)
+    const held = bot.heldItem
+    record('bot_dig_admitted', { expectedDigMs, heldTool: held ? { name: held.name, durabilityUsed: held.durabilityUsed ?? null,
+      maxDurability: held.maxDurability ?? null } : null, health: Number.isFinite(bot.health) ? bot.health : null,
+      food: Number.isFinite(bot.food) ? bot.food : null, grounded: bot.entity?.onGround === true,
+      inWater: bot.entity?.isInWater === true, aim: interaction.aim ? { x: interaction.aim.x, y: interaction.aim.y, z: interaction.aim.z } : null,
+      face: interaction.face ?? null, groundTimeoutMs: options.groundTimeoutMs, lookTimeoutMs: options.lookTimeoutMs,
+      confirmationGraceMs: options.confirmationGraceMs })
     const operation = {
       block,
       ignoreLook,
@@ -303,7 +335,8 @@ function installDigContract (bot, state, options) {
       cancelled: false,
       waitingForLookAt: false,
       cancelLookAt: null,
-      timer: null
+      timer: null,
+      record
     }
     let rejectLookAt
     operation.lookCancelPromise = new Promise((_, reject) => { rejectLookAt = reject })
@@ -317,12 +350,18 @@ function installDigContract (bot, state, options) {
           operation.cancelled = true
           operation.cancelLookAt?.(new Error('Target block changed before dig start'))
         } else {
+          if (!operation.serverConfirmed) record('bot_dig_server_confirmation', { stage: 'global_block_update', status: 'air',
+            position: operation.position, afterStartMs: Date.now() - operation.startedAt })
           operation.serverConfirmed = true
         }
       }
     }
     const onServerUpdate = (_oldBlock, newBlock) => {
-      if (newBlock?.type === 0 && operation.startedAt != null) operation.serverConfirmed = true
+      if (newBlock?.type === 0 && operation.startedAt != null) {
+        if (!operation.serverConfirmed) record('bot_dig_server_confirmation', { stage: 'target_block_update', status: 'air',
+          position: operation.position, afterStartMs: Date.now() - operation.startedAt })
+        operation.serverConfirmed = true
+      }
     }
     bot.prependListener('blockUpdate', onGlobalServerUpdate)
     bot.on(eventName, onServerUpdate)
@@ -333,6 +372,8 @@ function installDigContract (bot, state, options) {
         bot.lookAt = function (...args) {
           args[0] = operation.interaction.aim
           operation.waitingForLookAt = true
+          record('bot_dig_wait_look_started', { phase: 'look_at', timeoutMs: options.lookTimeoutMs,
+            aim: { x: operation.interaction.aim.x, y: operation.interaction.aim.y, z: operation.interaction.aim.z } })
           const lookTimer = setTimeout(() => {
             operation.cancelled = true
             operation.cancelLookAt(new Error('Timed out turning to the block'))
@@ -349,6 +390,8 @@ function installDigContract (bot, state, options) {
             clearTimeout(lookTimer)
             operation.waitingForLookAt = false
             operation.cancelLookAt = null
+            record('bot_dig_wait_look_finished', { phase: 'look_at', timedOut: operation.cancelled,
+              target: operation.position })
           })
         }
       }
@@ -359,12 +402,22 @@ function installDigContract (bot, state, options) {
         if (typeof originalLookAt === 'function') bot.lookAt = originalLookAt
       }
       try {
-        return await digPromise
+        const result = await digPromise
+        record('bot_dig_result', { ok: true, startedAt: operation.startedAt, expectedDigMs,
+          elapsedMs: operation.startedAt == null ? null : Date.now() - operation.startedAt,
+          serverConfirmed: operation.serverConfirmed, inferredAir: operation.inferredAir })
+        return result
       } catch (error) {
         if (operation.timedOut) throw new Error(`Server did not confirm digging ${block.name} before its deadline`, { cause: error })
+        record('bot_dig_error', { startedAt: operation.startedAt, expectedDigMs, serverConfirmed: operation.serverConfirmed,
+          inferredAir: operation.inferredAir, cancelled: operation.cancelled, error: String(error) })
         throw error
       }
     } finally {
+      record(operation.cancelled ? 'bot_dig_cancelled' : 'bot_dig_finished', { startedAt: operation.startedAt,
+        expectedDigMs, serverConfirmed: operation.serverConfirmed, inferredAir: operation.inferredAir,
+        cancelled: operation.cancelled, timedOut: operation.timedOut === true,
+        elapsedMs: operation.startedAt == null ? null : Date.now() - operation.startedAt })
       clearTimeout(operation.timer)
       bot.removeListener('blockUpdate', onGlobalServerUpdate)
       bot.removeListener(eventName, onServerUpdate)

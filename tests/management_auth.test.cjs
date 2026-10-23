@@ -171,6 +171,19 @@ export async function shutdown(request) { return closeHandler?.(request) }
     })
     assert.equal(observerContextAck.success, false, 'protected observers cannot use the operator context route')
 
+    let captureRequest
+    botB.on('diagnostic-capture', (request, acknowledge) => {
+      captureRequest = request
+      acknowledge({ accepted: true, requestId: request.requestId, ringEventCount: 3 })
+    })
+    const captureAck = await ack(operator, 'diagnostic-capture', 'botB', { requestId: 'capture-1' })
+    assert.equal(captureAck.accepted, true, 'protected operator can request an incident capture')
+    assert.deepEqual(captureRequest, { requestId: 'capture-1' })
+    const observerCapture = await ack(observer, 'diagnostic-capture', 'botB', { requestId: 'observer-capture' })
+    assert.equal(observerCapture.success, false, 'protected observer cannot request an incident capture')
+    const peerCapture = await ack(botA, 'diagnostic-capture', 'botB', { requestId: 'peer-capture' })
+    assert.equal(peerCapture.success, false, 'bot identity cannot request an incident capture from another bot')
+
     let workerEnvelope
     botB.on('worker-task-start', (envelope, acknowledge) => {
       workerEnvelope = envelope

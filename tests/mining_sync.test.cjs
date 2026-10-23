@@ -32,6 +32,8 @@ function fixture({ digMs = 40, groundTimeoutMs = 40, lookTimeoutMs = 20, confirm
   bot.game = { gameMode: 'survival' }
   bot.registry = { items: [], itemsByName: {} }
   bot.inventory = { slots: [] }
+  const diagnostics = []
+  bot._mindcraftDiagnosticRecord = (type, detail) => diagnostics.push({ type, ...detail })
   bot.heldItem = null
   bot.getEquipmentDestSlot = () => 5
   currentBlock = block
@@ -62,7 +64,7 @@ function fixture({ digMs = 40, groundTimeoutMs = 40, lookTimeoutMs = 20, confirm
   const config = { groundTimeoutMs, lookTimeoutMs }
   if (confirmationGraceMs !== undefined) config.confirmationGraceMs = confirmationGraceMs
   const state = mining.installMiningSync(bot, config)
-  return { bot, block, state, setCurrentBlock: value => { currentBlock = value } }
+  return { bot, block, state, diagnostics, setCurrentBlock: value => { currentBlock = value } }
 }
 
 function serverAir(bot, block) {
@@ -80,7 +82,7 @@ async function main() {
   fixtureRuntime = await mkdtemp(path.join(os.tmpdir(), 'mc-mining-sync-'))
   await writeFile(path.join(fixtureRuntime, 'package.json'), '{"type":"module"}')
   await symlink(moduleRoot(), path.join(fixtureRuntime, 'node_modules'))
-  for (const name of ['mining_sync.js', 'block_interaction.js']) {
+  for (const name of ['mining_sync.js', 'block_interaction.js', 'operation_context.js']) {
     await writeFile(path.join(fixtureRuntime, name), await readFile(path.join(path.dirname(helper), name)))
   }
   mining = await import(require('node:url').pathToFileURL(path.join(fixtureRuntime, 'mining_sync.js')))
@@ -134,7 +136,7 @@ async function main() {
   assert.notEqual(ironBot.blockAt(nonPickaxe.position).material, 'mineable/pickaxe')
   // Local inferred air stays hidden, while an authoritative target update resolves.
   {
-    const { bot, block } = fixture({ digMs: 15 })
+    const { bot, block, diagnostics } = fixture({ digMs: 15 })
     const digging = bot.dig(block, 'ignore')
     await sleep(0)
     bot._updateBlockState(block.position, 0)
@@ -145,6 +147,10 @@ async function main() {
     assert.equal(bot.listenerCount(`blockUpdate:${block.position}`), 2)
     serverAir(bot, block)
     await digging
+    assert.ok(diagnostics.some(event => event.type === 'bot_dig_requested' && event.target?.x === 1))
+    assert.ok(diagnostics.some(event => event.type === 'bot_dig_packet' && event.statusName === 'start'))
+    assert.ok(diagnostics.some(event => event.type === 'bot_dig_server_confirmation' && event.status === 'air'))
+    assert.ok(diagnostics.some(event => event.type === 'bot_dig_result' && event.serverConfirmed === true))
     assert.equal(mining.getMiningState(bot), null)
     assert.equal(bot.listenerCount(`blockUpdate:${block.position}`), 0)
   }

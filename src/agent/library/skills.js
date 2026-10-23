@@ -3,14 +3,24 @@ import * as world from "./world.js";
 import pf from 'mineflayer-pathfinder';
 import Vec3 from 'vec3';
 import { createRequire } from 'node:module';
+import { randomUUID } from 'node:crypto';
 import settings from "../../../settings.js";
 import craftingSync from "./crafting_sync.js";
 import { placeBlockOriented } from './block_placement.js';
 import { resolveBlockInteraction, makeBlockInteractionGoal, interactionFaceVector, interactionEye } from './block_interaction.js';
-import { trackSkill, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, withSkillPhase, registerOwnedPromise, withNativeNavigationEditScope, nativeNavigationEditScopeActive } from './operation_context.js';
+import { trackSkill, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, operationCallContext, withSkillPhase, registerOwnedPromise, withNativeNavigationEditScope, nativeNavigationEditScopeActive } from './operation_context.js';
 import { awaitNavigationPlacementSettled, beginNavigationEdit, navigationPolicy, navigationScaffoldsPlaced, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, placeAndConfirmNavigationScaffold, recordNavigationArrival, registerNavigationCleanup, registerNavigationScaffoldSettledCallback, trackNavigationSegment } from './navigation_policy.js';
 
 const require = createRequire(import.meta.url);
+
+function recordNavigationDiagnostic(bot, type, detail) {
+    const operation = operationContext();
+    const call = operationCallContext();
+    const event = { taskId: operation?.taskId ?? null, actionId: operation?.actionId ?? null,
+        callId: call?.id ?? null, parentCallId: call?.parentCallId ?? null, ...detail };
+    if (operation?.taskRecord) return operation.taskRecord(type, event);
+    return bot?._mindcraftDiagnosticRecord?.(type, event) ?? false;
+}
 
 const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_place_delay;
 const useDelay = blockPlaceDelay > 0;
@@ -2377,6 +2387,13 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     const destructiveMovements = movementOverride;
 
     let final_movements = destructiveMovements;
+    const navigationRouteId = `nav:${randomUUID()}`;
+    const navigationStartedAt = new Date().toISOString();
+    recordNavigationDiagnostic(bot, 'navigation_route_started', { routeId: navigationRouteId,
+        goalType: goal?.constructor?.name ?? 'unknown', movementPolicy: {
+            callerRestricted: callerRestrictedMovement, nativeNoEdit: nativeNoEditNavigation,
+            digCost: final_movements.digCost ?? null, placeCost: final_movements.placeCost ?? null,
+        }, startedAt: navigationStartedAt });
 
     const pathfind_timeout = 1000;
     if (await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout).status === 'success') {
@@ -2416,6 +2433,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     let navigationError = false;
     let clearOwnedGoalOnFailure = false;
     let lastPathUpdate = null;
+    let lastPathRecordAt = 0;
     const seenRouteSegments = new Set();
     let activeRouteNodes = [];
     const positionKey = point => `${point.x},${point.y},${point.z}`;
@@ -2433,6 +2451,14 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             ? result.path.filter(node => [node?.x, node?.y, node?.z].every(Number.isFinite))
                 .map(node => ({ x: node.x, y: node.y, z: node.z }))
             : [];
+        const now = Date.now();
+        if (now - lastPathRecordAt >= 250) {
+            lastPathRecordAt = now;
+            recordNavigationDiagnostic(bot, 'navigation_path_update', { routeId: navigationRouteId,
+                status: lastPathUpdate.status, endpoint: lastPathUpdate.endpoint,
+                pathNodeCount: activeRouteNodes.length, routeNodes: activeRouteNodes.slice(0, 32),
+                omittedNodeCount: Math.max(0, activeRouteNodes.length - 32) });
+        }
         if (recoveryDeadline && activeRouteNodes.length > 16 && !stallError) {
             stallError = new Error('Navigation recovery exceeded its 16-node route budget.');
             stallError.name = 'NavigationRecoveryBudgetError';
@@ -2445,7 +2471,11 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             }
         }
     };
-    const onPathReset = () => { activeRouteNodes = []; };
+    const onPathReset = () => {
+        recordNavigationDiagnostic(bot, 'navigation_path_reset', { routeId: navigationRouteId,
+            reason: 'pathfinder_path_reset', previousNodeCount: activeRouteNodes.length });
+        activeRouteNodes = [];
+    };
     const routeSegmentAdvanced = () => {
         const position = bot.entity.position;
         for (const node of activeRouteNodes) {
@@ -2530,8 +2560,17 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             throw error;
         }
         recordNavigationArrival(bot);
+        recordNavigationDiagnostic(bot, 'navigation_route_arrived', { routeId: navigationRouteId,
+            elapsedMs: Date.now() - Date.parse(navigationStartedAt), visitedRouteSegments: seenRouteSegments.size,
+            finalPosition: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
+            lastPathUpdate });
         return true;
     } catch (err) {
+        recordNavigationDiagnostic(bot, stallError ? 'navigation_stall' : 'navigation_route_error', {
+            routeId: navigationRouteId, elapsedMs: Date.now() - Date.parse(navigationStartedAt),
+            cancelled: owner?.signal.aborted === true, errorName: err?.name ?? 'Error',
+            error: String(err?.message ?? err).slice(0, 2000), lastPathUpdate,
+            visitedRouteSegments: seenRouteSegments.size });
         // we need to catch so we can clean up the door check interval, then rethrow the error
         throw err;
     } finally {
@@ -2548,6 +2587,9 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             outcome: stallError ? 'stalled' : owner?.signal.aborted ? 'cancelled' : navigationError ? 'error' : 'settled',
             visitedRouteSegments: seenRouteSegments.size,
         });
+        recordNavigationDiagnostic(bot, 'navigation_route_settled', { routeId: navigationRouteId,
+            outcome: stallError ? 'stalled' : owner?.signal.aborted ? 'cancelled' : navigationError ? 'error' : 'settled',
+            visitedRouteSegments: seenRouteSegments.size, lastPathUpdate });
     }
 }
 
@@ -3412,6 +3454,11 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
     }
 
     const operation = operationContext();
+    const routeId = `reach:${randomUUID()}`;
+    const routeStartedAt = new Date().toISOString();
+    recordNavigationDiagnostic(bot, 'navigation_route_started', { routeId, routeKind: 'reachPosition',
+        goal: { x: position.x, y: position.y, z: position.z }, policy: { allowDig, allowScaffold, safeWater,
+            scaffoldBlocks }, startedAt: routeStartedAt });
     const actionContext = operation?.cancellation ?? getActionContext(bot);
     let budgetExpired = false;
     let waterExitStage = null;
@@ -3857,6 +3904,8 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                 endpoint: pathResult.path?.length ? { x: pathResult.path.at(-1).x, y: pathResult.path.at(-1).y, z: pathResult.path.at(-1).z } : null,
                 limits: { timeoutMs: waterSearchOptions?.timeout ?? REACH_POSITION_SEARCH_TIMEOUT_MS,
                     steps: waterSearchOptions?.steps ?? REACH_POSITION_SEARCH_STEPS, searchRadius: REACH_POSITION_SEARCH_RADIUS } };
+            recordNavigationDiagnostic(bot, 'navigation_route_search', { routeId, phase: diagnosticPhase,
+                search: lastSearchDiagnostics, waterExitStage: waterExitStage?.kind ?? null });
             if (!waterExitStage && initialHazard === 'shallow_water' && pathResult.status === 'success') {
                 if (waterDepartureRegion && pathResult.path.some(node => waterDepartureRegion.has(reachPositionBlockKey(new Vec3(node.x, node.y, node.z))))) {
                     status = 'blocked';
@@ -4318,6 +4367,9 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                 lastSearch: reachPositionSearchSummary(lastSearchDiagnostics), physicsTicks: observation.physicsTicks,
                 observedAt: finalObservedAt };
             log(bot, `Reached ${target} within ${tolerance} blocks; confirmed ${edits.length} route edits.`);
+            recordNavigationDiagnostic(bot, 'navigation_route_arrived', { routeId, routeKind: 'reachPosition',
+                elapsedMs: Date.now() - Date.parse(routeStartedAt), finalPosition, confirmedEditCount: edits.length,
+                cleanupRequiredCount: cleanupRequired.length, diagnostics });
             return reachPositionResult('reached', finalPosition, reason, edits, cleanupRequired, true, resultCode ?? 'arrived', diagnostics);
         }
         finalPosition = snapshotPosition();
@@ -4335,6 +4387,10 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
         support: bot.blockAt(bot.entity.position.floored().offset(0, -1, 0))?.name ?? null,
         onGround: bot.entity.onGround === true, velocity: bot.entity.velocity ? { x: bot.entity.velocity.x, y: bot.entity.velocity.y, z: bot.entity.velocity.z } : null,
         lastSearch: reachPositionSearchSummary(lastSearchDiagnostics), observedAt: finalObservedAt };
+    recordNavigationDiagnostic(bot, status === 'stalled' ? 'navigation_stall' : 'navigation_route_result', {
+        routeId, routeKind: 'reachPosition', status, code, reason: reason.slice(0, 2000),
+        elapsedMs: Date.now() - Date.parse(routeStartedAt), finalPosition, confirmedEditCount: edits.length,
+        cleanupRequiredCount: cleanupRequired.length, diagnostics });
     return reachPositionResult(status, finalPosition, reason, edits, cleanupRequired, arrivalCandidate(), code, diagnostics);
 }
 

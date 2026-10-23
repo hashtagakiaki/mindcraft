@@ -367,6 +367,8 @@ async function main() {
     assert.deepEqual(nativeDefault.testState.edits, [], 'native ordinary movement defaults to no route edits')
 
     const nativeTemporary = makeBot({ gap: [2, 3, 4], corridor: true })
+    const navigationEvents = []
+    nativeTemporary._mindcraftDiagnosticRecord = (type, event) => { navigationEvents.push({ type, ...event }); return true }
     const nativeTemporaryResult = await skills.goToPosition(nativeTemporary, {
       position: { x: 6.5, y: 64, z: 0.5 }, scaffold: 'temporary', scaffoldBlocks: ['dirt'],
     })
@@ -375,6 +377,8 @@ async function main() {
     assert.equal(nativeTemporaryResult.cleanupRequired.length, 0)
     assert.ok(nativeTemporaryResult.edits.some(edit => edit.kind === 'scaffold_placed'))
     assert.ok(nativeTemporaryResult.edits.some(edit => edit.kind === 'scaffold_removed'))
+    assert.ok(navigationEvents.some(event => event.type === 'navigation_route_started' && event.routeKind === 'reachPosition'))
+    assert.ok(navigationEvents.some(event => event.type === 'navigation_route_arrived' && event.routeId))
 
     const sdkTemporary = makeBot({ gap: [2, 3, 4], corridor: true })
     const sdk = createNativeSdk({ bot: sdkTemporary, skills })

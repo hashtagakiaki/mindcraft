@@ -150,6 +150,10 @@ export class ActionManager {
             return action.stopPromise;
         }
         action.reason = reason;
+        try {
+            action.operation?.taskRecord?.('action_stop_requested', { taskId: action.operation.taskId,
+                actionId: action.id, reason, phase: action.phase, intentEpoch: this.intentEpoch });
+        } catch (error) { action.diagnosticError = String(error); }
         action.stopRequestedPhase = action.phase;
         action.phaseStatus = `stopping:${reason}`;
         action.controller.abort(reason);
@@ -339,17 +343,18 @@ export class ActionManager {
             this.agent.clearBotLogs();
             this._finishAction(action, timeoutHandle);
             const result = {
-                success: !interrupted,
+                success: !interrupted && !action.diagnosticError,
                 message: output,
                 interrupted,
                 timedout,
                 reason: action.reason,
+                ...(action.diagnosticError ? { diagnosticSaveError: action.diagnosticError } : {}),
                 actionId: action.id,
                 phase: action.phaseStatus,
                 actionPhase: action.actionPhase || action.phase,
                 stopRequestedPhase: action.stopRequestedPhase,
                 watchdogAtPhase: action.watchdogAtPhase,
-                executionStatus: interrupted ? 'interrupted' : 'completed',
+                executionStatus: interrupted ? 'interrupted' : action.diagnosticError ? 'error' : 'completed',
                 domainReturn: typeof domainReturn === 'boolean' || typeof domainReturn === 'string' || typeof domainReturn === 'number' ? domainReturn : null,
                 ...operationResult(action.operation),
             };

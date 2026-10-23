@@ -773,6 +773,7 @@ async function main() {
     'place_agent.test.cjs',
     'action_manager.test.cjs',
     'operation_context.test.cjs',
+    'diagnostics_store.test.cjs',
     'idle_scheduling.test.cjs',
     'generation_cancellation.test.cjs',
     'furnace_lifecycle.test.cjs',

@@ -7,6 +7,7 @@ import settings from './settings.js';
 import { readTaskDiagnostics, createTaskDiagnostics, appendOperationDiagnostic, finishTaskDiagnostics } from './task_diagnostics.js';
 import { createObservationScope } from './library/observation_scope.js';
 import { operationContext, registerOwnedPromise, NATIVE_EXECUTION_WINDOW_MS } from './library/operation_context.js';
+import { DiagnosticWriter, checkDiagnosticsSpace } from './diagnostics_store.js';
 import convoManager from './conversation.js';
 import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
 
@@ -20,6 +21,7 @@ const MAX_NATIVE_DEDUPE_IDS = 256;
 const MAX_OPERATION_IMAGES = 4;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 const NATIVE_CONTEXT_PROTOCOL = 10;
+const PROCESS_RUN_ID = randomUUID();
 
 export function validateCodexRuntime(profile) {
     if (settings.agent_runtime !== 'codex-session') return null;
@@ -83,11 +85,157 @@ export class CodexRuntime {
         this.selection = validateCodexRuntime(agent.prompter.profile);
         this.makeSession = options.makeSession ?? (opts => new CodexSession(opts));
         this.traceFilePath = options.traceFilePath;
+        const configuredDiagnostics = settings.diagnostics;
+        if (configuredDiagnostics !== undefined && (configuredDiagnostics?.schema_version !== 1
+            || typeof configuredDiagnostics.root !== 'string' || !Number.isSafeInteger(configuredDiagnostics.stream_limit_bytes)
+            || configuredDiagnostics.stream_limit_bytes <= 0)) {
+            throw new Error('Invalid diagnostics settings; expected schema_version 1, absolute root, and positive stream limit');
+        }
+        this.diagnostics = options.diagnostics ?? (configuredDiagnostics ? {
+            root: configuredDiagnostics.root,
+            limitBytes: configuredDiagnostics.stream_limit_bytes,
+            incidentLimitBytes: configuredDiagnostics.incident_limit_bytes ?? 0,
+            identity: configuredDiagnostics.identity ?? {},
+            processRunId: PROCESS_RUN_ID,
+        } : null);
+        this.diagnosticsWriter = this.diagnostics ? new DiagnosticWriter({
+            root: this.diagnostics.root, pool: 'stream', limitBytes: this.diagnostics.limitBytes,
+            ownerRoot: configuredDiagnostics?.owner_root ?? this.diagnostics.root,
+            ownerLimitBytes: configuredDiagnostics?.owner_limit_bytes ?? this.diagnostics.limitBytes,
+            runLimitBytes: configuredDiagnostics?.run_limit_bytes ?? this.diagnostics.limitBytes,
+            identity: { ...this.diagnostics.identity, bot: agent.name },
+            processRunId: this.diagnostics.processRunId,
+        }) : null;
+        this.incidentWriter = this.diagnostics?.incidentLimitBytes > 0 ? new DiagnosticWriter({
+            root: this.diagnostics.root, pool: 'incident', limitBytes: this.diagnostics.incidentLimitBytes,
+            identity: { ...this.diagnostics.identity, bot: agent.name },
+            processRunId: this.diagnostics.processRunId,
+        }) : null;
+        this.maintenanceWriter = configuredDiagnostics?.maintenance_limit_bytes > 0 ? new DiagnosticWriter({
+            root: this.diagnostics.root, pool: 'maintenance', limitBytes: configuredDiagnostics.maintenance_limit_bytes,
+            identity: { ...this.diagnostics.identity, bot: agent.name },
+            processRunId: `${this.diagnostics.processRunId}:maintenance`,
+            segmentBytes: 1024 * 1024,
+        }) : null;
+        this.diagnosticRing = [];
+        this.diagnosticRingBytes = 0;
+        this.activeIncidentUntil = 0;
+        this.recentIncidentFingerprints = new Map();
+        this.diagnosticsWriteError = null;
         this.abort = new AbortController();
         this.active = false;
+        this.diagnosticRecorder = (type, detail = {}) => {
+            if (!this.diagnosticsWriter) return false;
+            const critical = ['action_started', 'action_stop_requested', 'action_settled', 'sdk_call_started',
+                'sdk_call_rejected', 'sdk_call_result', 'sdk_call_error', 'server_confirmation',
+                'unconfirmed_change', 'bot_dig_requested', 'bot_dig_admitted', 'bot_dig_server_confirmation',
+                'bot_dig_result', 'bot_dig_error', 'bot_dig_packet', 'navigation_route_started',
+                'navigation_route_settled', 'codex_request_started', 'codex_request_send_error',
+                'codex_request_timeout', 'codex_response_received', 'tool_response_sent',
+                'tool_call_interrupted', 'codex_session_interrupted'].includes(type);
+            try {
+                const event = this.diagnosticsWriter.append(type, { taskId: this.active ? this.taskId ?? null : null, ...detail }, { critical });
+                this._recordIncidentEvent(event, type);
+                return event;
+            } catch (error) {
+                this.diagnosticsWriteError ||= String(error);
+                try { this.maintenanceWriter?.append('diagnostic_write_failure', { failedPool: 'stream', eventType: type,
+                    taskId: detail.taskId ?? this.taskId ?? null, error: String(error).slice(0, 2000) }); } catch {}
+                if (critical) throw error;
+                return false;
+            }
+        };
+        if (agent.bot && typeof agent.bot === 'object') agent.bot._mindcraftDiagnosticRecord = this.diagnosticRecorder;
+        if (this.diagnosticsWriter) {
+            this.diagnosticRecorder('bot_process_started', { sourceSha: this.diagnostics.identity.sourceSha ?? null,
+                processRunId: this.diagnostics.processRunId });
+            for (const event of ['spawn', 'death', 'kicked', 'end']) {
+                const listener = (...args) => {
+                    try { this.diagnosticRecorder(`bot_lifecycle_${event}`, {
+                        detail: event === 'kicked' ? String(args[0] ?? '').slice(0, 2000) : null,
+                        connectionGeneration: agent.bot?.getActionCancellationContext?.()?.connectionGeneration ?? null,
+                    }); } catch (error) { this.diagnosticsWriteError ||= String(error); }
+                };
+                agent.bot?.on?.(event, listener);
+            }
+            process.once('exit', code => {
+                try { this.diagnosticRecorder('bot_process_ended', { exitCode: code ?? process.exitCode ?? 0 }); } catch {}
+                try { this.diagnosticsWriter?.close(); } catch {}
+                try { this.incidentWriter?.close(); } catch {}
+                try { this.maintenanceWriter?.close(); } catch {}
+            });
+        }
         this.nativeInbox = [];
         this.seenNativeMessageIds = agent._nativePeerMessageIds ||= new Map();
         this.acceptingNativeInbox = false;
+    }
+
+    _recordIncidentEvent(event, type) {
+        const now = Date.parse(event.at);
+        const encoded = JSON.stringify(event);
+        const bytes = Buffer.byteLength(encoded);
+        this.diagnosticRing.push({ event, bytes });
+        this.diagnosticRingBytes += bytes;
+        while (this.diagnosticRing.length && (this.diagnosticRingBytes > 8 * 1024 * 1024
+            || now - Date.parse(this.diagnosticRing[0].event.at) > 120_000)) {
+            this.diagnosticRingBytes -= this.diagnosticRing.shift().bytes;
+        }
+        if (!this.incidentWriter) return;
+        if (now <= this.activeIncidentUntil) {
+            try { this.incidentWriter.append('incident_event', { event }); }
+            catch (error) { this.diagnosticsWriteError ||= String(error); this.activeIncidentUntil = 0;
+                try { this.maintenanceWriter?.append('diagnostic_write_failure', { failedPool: 'incident', eventType: type,
+                    taskId: event.taskId, error: String(error).slice(0, 2000) }); } catch {} }
+        }
+        const negativeResult = ['sdk_call_result', 'bot_dig_result', 'operation_result', 'action_settled']
+            .includes(type) && (event.detail?.success === false || event.detail?.result?.success === false
+                || event.detail?.partial === true || event.detail?.unconfirmed === true);
+        const abnormalExit = type === 'bot_process_ended' && event.detail?.exitCode !== 0;
+        if (!negativeResult && !abnormalExit && !/_(?:error|rejected|timeout|stall|unconfirmed)$/.test(type)
+            && !['unconfirmed_change', 'bot_lifecycle_death', 'bot_lifecycle_kicked'].includes(type)) return;
+        const fingerprint = `${type}:${event.detail?.errorCode ?? event.detail?.reason ?? ''}`;
+        const previous = this.recentIncidentFingerprints.get(fingerprint);
+        this.recentIncidentFingerprints.set(fingerprint, { at: now, count: (previous?.count ?? 0) + 1 });
+        for (const [key, value] of this.recentIncidentFingerprints) if (now - value.at > 60_000) this.recentIncidentFingerprints.delete(key);
+        try {
+            if (previous && now - previous.at <= 60_000) {
+                this.incidentWriter.append('incident_repeated', { fingerprint, count: previous.count + 1,
+                    taskId: event.taskId, actionId: event.actionId, callId: event.callId });
+            } else {
+                this.incidentWriter.append('incident_started', { triggerType: type, triggerEventId: event.eventId,
+                    taskId: event.taskId, actionId: event.actionId, callId: event.callId,
+                    ringEventCount: this.diagnosticRing.length, ringBytes: this.diagnosticRingBytes });
+                for (const item of this.diagnosticRing) this.incidentWriter.append('incident_ring_event', { event: item.event });
+            }
+            this.activeIncidentUntil = now + 30_000;
+        } catch (error) {
+            this.diagnosticsWriteError ||= String(error);
+            this.activeIncidentUntil = 0;
+            try { this.maintenanceWriter?.append('diagnostic_write_failure', { failedPool: 'incident', eventType: type,
+                taskId: event.taskId, error: String(error).slice(0, 2000) }); } catch {}
+        }
+    }
+
+    captureIncident(requestId) {
+        if (typeof requestId !== 'string' || !requestId.trim() || requestId.length > 200)
+            throw new Error('diagnostic capture request ID is invalid');
+        if (!this.diagnosticsWriter || !this.incidentWriter) throw new Error('diagnostic incident storage is unavailable');
+        const event = this.diagnosticRecorder('diagnostic_capture_requested', { requestId });
+        const now = Date.parse(event.at);
+        try {
+            this.incidentWriter.append('incident_capture_started', { requestId, triggerEventId: event.eventId,
+                taskId: event.taskId, ringEventCount: this.diagnosticRing.length, ringBytes: this.diagnosticRingBytes });
+            for (const item of this.diagnosticRing) this.incidentWriter.append('incident_ring_event', { event: item.event });
+            this.activeIncidentUntil = now + 30_000;
+            this.diagnosticRecorder('diagnostic_capture_result', { requestId, accepted: true,
+                ringEventCount: this.diagnosticRing.length, ringBytes: this.diagnosticRingBytes });
+            return { accepted: true, requestId, ringEventCount: this.diagnosticRing.length };
+        } catch (error) {
+            this.diagnosticsWriteError ||= String(error);
+            try { this.maintenanceWriter?.append('diagnostic_write_failure', { failedPool: 'incident',
+                eventType: 'diagnostic_capture', requestId, error: String(error).slice(0, 2000) }); } catch {}
+            throw error;
+        }
     }
 
     getLastTaskDiagnostics() {
@@ -235,7 +383,7 @@ export class CodexRuntime {
         let reportedResponse;
         let reportedAt;
         const current = () => !this.abort.signal.aborted && isCurrent() && !agent.actions.userStopped;
-        mkdirSync(`./bots/${agent.name}/histories`, { recursive: true });
+        if (!this.diagnosticsWriter) mkdirSync(`./bots/${agent.name}/histories`, { recursive: true });
         const file = this.traceFilePath ?? `./bots/${agent.name}/histories/codex-${randomUUID()}.jsonl`;
         let terminalWritten = false;
         let traceWriteError = null;
@@ -243,8 +391,20 @@ export class CodexRuntime {
         const traceWriteFailures = [];
         let traceWriteFailureLogged = false;
         const record = (type, detail = {}) => {
+            const critical = ['task_accepted', 'operation_start', 'operation_result', 'stop_requested',
+                'finished', 'action_started', 'action_stop_requested', 'action_settled',
+                'sdk_call_started', 'sdk_call_rejected', 'sdk_call_result', 'sdk_call_error',
+                'server_confirmation', 'unconfirmed_change', 'bot_dig_requested', 'bot_dig_admitted',
+                'bot_dig_server_confirmation', 'bot_dig_result', 'bot_dig_error', 'bot_dig_packet',
+                'navigation_route_started', 'navigation_route_settled', 'codex_request_started',
+                'codex_request_send_error', 'codex_request_timeout', 'codex_response_received',
+                'tool_response_sent', 'tool_call_interrupted', 'codex_session_interrupted']
+                .includes(type);
             try {
-                appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), taskId, type, ...detail }) + '\n');
+                if (this.diagnosticsWriter) this.diagnosticsWriter.append(type, { taskId, ...detail }, {
+                    critical,
+                });
+                else appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), taskId, type, ...detail }) + '\n');
                 if (this.taskId === taskId && type === 'operation_result') {
                     void agent.reportWorkerTaskProgress?.({ kind: 'operation-result', operation: operationCount,
                         success: detail.result?.success !== false,
@@ -262,6 +422,7 @@ export class CodexRuntime {
                     traceWriteFailureLogged = true;
                     console.error(`Could not write Codex task trace for ${agent.name}:`, error);
                 }
+                if (this.diagnosticsWriter && critical) throw error;
                 return false;
             }
         };
@@ -357,6 +518,19 @@ export class CodexRuntime {
             const scope = { bot: agent.name, worldId: settings.place_world_id, model, effort,
                 sdk: createHash('sha256').update(JSON.stringify({ docs, vision: !!settings.allow_vision, protocol: NATIVE_CONTEXT_PROTOCOL })).digest('hex') };
             const persistent = typeof scope.worldId === 'string' && !!scope.worldId && !!agent.history.checkpointCodexThread;
+            const warningBytes = settings.diagnostics?.free_space_warning_bytes;
+            const rejectBytes = settings.diagnostics?.free_space_reject_bytes;
+            if (this.diagnostics && (warningBytes || rejectBytes)) {
+                const space = checkDiagnosticsSpace(this.diagnostics.root, { warningBytes: warningBytes ?? 0,
+                    rejectBytes: rejectBytes ?? 0 });
+                if (space.warning) {
+                    this.maintenanceWriter?.append('diagnostics_low_disk_warning', { freeBytes: space.freeBytes, warningBytes }, { critical: true });
+                }
+                if (space.rejected) {
+                    this.maintenanceWriter?.append('diagnostics_admission_rejected', { freeBytes: space.freeBytes, rejectBytes, taskId }, { critical: true });
+                    throw new Error(`Task rejected: filesystem free space ${space.freeBytes} is below ${rejectBytes} bytes`);
+                }
+            }
             record('task_accepted', { source });
             const currentCapabilities = () => {
                 const connected = serverProxy.managementReady && serverProxy.socket?.connected === true;

@@ -20,6 +20,29 @@ async function operation(body) {
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 async function main() {
+  {
+    const { createOperationContext, runOwnedOperation, trackSkill } = await import(pathToFileURL(
+      require('node:path').resolve(__dirname, '../src/agent/library/operation_context.js')))
+    const events = []
+    const agent = { currentTaskId: 'task-link', bot: { getActionCancellationContext: () => ({ connectionGeneration: 4 }) },
+      codexRuntime: { active: true, _taskScope: { record: (type, detail) => events.push({ type, ...detail }) } } }
+    const controller = new AbortController()
+    const action = { id: 17, controller }
+    const owner = createOperationContext(action, agent, { intentEpoch: 3 }, 'task-link')
+    await runOwnedOperation(owner, async () => {
+      const query = trackSkill('world.getPosition', async () => ({ x: 1, y: 64, z: 2 }))
+      const mutate = trackSkill('skills.breakBlockAt', async () => true)
+      assert.deepEqual(await query(), { x: 1, y: 64, z: 2 })
+      assert.equal(await mutate({ position: { x: 2, y: 64, z: 2 } }), true)
+    })
+    const started = events.filter(event => event.type === 'sdk_call_started')
+    const settled = events.filter(event => event.type === 'sdk_call_result')
+    assert.deepEqual(started.map(event => event.method), ['world.getPosition', 'skills.breakBlockAt'])
+    assert.ok(started.every(event => event.taskId === 'task-link' && event.actionId === 17 && event.callId))
+    assert.ok(settled.every(event => event.callId && event.actionId === 17))
+    assert.equal(settled.at(-1).status, 'returned_true')
+  }
+
   await operation(async ({ operationFactsSummary }) => {
     const summary = operationFactsSummary({ confirmedChanges: [{ quantity: 3, unit: 'item', target: { itemId: 12 },
       phase: 'collect', observedAt: '2026-10-05T00:00:00.000Z', evidence: 'fenced inventory delta' }],

@@ -2,8 +2,10 @@ import { createMindServer, registerAgent, unregisterAgent, numStateListeners, is
 import { AgentProcess } from '../process/agent_process.js';
 import { getServer } from './mcserver.js';
 import { getBotViewerPort } from '../utils/viewer_ports.js';
+import { spawn } from 'node:child_process';
 import open from 'open';
 import rootSettings from '../../settings.js';
+import { DiagnosticWriter } from '../agent/diagnostics_store.js';
 
 let mindserver;
 let connected = false;
@@ -15,6 +17,137 @@ let taskEndingHandler = null;
 let shutdownHandler = null;
 const pendingAgentStops = new Map();
 const pendingAgentCreations = new Map();
+let consoleDiagnosticWriter = null;
+let maintenanceDiagnosticWriter = null;
+let originalConsoleWrite = null;
+let diagnosticsMaintenanceTimer = null;
+let diagnosticsMaintenanceChild = null;
+let diagnosticsMaintenancePromise = null;
+const consoleLineBuffers = new Map();
+
+function noteConsoleWriteFailure(error, detail) {
+    consoleDiagnosticWriter.writeError ||= String(error);
+    try { maintenanceDiagnosticWriter?.append('diagnostic_write_failure', { failedPool: 'console', ...detail,
+        error: String(error).slice(0, 2000) }); } catch {}
+}
+
+function saveConsoleChunk(type, stream, text, identity = {}) {
+    const key = `${identity.bot ?? 'parent'}:${stream}`;
+    const previous = consoleLineBuffers.get(key) || { text: '', dropping: false };
+    previous.type = type;
+    previous.stream = stream;
+    previous.identity = identity;
+    let incoming = String(text);
+    while (incoming.length) {
+        if (previous.dropping) {
+            const newline = incoming.indexOf('\n');
+            if (newline < 0) { consoleLineBuffers.set(key, previous); return; }
+            incoming = incoming.slice(newline + 1);
+            previous.dropping = false;
+        }
+        const newline = incoming.indexOf('\n');
+        const part = newline < 0 ? incoming : incoming.slice(0, newline + 1);
+        previous.text += part;
+        incoming = newline < 0 ? '' : incoming.slice(newline + 1);
+        if (Buffer.byteLength(previous.text) > 64 * 1024) {
+            try { consoleDiagnosticWriter.append('console_line_truncated', { stream, ...identity,
+                bytesAtLimit: Buffer.byteLength(previous.text) }); }
+            catch (error) { noteConsoleWriteFailure(error, { source: identity.bot ?? 'parent', stream }); }
+            previous.text = '';
+            previous.dropping = newline < 0;
+            continue;
+        }
+        if (newline >= 0) {
+            try { consoleDiagnosticWriter.append(type, { stream, ...identity, text: previous.text }); }
+            catch (error) { noteConsoleWriteFailure(error, { source: identity.bot ?? 'parent', stream }); }
+            previous.text = '';
+        }
+    }
+    consoleLineBuffers.set(key, previous);
+}
+
+function initializeConsoleDiagnostics() {
+    const diagnostics = rootSettings.diagnostics;
+    if (!diagnostics) return;
+    if (diagnostics.schema_version !== 1 || typeof diagnostics.root !== 'string'
+        || !Number.isSafeInteger(diagnostics.console_limit_bytes) || diagnostics.console_limit_bytes <= 0) {
+        throw new Error('Invalid diagnostics settings for console storage');
+    }
+    consoleDiagnosticWriter = new DiagnosticWriter({ root: diagnostics.root, pool: 'console',
+        limitBytes: diagnostics.console_limit_bytes,
+        identity: { ...diagnostics.identity, bot: 'mindcraft-parent' } });
+    if (Number.isSafeInteger(diagnostics.maintenance_limit_bytes) && diagnostics.maintenance_limit_bytes > 0)
+        maintenanceDiagnosticWriter = new DiagnosticWriter({ root: diagnostics.root, pool: 'maintenance',
+            limitBytes: diagnostics.maintenance_limit_bytes,
+            identity: { ...diagnostics.identity, bot: 'mindcraft-parent' }, segmentBytes: 1024 * 1024 });
+    originalConsoleWrite = { stdout: process.stdout.write, stderr: process.stderr.write };
+    for (const stream of ['stdout', 'stderr']) {
+        const destination = process[stream];
+        const original = originalConsoleWrite[stream];
+        destination.write = function (chunk, encoding, callback) {
+            const result = original.call(destination, chunk, encoding, callback);
+            saveConsoleChunk('parent_console_chunk', stream, Buffer.isBuffer(chunk)
+                ? chunk.toString(typeof encoding === 'string' ? encoding : undefined) : String(chunk));
+            return result;
+        };
+    }
+    process.once('exit', () => {
+        for (const item of consoleLineBuffers.values()) if (item.text && !item.dropping) {
+            try { consoleDiagnosticWriter?.append(item.type, { stream: item.stream, ...item.identity, text: item.text }); }
+            catch { /* The process is exiting; the writer's error state remains available before this point. */ }
+        }
+        try { consoleDiagnosticWriter?.close(); } catch {}
+        try { maintenanceDiagnosticWriter?.close(); } catch {}
+    });
+}
+
+function forwardAgentConsole(stream, chunk, identity) {
+    const destination = process[stream];
+    const result = originalConsoleWrite?.[stream]
+        ? originalConsoleWrite[stream].call(destination, chunk) : destination.write(chunk);
+    if (consoleDiagnosticWriter) saveConsoleChunk('agent_console_chunk', stream,
+        Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk), identity);
+    return result;
+}
+
+function runDiagnosticsMaintenance() {
+    if (diagnosticsMaintenancePromise) return diagnosticsMaintenancePromise;
+    const cli = rootSettings.diagnostics?.maintenance_cli;
+    if (typeof cli !== 'string' || !cli.startsWith('/')) return Promise.reject(new Error('Diagnostics maintenance CLI path is invalid'));
+    const child = spawn('python3', [cli, 'diagnostics', 'prune', '--summary'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    diagnosticsMaintenanceChild = child;
+    let stdout = '';
+    let stderr = '';
+    diagnosticsMaintenancePromise = new Promise(resolve => {
+        child.stdout.on('data', chunk => { if (stdout.length < 16_384) stdout += chunk.toString('utf8').slice(0, 16_384 - stdout.length); });
+        child.stderr.on('data', chunk => { if (stderr.length < 4000) stderr += chunk.toString('utf8').slice(0, 4000 - stderr.length); });
+        child.once('error', error => { stderr = String(error); });
+        child.once('close', code => {
+            diagnosticsMaintenanceChild = null;
+            diagnosticsMaintenancePromise = null;
+            try {
+                const result = code === 0 ? JSON.parse(stdout) : null;
+                const type = result ? 'diagnostics_cleanup_completed' : 'diagnostics_cleanup_failed';
+                maintenanceDiagnosticWriter?.append(type, result ? {
+                    deletedCount: result.deletedCount ?? 0, deletedBytes: result.deletedBytes ?? 0,
+                    protectedOrUnknownBytes: result.protectedOrUnknownBytes ?? null,
+                    unresolvedOverageBytes: result.unresolvedOverageBytes ?? null,
+                } : { exitCode: code, stderr: stderr.slice(0, 2000) });
+                resolve(Boolean(result));
+            } catch (error) { consoleDiagnosticWriter.writeError ||= String(error); resolve(false); }
+        });
+    });
+    return diagnosticsMaintenancePromise;
+}
+
+function startDiagnosticsMaintenance() {
+    if (typeof rootSettings.diagnostics?.maintenance_cli !== 'string'
+        || !rootSettings.diagnostics.maintenance_cli.startsWith('/'))
+        throw new Error('Diagnostics maintenance CLI path is invalid');
+    void runDiagnosticsMaintenance();
+    diagnosticsMaintenanceTimer = setInterval(() => { void runDiagnosticsMaintenance(); }, 60_000);
+    diagnosticsMaintenanceTimer.unref();
+}
 
 export async function init(host_public=false, port=8080, auto_open_ui=true) {
     if (connected) {
@@ -22,6 +155,8 @@ export async function init(host_public=false, port=8080, auto_open_ui=true) {
         return;
     }
     mindserver = createMindServer(host_public, port);
+    initializeConsoleDiagnostics();
+    if (rootSettings.diagnostics) startDiagnosticsMaintenance();
     mindserver_port = port;
     connected = true;
     if (auto_open_ui) {
@@ -88,7 +223,8 @@ async function createReservedAgent(settings, agent_name, creationToken) {
             onTaskEnding: outcome => taskEndingHandler?.(outcome),
             managementAuthMode: rootSettings.management_auth_mode || 'legacy',
             registerBotCredential: issueBotCredential,
-            revokeBotCredential
+            revokeBotCredential,
+            onConsoleChunk: (stream, chunk, identity) => forwardAgentConsole(stream, chunk, identity)
         });
         agent_processes[settings.profile.name] = agentProcess;
         const started = await agentProcess.start(load_memory, init_message, agentIndex);
@@ -202,6 +338,10 @@ export async function stopAllAgents(reason = 'shutdown', { closing = false } = {
         error.code = 'AGENT_CLEANUP_INCOMPLETE';
         error.outcomes = outcomes;
         throw error;
+    }
+    if (closing && rootSettings.diagnostics) {
+        if (diagnosticsMaintenanceTimer) clearInterval(diagnosticsMaintenanceTimer);
+        await runDiagnosticsMaintenance();
     }
     return { groupsGone: true, outcomes };
 }

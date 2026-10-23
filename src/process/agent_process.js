@@ -82,6 +82,7 @@ export class AgentProcess {
         this.managementAuthMode = options.managementAuthMode || 'legacy';
         this.registerBotCredential = options.registerBotCredential || (() => {});
         this.revokeBotCredential = options.revokeBotCredential || (() => {});
+        this.onConsoleChunk = options.onConsoleChunk || ((stream, chunk) => process[stream].write(chunk));
         this.authCredentials = new Map();
         this.desiredState = 'stopped';
         this.outcome = null;
@@ -162,7 +163,7 @@ export class AgentProcess {
         try {
             child = this.spawnProcess(process.execPath, args, {
                 detached: true,
-                stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
+                stdio: ['inherit', 'pipe', 'pipe', 'ipc'],
             });
         } catch (error) {
             this.desiredState = 'stopped';
@@ -178,6 +179,23 @@ export class AgentProcess {
             this.ownedGroups.set(`bot:${generation}`, group);
         }
         this.process = child;
+        for (const stream of ['stdout', 'stderr']) {
+            const output = child[stream];
+            output?.on('data', chunk => {
+                try {
+                    const writable = this.onConsoleChunk(stream, chunk, { bot: this.name, pid: child.pid, generation });
+                    if (writable === false) {
+                        output.pause();
+                        process[stream].once('drain', () => output.resume());
+                    }
+                } catch (error) {
+                    // Console recording errors are retained as supervisor state; never let a pipe
+                    // fill and block the owned agent process.
+                    this.consoleWriteError ||= String(error);
+                    process[stream].write(chunk);
+                }
+            });
+        }
         this.runningSince = Date.now();
         this.exitPromise = new Promise(resolve => {
             child.once('close', (code, signal) => resolve({ code, signal }));

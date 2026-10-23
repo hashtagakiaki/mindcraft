@@ -1227,6 +1227,27 @@ Agent.prototype.start = async function() {
     assert.match(storedDiagnostic.lastFailure.output, /partial before error/)
     assert.equal(storedDiagnostic.lastFailure.observed.health, 19, 'state after partial raw mutation survives the error')
     assert.ok(Number.isFinite(Date.parse(storedDiagnostic.lastFailure.observedAt)))
+    const incidentRoot = path.join(root, 'diagnostic-incidents')
+    const incidentAgent = makeAgent('IncidentRing')
+    const incidentRuntime = new CodexRuntime(incidentAgent, { diagnostics: {
+      root: incidentRoot, limitBytes: 32 * 1024 * 1024, incidentLimitBytes: 32 * 1024 * 1024,
+      identity: { sourceSha: 'fixture-source', versionId: 'fixture-version', bundleId: 'fixture-bundle' },
+      processRunId: 'fixture-process-run',
+    } })
+    incidentRuntime.diagnosticRecorder('operation_start', { taskId: 'incident-task', actionId: 'action-1', code: 'await bot.dig(block)' })
+    incidentRuntime.diagnosticRecorder('sdk_call_error', { taskId: 'incident-task', actionId: 'action-1', callId: 'call-1', error: 'fixture failure' })
+    const captureResult = incidentRuntime.captureIncident('capture-1')
+    assert.equal(captureResult.accepted, true)
+    const incidentSegment = (await fs.readdir(path.join(incidentRoot, 'incident/segments'))).find(name => name.endsWith('.jsonl'))
+    const incidentEvents = (await fs.readFile(path.join(incidentRoot, 'incident/segments', incidentSegment), 'utf8'))
+      .trim().split('\n').map(line => JSON.parse(line))
+    assert.equal(incidentEvents[0].type, 'incident_started')
+    assert.ok(incidentEvents.some(event => event.type === 'incident_ring_event' && event.detail.event.type === 'operation_start'))
+    assert.ok(incidentEvents.some(event => event.type === 'incident_capture_started' && event.detail.requestId === 'capture-1'))
+    assert.ok(new Set(incidentEvents.map(event => event.eventId)).size === incidentEvents.length,
+      'stream and incident events have unique common event IDs')
+    incidentRuntime.diagnosticsWriter.close()
+    incidentRuntime.incidentWriter.close()
     // Loading the copied memory simulates the existing bundle handoff format.
     diagnosticAgent.history = new History(diagnosticAgent)
     diagnosticAgent.history.load()
