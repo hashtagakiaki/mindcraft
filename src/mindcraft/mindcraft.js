@@ -148,6 +148,7 @@ function runDiagnosticsMaintenance() {
 }
 
 function startDiagnosticsMaintenance() {
+    if (rootSettings.diagnostics?.maintenance_cli === null) return;
     if (typeof rootSettings.diagnostics?.maintenance_cli !== 'string'
         || !rootSettings.diagnostics.maintenance_cli.startsWith('/'))
         throw new Error('Diagnostics maintenance CLI path is invalid');
