@@ -32,6 +32,7 @@ async function main() {
     let maximum = 0
     let cleanKills = 0
     const cleanKillMessages = []
+    const diagnosticEvents = []
     let selfPrompterStops = 0
     const interruptGate = deferred()
     const agent = {
@@ -41,6 +42,7 @@ async function main() {
       clearBotLogs() { this.bot.output = ''; this.bot.interrupt_code = false },
       requestInterrupt() { this.bot.interrupt_code = true; interruptGate.resolve() },
       history: { add() {} },
+      codexRuntime: { active: false, diagnosticRecorder(type, detail) { diagnosticEvents.push({ type, detail }); } },
       cleanKill(message) { cleanKills++; cleanKillMessages.push(message) }
     }
     const manager = new ActionManager(agent)
@@ -62,7 +64,8 @@ async function main() {
     const second = manager.runAction('second', async () => {
       active++; maximum = Math.max(maximum, active); active--
       writes.push('new-body')
-    }, { timeout: 0 })
+    }, { timeout: 0, interruptionContext: { decisionId: 'decision-fixture', sourceMode: 'self_defense',
+      reason: 'nearby_threat', evidence: { target: { name: 'zombie', id: 7 }, health: 8 } } })
     await until(() => firstContext.signal.aborted)
     assert.equal(firstContext.signal.reason, 'superseded')
     assert.equal(manager.setPhase('late-write', firstContext.actionId), true, 'phase stays scoped to the old action while it owns the body')
@@ -74,6 +77,12 @@ async function main() {
     assert.equal(firstResult.interrupted, true)
     assert.equal(secondResult.success, true)
     assert.deepEqual(writes, ['old-body-finished', 'new-body'])
+    const stopEvent = diagnosticEvents.find(event => event.type === 'action_stop_requested')
+    const startEvent = diagnosticEvents.find(event => event.type === 'action_started' && event.detail.actionLabel === 'second')
+    assert.equal(stopEvent.detail.interruptionContext.decisionId, 'decision-fixture')
+    assert.equal(stopEvent.detail.interruptionContext.evidence.target.name, 'zombie')
+    assert.equal(startEvent.detail.interruptionDecisionId, 'decision-fixture')
+    assert.equal(startEvent.detail.interruptionContext.sourceMode, 'self_defense')
     assert.equal(manager.setPhase('stale', firstContext.actionId), false, 'finished action context cannot mutate a successor')
 
     // User stop is coalesced, aborts the exposed action signal and stays latched

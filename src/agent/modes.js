@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import * as skills from './library/skills.js';
 import * as world from './library/world.js';
 import * as mc from '../utils/mcdata.js';
@@ -17,6 +18,36 @@ async function say(agent, message) {
     agent.bot.modes.behavior_log += message + '\n';
     if (agent.shut_up || !settings.narrate_behavior) return;
     agent.openChat(message);
+}
+
+function modeObservation(bot) {
+    const position = bot?.entity?.position;
+    return {
+        position: position && [position.x, position.y, position.z].every(Number.isFinite)
+            ? { x: position.x, y: position.y, z: position.z } : null,
+        health: Number.isFinite(bot?.health) ? bot.health : null,
+        food: Number.isFinite(bot?.food) ? bot.food : null,
+        isInWater: bot?.entity?.isInWater === true,
+        lastDamageAgeMs: Number.isFinite(bot?.lastDamageTime) ? Math.max(0, Date.now() - bot.lastDamageTime) : null,
+        lastDamageTaken: Number.isFinite(bot?.lastDamageTaken) ? bot.lastDamageTaken : null,
+    };
+}
+
+function entityEvidence(bot, entity) {
+    if (!entity) return null;
+    const position = entity.position;
+    const botPosition = bot?.entity?.position;
+    const validPosition = position && [position.x, position.y, position.z].every(Number.isFinite);
+    const name = entity.type === 'player' ? 'player' : typeof entity.name === 'string' ? entity.name.slice(0, 80) : null;
+    return { id: Number.isSafeInteger(entity.id) ? entity.id : null, name,
+        type: typeof entity.type === 'string' ? entity.type.slice(0, 40) : null,
+        position: validPosition ? { x: position.x, y: position.y, z: position.z } : null,
+        distance: validPosition && botPosition ? botPosition.distanceTo(position) : null };
+}
+
+function modeDecision(mode, bot, reason, { target, ...evidence } = {}) {
+    return { sourceMode: mode.name, reason, observed: modeObservation(bot),
+        ...(target ? { target: entityEvidence(bot, target) } : {}), ...evidence };
 }
 
 // a mode is a function that is called every tick to respond immediately to the world
@@ -53,7 +84,7 @@ const modes_list = [
             else if (this.fall_blocks.some(name => blockAbove.name.includes(name))) {
                 execute(this, agent, async () => {
                     await skills.moveAway(bot, 2);
-                });
+                }, -1, modeDecision(this, bot, 'falling_block_overhead', { block: blockAbove.name }));
             }
             else if (block.name === 'lava' || block.name === 'fire' ||
                 blockAbove.name === 'lava' || blockAbove.name === 'fire') {
@@ -64,7 +95,7 @@ const modes_list = [
                     execute(this, agent, async () => {
                         let success = await skills.placeBlock(bot, 'water_bucket', block.position.x, block.position.y, block.position.z);
                         if (success) say(agent, 'Placed some water, ahhhh that\'s better!');
-                    });
+                    }, -1, modeDecision(this, bot, 'fire_or_lava_with_bucket', { block: block.name, blockAbove: blockAbove.name }));
                 }
                 else {
                     execute(this, agent, async () => {
@@ -82,14 +113,15 @@ const modes_list = [
                             return;
                         }
                         await skills.moveAway(bot, 5);
-                    });
+                    }, -1, modeDecision(this, bot, 'fire_or_lava_seek_water', { block: block.name, blockAbove: blockAbove.name }));
                 }
             }
             else if (Date.now() - bot.lastDamageTime < 3000 && (bot.health < 5 || bot.lastDamageTaken >= bot.health)) {
                 say(agent, 'I\'m dying!');
                 execute(this, agent, async () => {
                     await skills.moveAway(bot, 20);
-                });
+                }, -1, modeDecision(this, bot, 'recent_damage_critical_health', { damageAgeMs: modeObservation(bot).lastDamageAgeMs,
+                    damageTaken: bot.lastDamageTaken }));
             }
             else if (agent.isIdle()) {
                 bot.clearControlStates(); // clear jump if not in danger or doing anything else
@@ -131,7 +163,10 @@ const modes_list = [
                         throw error;
                     }
                     failedRetreats.delete(bot);
-                });
+                }, -1, modeDecision(this, bot, 'dangerous_encounter', { target: enemy, enemyCount: enemies.length,
+                    enemies: enemies.slice(0, 8).map(item => entityEvidence(bot, item)), groundMelee,
+                    maxEnemies, selfDefenseEnabled: modes_map.self_defense.on,
+                    selfDefensePaused: modes_map.self_defense.paused === true }));
             }
         }
     },
@@ -150,7 +185,7 @@ const modes_list = [
                 say(agent, `Fighting ${enemy.name}!`);
                 execute(this, agent, async () => {
                     await skills.defendSelf(agent.bot, 8);
-                });
+                }, -1, modeDecision(this, bot, 'nearby_threat', { target: enemy, enemyCount: enemies.length }));
             }
         }
     },
@@ -166,7 +201,7 @@ const modes_list = [
                 execute(this, agent, async () => {
                     say(agent, `Hunting ${huntable.name}!`);
                     await skills.attackEntity(agent.bot, huntable);
-                });
+                }, -1, modeDecision(this, agent.bot, 'nearby_huntable_entity', { target: huntable }));
             }
         }
     },
@@ -192,7 +227,8 @@ const modes_list = [
                     this.prev_item = item;
                     execute(this, agent, async () => {
                         await skills.pickupNearbyItems(agent.bot);
-                    });
+                    }, -1, modeDecision(this, agent.bot, 'nearby_item_after_notice_delay', { target: item,
+                        emptyInventorySlots: empty_inv_slots, noticeDelayMs: Date.now() - this.noticed_at }));
                     this.noticed_at = -1;
                 }
             }
@@ -215,7 +251,7 @@ const modes_list = [
                 execute(this, agent, async () => {
                     const pos = agent.bot.entity.position;
                     await skills.placeBlock(agent.bot, 'torch', pos.x, pos.y, pos.z, 'bottom', true);
-                });
+                }, -1, modeDecision(this, agent.bot, 'torch_placement_condition', {}));
                 this.last_place = Date.now();
             }
         }
@@ -237,7 +273,8 @@ const modes_list = [
                     if (player.position.distanceTo(agent.bot.entity.position) < this.distance) {
                         await skills.moveAwayFromEntity(agent.bot, player, this.distance);
                     }
-                });
+                }, -1, modeDecision(this, agent.bot, 'nearby_player_elbow_room', { target: player,
+                    threshold: this.distance }));
             }
         }
     },
@@ -288,10 +325,16 @@ const modes_list = [
     }
 ];
 
-async function execute(mode, agent, func, timeout=-1) {
+async function execute(mode, agent, func, timeout=-1, decision = {}) {
     if (agent.self_prompter.isActive())
         agent.self_prompter.stopLoop();
     let interrupted_action = agent.actions.currentActionLabel;
+    const activeAction = agent.actions.currentAction;
+    const interruptionContext = { decisionId: randomUUID(), sourceMode: mode.name,
+        reason: decision.reason ?? 'mode_trigger', replacementActionLabel: `mode:${mode.name}`,
+        ...(activeAction ? { interruptedActionId: activeAction.id, interruptedActionLabel: activeAction.label } : {}),
+        evidence: decision };
+    try { agent.bot?._mindcraftDiagnosticRecord?.('mode_action_triggered', interruptionContext); } catch {}
     let code_return = null;
     mode.active = true;
     try {
@@ -299,7 +342,7 @@ async function execute(mode, agent, func, timeout=-1) {
             const context = agent.actions.getCancellationContext();
             if (context) agent.actions.setPhase(`recovering:${mode.name}`, context.actionId);
             await func();
-        }, { timeout });
+        }, { timeout, interruptionContext });
         console.log(`Mode ${mode.name} finished executing, code_return: ${code_return.message}`);
     } finally {
         mode.active = false;

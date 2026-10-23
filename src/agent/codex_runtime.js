@@ -133,6 +133,8 @@ export class CodexRuntime {
         this.diagnosticsWriteError = null;
         this.abort = new AbortController();
         this.active = false;
+        this.observationSequence = 0;
+        this.diagnosticTimers = [];
         this.diagnosticRecorder = (type, detail = {}) => {
             if (!this.diagnosticsWriter) return false;
             const critical = ['action_started', 'action_stop_requested', 'action_settled', 'sdk_call_started',
@@ -141,7 +143,7 @@ export class CodexRuntime {
                 'bot_dig_result', 'bot_dig_error', 'bot_dig_packet', 'navigation_route_started',
                 'navigation_route_settled', 'codex_request_started', 'codex_request_send_error',
                 'codex_request_timeout', 'codex_response_received', 'tool_response_sent',
-                'tool_call_interrupted', 'codex_session_interrupted'].includes(type);
+                'tool_call_interrupted', 'codex_session_interrupted', 'mode_action_triggered'].includes(type);
             try {
                 const event = this.diagnosticsWriter.append(type, { taskId: this.active ? this.taskId ?? null : null, ...detail }, { critical });
                 this._recordIncidentEvent(event, type);
@@ -168,15 +170,120 @@ export class CodexRuntime {
                 agent.bot?.on?.(event, listener);
             }
             process.once('exit', code => {
+                this.stopDiagnosticSampling();
                 try { this.diagnosticRecorder('bot_process_ended', { exitCode: code ?? process.exitCode ?? 0 }); } catch {}
                 try { this.diagnosticsWriter?.close(); } catch {}
                 try { this.incidentWriter?.close(); } catch {}
                 try { this.maintenanceWriter?.close(); } catch {}
             });
+            this.startDiagnosticSampling();
         }
         this.nativeInbox = [];
         this.seenNativeMessageIds = agent._nativePeerMessageIds ||= new Map();
         this.acceptingNativeInbox = false;
+    }
+
+    startDiagnosticSampling() {
+        if (this.diagnosticTimers.length) return;
+        const detail = setInterval(() => this._recordDetailedObservation(), 500);
+        const snapshot = setInterval(() => this._recordPersistentObservation(), 5000);
+        const wait = setInterval(() => this._recordWaitCheckpoint(), 10_000);
+        for (const timer of [detail, snapshot, wait]) timer.unref?.();
+        this.diagnosticTimers = [detail, snapshot, wait];
+    }
+
+    stopDiagnosticSampling() {
+        for (const timer of this.diagnosticTimers) clearInterval(timer);
+        this.diagnosticTimers = [];
+    }
+
+    _observation() {
+        const bot = this.agent.bot;
+        const entity = bot?.entity;
+        const position = entity?.position;
+        const validPos = position && [position.x, position.y, position.z].every(Number.isFinite);
+        const entities = [];
+        if (validPos && typeof bot.entities === 'object') {
+            for (const candidate of Object.values(bot.entities)) {
+                if (!candidate?.position || ![candidate.position.x, candidate.position.y, candidate.position.z].every(Number.isFinite)) continue;
+                const dx = position.x - candidate.position.x, dy = position.y - candidate.position.y, dz = position.z - candidate.position.z;
+                const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                if (distance > 8 || entities.length >= 16) continue;
+                entities.push({ id: Number.isSafeInteger(candidate.id) ? candidate.id : null,
+                    type: typeof candidate.type === 'string' ? candidate.type.slice(0, 40) : null,
+                    name: candidate.type === 'player' ? 'player' : typeof candidate.name === 'string' ? candidate.name.slice(0, 60) : null,
+                    distance: Number.isFinite(distance) ? Math.round(distance * 100) / 100 : null,
+                    position: { x: candidate.position.x, y: candidate.position.y, z: candidate.position.z } });
+            }
+        }
+        const inventory = [];
+        try {
+            for (const item of bot?.inventory?.items?.() ?? []) {
+                if (!item || inventory.length >= 64) break;
+                inventory.push({ name: typeof item.name === 'string' ? item.name.slice(0, 80) : null,
+                    count: Number.isFinite(item.count) ? item.count : null });
+            }
+        } catch {}
+        const blocks = [];
+        if (validPos && typeof bot.blockAt === 'function') {
+            const center = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) };
+            for (let dy = -1; dy <= 0; dy++) for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+                try {
+                    const point = typeof position.offset === 'function'
+                        ? position.offset(dx + (center.x - position.x), dy + (center.y - position.y), dz + (center.z - position.z))
+                        : { x: center.x + dx, y: center.y + dy, z: center.z + dz };
+                    const block = bot.blockAt(point);
+                    blocks.push({ x: dx, y: dy, z: dz, name: typeof block?.name === 'string' ? block.name.slice(0, 60) : null });
+                } catch { blocks.push({ x: dx, y: dy, z: dz, name: null }); }
+            }
+        }
+        const wait = this.agent.actions?.getCurrentWaitSnapshot?.() ?? null;
+        return { observedAt: new Date().toISOString(), taskId: this.active ? this.taskId ?? null : null,
+            actionId: wait?.actionId ?? this.agent.actions?.currentAction?.id ?? null,
+            phase: wait?.actionPhase ?? this.agent.actions?.currentAction?.phase ?? null,
+            wait, position: validPos ? { x: position.x, y: position.y, z: position.z } : null,
+            velocity: entity?.velocity && [entity.velocity.x, entity.velocity.y, entity.velocity.z].every(Number.isFinite)
+                ? { x: entity.velocity.x, y: entity.velocity.y, z: entity.velocity.z } : null,
+            yaw: Number.isFinite(entity?.yaw) ? entity.yaw : null, pitch: Number.isFinite(entity?.pitch) ? entity.pitch : null,
+            onGround: typeof entity?.onGround === 'boolean' ? entity.onGround : null,
+            isInWater: entity?.isInWater === true, health: Number.isFinite(bot?.health) ? bot.health : null,
+            food: Number.isFinite(bot?.food) ? bot.food : null, dimension: typeof bot?.game?.dimension === 'string' ? bot.game.dimension.slice(0, 40) : null,
+            timeOfDay: Number.isFinite(bot?.time?.timeOfDay) ? bot.time.timeOfDay : null,
+            entities, inventory, blocks };
+    }
+
+    _recordDetailedObservation() {
+        try {
+            const snapshot = this._observation();
+            const event = { schemaVersion: 1, eventId: `${this.diagnostics.processRunId}:ring:${++this.observationSequence}`,
+                processRunId: this.diagnostics.processRunId, bot: this.agent.name,
+                sourceSha: this.diagnostics.identity.sourceSha ?? null, versionId: this.diagnostics.identity.versionId ?? null,
+                activationEpoch: this.diagnostics.identity.activationEpoch ?? null,
+                bundleId: this.diagnostics.identity.bundleId ?? null, worldId: this.diagnostics.identity.worldId ?? null,
+                taskId: snapshot.taskId, actionId: snapshot.actionId, callId: null, at: snapshot.observedAt,
+                monotonicMs: Math.round(process.uptime() * 1000),
+                sequence: this.observationSequence, type: 'bot_observation_detail', detail: snapshot };
+            this._recordIncidentEvent(event, event.type);
+        } catch (error) {
+            this.diagnosticsWriteError ||= String(error);
+            try { this.maintenanceWriter?.append('diagnostic_observation_failure', { error: String(error).slice(0, 1000) }); } catch {}
+        }
+    }
+
+    _recordPersistentObservation() {
+        try { this.diagnosticRecorder('bot_observation_snapshot', this._observation()); }
+        catch (error) { this.diagnosticsWriteError ||= String(error); }
+    }
+
+    _recordWaitCheckpoint() {
+        const wait = this.agent.actions?.getCurrentWaitSnapshot?.();
+        if (!wait) return;
+        try { this.diagnosticRecorder('wait_periodic_checkpoint', { taskId: this.active ? this.taskId ?? null : null,
+            actionId: wait.actionId, waitId: wait.waitId, phase: wait.phase, status: wait.status,
+            progressCount: wait.progressCount, lastProgressAt: wait.lastProgressAt,
+            condition: wait.condition, reason: wait.reason, expected: wait.expected,
+            position: this._observation().position, health: Number.isFinite(this.agent.bot?.health) ? this.agent.bot.health : null }); }
+        catch (error) { this.diagnosticsWriteError ||= String(error); }
     }
 
     _recordIncidentEvent(event, type) {
@@ -200,7 +307,7 @@ export class CodexRuntime {
             .includes(type) && (event.detail?.success === false || event.detail?.result?.success === false
                 || event.detail?.partial === true || event.detail?.unconfirmed === true);
         const abnormalExit = type === 'bot_process_ended' && event.detail?.exitCode !== 0;
-        if (!negativeResult && !abnormalExit && !/_(?:error|rejected|timeout|stall|unconfirmed)$/.test(type)
+        if (!negativeResult && !abnormalExit && type !== 'mode_action_triggered' && !/_(?:error|rejected|timeout|stall|unconfirmed)$/.test(type)
             && !['unconfirmed_change', 'bot_lifecycle_death', 'bot_lifecycle_kicked'].includes(type)) return;
         const fingerprint = `${type}:${event.detail?.errorCode ?? event.detail?.reason ?? ''}`;
         const previous = this.recentIncidentFingerprints.get(fingerprint);

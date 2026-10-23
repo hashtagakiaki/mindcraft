@@ -27,6 +27,7 @@ export function createOperationContext(action, agent, manager, taskId = null) {
     return {
         actionId: action.id, actionLabel: action.label ?? null,
         taskId: taskId ?? agent.currentTaskId ?? agent.task?.data?.task_id ?? null, intentEpoch: manager.intentEpoch,
+        interruptionContext: action.interruptionContext ?? null,
         managementGeneration: agent._managementGeneration ?? null,
         connectionGeneration: agent.bot?.getActionCancellationContext?.()?.connectionGeneration ?? null,
         dimension: agent.bot?.game?.dimension ?? null,
@@ -44,7 +45,10 @@ export async function runOwnedOperation(operation, body) {
     try {
         operation.taskRecord?.('action_started', { taskId: operation.taskId, actionId: operation.actionId,
             actionLabel: operation.actionLabel, intentEpoch: operation.intentEpoch,
-            connectionGeneration: operation.connectionGeneration });
+            connectionGeneration: operation.connectionGeneration,
+            ...(operation.interruptionContext?.decisionId
+                ? { interruptionDecisionId: operation.interruptionContext.decisionId,
+                    interruptionContext: operation.interruptionContext } : {}) });
         value = await ownership.run({ operation, call: operation.root }, body);
     }
     catch (caught) { error = caught; }

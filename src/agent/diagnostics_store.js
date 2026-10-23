@@ -186,15 +186,25 @@ function candidatePriority(entry, retentionDays, now) {
         try {
             const state = JSON.parse(readFileSync(stateFile, 'utf8'));
             if (state.schemaVersion === 1 && state.owner === 'mindcraft-tools') {
+                if (!Object.hasOwn(state, 'currentVersionId') || !Object.hasOwn(state, 'previousVersionId'))
+                    throw new Error(`missing diagnostics version identifiers: ${stateFile}`);
+                if ((state.currentVersionId !== null && typeof state.currentVersionId !== 'string')
+                    || (state.previousVersionId !== null && typeof state.previousVersionId !== 'string'))
+                    throw new Error(`invalid diagnostics version identifiers: ${stateFile}`);
                 const version = entry.meta.versionId;
+                if (version !== null && typeof version !== 'string')
+                    throw new Error(`invalid diagnostics segment version identifier: ${entry.file}`);
                 const current = version && version === state.currentVersionId;
                 const previous = version && version === state.previousVersionId;
                 const ended = Date.parse(entry.meta.endedAt ?? '');
-                return { rank: current ? 2 : previous ? 1 : version ? 0 : 3, ended: Number.isFinite(ended) ? ended : Infinity,
-                    root, versioned: true };
+                return { rank: current ? 2 : previous ? 1 : version ? 0 : 3,
+                    ended: Number.isFinite(ended) ? ended : Infinity, root, versioned: true,
+                    eligible: Boolean(version && state.currentVersionId) };
             }
-            return { rank: 4, ended: Infinity, root, versioned: true };
-        } catch { return { rank: 4, ended: Infinity, root, versioned: true }; }
+            throw new Error(`unsupported diagnostics version state: ${stateFile}`);
+        } catch (error) {
+            throw new Error(`cannot safely evaluate diagnostics version state: ${stateFile}`, { cause: error });
+        }
     }
     const ended = Date.parse(entry.meta.endedAt ?? '');
     const expiry = Number.isFinite(ended) && retentionDays > 0 && ended <= now - retentionDays * 86_400_000;
@@ -347,6 +357,10 @@ export class DiagnosticWriter {
             const state = JSON.parse(readFileSync(stateFile, 'utf8'));
             if (state.schemaVersion !== 1 || state.owner !== 'mindcraft-tools')
                 throw new Error(`unsupported diagnostics version state: ${stateFile}`);
+            if (!Object.hasOwn(state, 'currentVersionId') || !Object.hasOwn(state, 'previousVersionId')
+                || (state.currentVersionId !== null && typeof state.currentVersionId !== 'string')
+                || (state.previousVersionId !== null && typeof state.previousVersionId !== 'string'))
+                throw new Error(`invalid diagnostics version identifiers: ${stateFile}`);
             if (this.identity.versionId && state.currentVersionId === this.identity.versionId) {
                 versionRole = 'current'; activationEpoch = state.activationEpoch;
             } else if (this.identity.versionId && state.previousVersionId === this.identity.versionId) {
@@ -382,9 +396,11 @@ export class DiagnosticWriter {
             const releasedReservation = rotate && this.current
                 ? Math.max(0, this.current.meta.reservedBytes - this.current.meta.bytes - currentManifestBytes) : 0;
             const ownerFiles = ownerSegmentFiles(this.ownerRoot, this.pool);
-            const eligible = ownerFiles.filter(item => validClosedSegment(item, this.pool))
-                .map(item => ({ ...item, ...candidatePriority(item, this.retentionDays, now) }))
+            const ranked = ownerFiles.filter(item => validClosedSegment(item, this.pool))
+                .map(item => ({ ...item, ...candidatePriority(item, this.retentionDays, now) }));
+            const eligible = ranked.filter(item => item.eligible !== false)
                 .sort((a, b) => a.rank - b.rank || a.ended - b.ended);
+            const unknownVersionSegments = ranked.filter(item => item.eligible === false);
             const deletedSegments = [];
             const projected = () => {
                 const all = ownerSegmentFiles(this.ownerRoot, this.pool);
@@ -421,8 +437,12 @@ export class DiagnosticWriter {
                     }, {}) };
                 writeManifest(manifestPath, manifest);
             }
-            if (usage.owner > this.ownerLimitBytes || usage.run > this.runLimitBytes || usage.run > this.limitBytes)
-                throw new DiagnosticQuotaError(`diagnostics pool ${this.pool} owner/run quota is full`, this.pool);
+            if (usage.owner > this.ownerLimitBytes || usage.run > this.runLimitBytes || usage.run > this.limitBytes) {
+                const detail = unknownVersionSegments.length
+                    ? `; ${unknownVersionSegments.length} closed segment(s) have unknown manual versions and were protected`
+                    : '';
+                throw new DiagnosticQuotaError(`diagnostics pool ${this.pool} owner/run quota is full${detail}`, this.pool);
+            }
             if (rotate) {
                 this._closeSegment(now);
                 this._newSegment(now);

@@ -98,6 +98,33 @@ async function main() {
       { older_version: 1, previous_capacity: 1 })
     bounded.close()
 
+    const unknownRoot = path.join(root, 'unknown-version-quota')
+    mkdirSync(unknownRoot, { recursive: true })
+    writeFileSync(path.join(unknownRoot, 'manifest.json'), JSON.stringify({ schemaVersion: 1, owner: 'mindcraft' }))
+    writeFileSync(path.join(unknownRoot, 'version-state.json'), JSON.stringify({ schemaVersion: 1,
+      owner: 'mindcraft-tools', currentVersionId: 'current', previousVersionId: 'previous' }))
+    const unknownVersion = closedSegment(unknownRoot, 'unknown-version', null, 1000)
+    const protectedWriter = new DiagnosticWriter({ root: unknownRoot, pool: 'stream', limitBytes: 4200,
+      ownerRoot: unknownRoot, ownerLimitBytes: 4200, runLimitBytes: 4200, segmentBytes: 128,
+      identity: { versionId: 'current' }, clock: () => now })
+    assert.throws(() => protectedWriter.append('quota_pressure'), error => error instanceof DiagnosticQuotaError
+      && /unknown manual versions.*protected/.test(error.message))
+    assert.equal(existsSync(unknownVersion), true, 'unknown manual version is never unlinked for quota space')
+    protectedWriter.close()
+
+    const corruptRoot = path.join(root, 'corrupt-version-state')
+    mkdirSync(corruptRoot, { recursive: true })
+    writeFileSync(path.join(corruptRoot, 'manifest.json'), JSON.stringify({ schemaVersion: 1, owner: 'mindcraft' }))
+    writeFileSync(path.join(corruptRoot, 'version-state.json'), JSON.stringify({ schemaVersion: 1,
+      owner: 'mindcraft-tools', currentVersionId: 42, previousVersionId: null }))
+    const protectedByCorruptState = closedSegment(corruptRoot, 'candidate', 'old', 1000)
+    const invalidStateWriter = new DiagnosticWriter({ root: corruptRoot, pool: 'stream', limitBytes: 4200,
+      ownerRoot: corruptRoot, ownerLimitBytes: 4200, runLimitBytes: 4200, segmentBytes: 128,
+      identity: { versionId: 'current' }, clock: () => now })
+    assert.throws(() => invalidStateWriter.append('quota_pressure'), /invalid diagnostics version identifiers/)
+    assert.equal(existsSync(protectedByCorruptState), true, 'invalid manual version state blocks cleanup')
+    invalidStateWriter.close()
+
     const evalRoot = path.join(root, 'eval-quota')
     mkdirSync(evalRoot, { recursive: true })
     writeFileSync(path.join(evalRoot, 'manifest.json'), JSON.stringify({ schemaVersion: 1, owner: 'mindcraft' }))

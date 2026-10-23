@@ -1234,20 +1234,37 @@ Agent.prototype.start = async function() {
       identity: { sourceSha: 'fixture-source', versionId: 'fixture-version', bundleId: 'fixture-bundle' },
       processRunId: 'fixture-process-run',
     } })
+    assert.equal(incidentRuntime.diagnosticTimers.length, 3, 'diagnostic sampling schedules detail, persistent snapshot, and wait intervals')
+    incidentAgent.actions = { currentAction: { id: 'action-1', label: 'mode:self_defense', phase: 'navigation' },
+      getCurrentWaitSnapshot: () => ({ actionId: 'action-1', actionLabel: 'mode:self_defense', actionPhase: 'navigation',
+        waitId: 'wait-1', phase: 'pathfinder', status: 'waiting', progressCount: 3, condition: 'reach target' }) }
+    incidentRuntime._recordDetailedObservation()
+    incidentRuntime._recordPersistentObservation()
+    incidentRuntime._recordWaitCheckpoint()
+    assert.ok(incidentRuntime.diagnosticRing.some(item => item.event.type === 'bot_observation_detail'), incidentRuntime.diagnosticsWriteError || 'detail observation absent')
     incidentRuntime.diagnosticRecorder('operation_start', { taskId: 'incident-task', actionId: 'action-1', code: 'await bot.dig(block)' })
+    incidentRuntime.diagnosticRecorder('mode_action_triggered', { taskId: 'incident-task', actionId: 'action-1',
+      decisionId: 'decision-1', sourceMode: 'self_defense', reason: 'nearby_threat', evidence: { health: 8 } })
     incidentRuntime.diagnosticRecorder('sdk_call_error', { taskId: 'incident-task', actionId: 'action-1', callId: 'call-1', error: 'fixture failure' })
     const captureResult = incidentRuntime.captureIncident('capture-1')
     assert.equal(captureResult.accepted, true)
     const incidentSegment = (await fs.readdir(path.join(incidentRoot, 'incident/segments'))).find(name => name.endsWith('.jsonl'))
     const incidentEvents = (await fs.readFile(path.join(incidentRoot, 'incident/segments', incidentSegment), 'utf8'))
       .trim().split('\n').map(line => JSON.parse(line))
+    const streamSegment = (await fs.readdir(path.join(incidentRoot, 'stream/segments'))).find(name => name.endsWith('.jsonl'))
+    const streamEvents = (await fs.readFile(path.join(incidentRoot, 'stream/segments', streamSegment), 'utf8'))
+      .trim().split('\n').map(line => JSON.parse(line))
     assert.equal(incidentEvents[0].type, 'incident_started')
     assert.ok(incidentEvents.some(event => event.type === 'incident_ring_event' && event.detail.event.type === 'operation_start'))
+    assert.ok(incidentEvents.some(event => event.type === 'incident_ring_event' && event.detail.event.type === 'bot_observation_detail'))
+    assert.ok(streamEvents.some(event => event.type === 'wait_periodic_checkpoint' && event.detail.waitId === 'wait-1'))
+    assert.ok(streamEvents.some(event => event.type === 'bot_observation_snapshot'))
     assert.ok(incidentEvents.some(event => event.type === 'incident_capture_started' && event.detail.requestId === 'capture-1'))
     assert.ok(new Set(incidentEvents.map(event => event.eventId)).size === incidentEvents.length,
       'stream and incident events have unique common event IDs')
     incidentRuntime.diagnosticsWriter.close()
     incidentRuntime.incidentWriter.close()
+    incidentRuntime.stopDiagnosticSampling()
     // Loading the copied memory simulates the existing bundle handoff format.
     diagnosticAgent.history = new History(diagnosticAgent)
     diagnosticAgent.history.load()

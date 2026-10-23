@@ -100,6 +100,22 @@ export class ActionManager {
         return context;
     }
 
+    getCurrentWaitSnapshot() {
+        const action = this.currentAction;
+        const wait = currentOwnedWait(action?.operation);
+        if (!action || !wait) return null;
+        const result = { actionId: action.id, actionLabel: action.label, actionPhase: action.phase,
+            waitId: wait.waitId ?? null, phase: wait.phase ?? null, status: wait.status ?? null,
+            progressCount: Number.isFinite(wait.progressCount) ? wait.progressCount : null,
+            lastProgressAt: wait.lastProgressAt ?? null };
+        for (const key of ['condition', 'reason', 'expected']) {
+            const value = wait[key];
+            if (typeof value === 'string') result[key] = value.slice(0, 300);
+            else if (typeof value === 'number' || typeof value === 'boolean') result[key] = value;
+        }
+        return result;
+    }
+
     setPhase(phase, actionId = this.currentAction?.id) {
         const action = this.currentAction;
         if (!action || action.id !== actionId || action.settledState) return false;
@@ -116,7 +132,7 @@ export class ActionManager {
         return this._executeResume(actionLabel, actionFn, timeout);
     }
 
-    async runAction(actionLabel, actionFn, { timeout, resume = false, stallTimeoutMs = 0, outputLimit = MAX_OUTPUT_LENGTH, taskId = null } = {}) {
+    async runAction(actionLabel, actionFn, { timeout, resume = false, stallTimeoutMs = 0, outputLimit = MAX_OUTPUT_LENGTH, taskId = null, interruptionContext = null } = {}) {
         if (this.shuttingDown) return this._rejectedResult('shutdown');
         if (this.managementPaused) return this._rejectedResult('management-paused');
         if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
@@ -128,7 +144,7 @@ export class ActionManager {
         if (resume) return this._executeResume(actionLabel, actionFn, timeout);
         const epoch = this.intentEpoch;
         if (this.userStopped) return this._rejectedResult('user-stop');
-        return this._executeAction(actionLabel, actionFn, timeout, epoch, recoveryAdmissionId, { stallTimeoutMs, outputLimit, taskId });
+        return this._executeAction(actionLabel, actionFn, timeout, epoch, recoveryAdmissionId, { stallTimeoutMs, outputLimit, taskId, interruptionContext });
     }
 
     isRecoveryAdmission(actionLabel, recoveryAdmissionId) {
@@ -136,7 +152,7 @@ export class ActionManager {
             recoveryAdmissionId === this.agent._activeRecoveryId;
     }
 
-    stop(reason = 'user') {
+    stop(reason = 'user', { interruptionContext = null } = {}) {
         if (reason === 'user') {
             this.userStopped = true;
             this.intentEpoch++;
@@ -147,12 +163,15 @@ export class ActionManager {
         if (!action) return Promise.resolve({ stopped: true, reason, actionId: null, phase: null });
         if (action.stopPromise) {
             if (reason === 'user' || !action.reason) action.reason = reason;
+            if (interruptionContext && !action.interruptionContext) action.interruptionContext = interruptionContext;
             return action.stopPromise;
         }
         action.reason = reason;
+        action.interruptionContext = interruptionContext;
         try {
             action.operation?.taskRecord?.('action_stop_requested', { taskId: action.operation.taskId,
-                actionId: action.id, reason, phase: action.phase, intentEpoch: this.intentEpoch });
+                actionId: action.id, reason, phase: action.phase, intentEpoch: this.intentEpoch,
+                ...(interruptionContext ? { interruptionContext } : {}) });
         } catch (error) { action.diagnosticError = String(error); }
         action.stopRequestedPhase = action.phase;
         action.phaseStatus = `stopping:${reason}`;
@@ -236,7 +255,7 @@ export class ActionManager {
             if (this.recoveryPaused && !this.isRecoveryAdmission(actionLabel, recoveryAdmissionId)) return this._rejectedResult('recovery-paused');
             if (this.userStopped || intentEpoch !== this.intentEpoch) return this._rejectedResult(this.userStopped ? 'user-stop' : 'superseded');
             if (this.currentAction) {
-                const stopped = await this.stop('superseded');
+                const stopped = await this.stop('superseded', { interruptionContext: options.interruptionContext ?? null });
                 if (!stopped.stopped) return this._rejectedResult('stop-failed', stopped);
             }
             if (this.managementPaused) return this._rejectedResult('management-paused');
@@ -282,6 +301,7 @@ export class ActionManager {
                 settledState: false,
                 stopPromise: null,
                 recoveryAdmissionId,
+                interruptionContext: options.interruptionContext ?? null,
                 progressBefore: captureObservedProgress(this.agent.bot),
             };
             this.currentAction = action;

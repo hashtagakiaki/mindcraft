@@ -19,9 +19,10 @@ async function setup(root) {
   await symlink(deps, path.join(root, 'node_modules'))
   await writeFile(path.join(root, 'settings.js'), 'export default {}')
   await writeFile(path.join(root, 'src/agent/settings.js'), 'export default {narrate_behavior:false}')
-  await writeFile(path.join(root, 'src/utils/mcdata.js'), 'export const isHostile=e=>e.type==="hostile"; export const getBlockId=()=>1;')
+  await writeFile(path.join(root, 'src/utils/mcdata.js'), 'export const isHostile=e=>e.type==="hostile"; export const isHuntable=()=>false; export const getBlockId=()=>1;')
   for (const name of ['skills', 'world', 'block_placement', 'block_interaction', 'operation_context', 'navigation_policy', 'crafting_sync'])
     await writeFile(path.join(root, `src/agent/library/${name}.js`), await readFile(path.join(__dirname, `../src/agent/library/${name}.js`)))
+  await writeFile(path.join(root, 'src/agent/modes.js'), await readFile(path.join(__dirname, '../src/agent/modes.js')))
 }
 function makeBot({ enclosed = false, raised = false, gap = false } = {}) {
   const bot = new EventEmitter()
@@ -108,6 +109,31 @@ async function main() {
     const cancelled = makeBot(); cancelled.entities[2] = zombie; cancelled.interrupt_code = true
     assert.equal(await skills.avoidEnemies(cancelled, 8), false)
     assert.equal(cancelled.installed.length, 0)
+    const { initModes } = await import(pathToFileURL(path.join(root, 'src/agent/modes.js')))
+    const modeBot = makeBot(), threat = enemy(9, 4.5)
+    modeBot.entities[9] = threat
+    modeBot.health = 8
+    modeBot.food = 14
+    const modeEvents = [], runOptions = []
+    const modeAgent = { bot: modeBot, name: 'FixtureBot', shut_up: true,
+      prompter: { getInitModes: () => ({ self_preservation: false, cowardice: false, self_defense: true,
+        hunting: false, item_collecting: false, torch_placing: false, elbow_room: false, idle_staring: false }) },
+      self_prompter: { isActive: () => false, stopLoop() {} }, isIdle: () => true,
+      actions: { currentActionLabel: '', currentAction: null, runAction: async (label, fn, options) => {
+        runOptions.push({ label, options }); return { success: false, message: 'fixture' }
+      } },
+      openChat() {} }
+    modeBot._mindcraftDiagnosticRecord = (type, detail) => modeEvents.push({ type, detail })
+    initModes(modeAgent)
+    await modeBot.modes.update()
+    const modeDecisionEvent = modeEvents.find(event => event.type === 'mode_action_triggered')
+    assert.equal(modeDecisionEvent.detail.sourceMode, 'self_defense')
+    assert.equal(modeDecisionEvent.detail.reason, 'nearby_threat')
+    assert.equal(modeDecisionEvent.detail.evidence.target.name, 'zombie')
+    assert.equal(modeDecisionEvent.detail.evidence.observed.health, 8)
+    assert.equal(runOptions[0].options.interruptionContext.decisionId, modeDecisionEvent.detail.decisionId)
+    assert.equal(runOptions[0].options.interruptionContext.evidence.target.id, 9,
+      'the mode decision ID and captured enemy/health evidence enter ActionManager together')
     console.log('enemy retreat: real wall/scaffold and directional reachability, ranged sight, group escape, failure, progress and cancellation passed')
   } finally { await rm(root, { recursive: true, force: true }) }
 }
