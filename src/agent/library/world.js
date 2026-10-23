@@ -434,10 +434,58 @@ export async function isClearPath(bot, target) {
     let movements = new pf.Movements(bot)
     movements.canDig = false;
     movements.canPlaceOn = false;
+    movements.scafoldingBlocks = [];
+    movements.allow1by1towers = false;
     movements.canOpenDoors = false;
     let goal = new pf.goals.GoalNear(target.position.x, target.position.y, target.position.z, 1);
     let path = await bot.pathfinder.getPathTo(movements, goal, 100);
     return path.status === 'success';
+}
+
+// Threat admission is deliberately terrain-only: mobs cannot build the bot's
+// inventory scaffolds, and a route down to a mob is not a route up to the bot.
+export async function getNearbyThreats(bot, distance=16) {
+    const threats = [];
+    const movements = new pf.Movements(bot);
+    Object.assign(movements, { canDig: false, canOpenDoors: false,
+        scafoldingBlocks: [], allow1by1towers: false, allowParkour: false,
+        allowEntityDetection: false });
+    const position = bot.entity.position;
+    const goal = new pf.goals.GoalNear(position.x, position.y, position.z, 1);
+    for (const enemy of getNearbyEntities(bot, distance).filter(mc.isHostile)) {
+        // Ranged/flying threats can attack across a gap without a walking
+        // route. Unknown blocks do not establish a clear firing line.
+        const ranged = ['skeleton', 'stray', 'bogged', 'pillager', 'witch', 'blaze',
+            'ghast', 'phantom', 'vex', 'wither', 'ender_dragon', 'guardian',
+            'elder_guardian', 'shulker'].includes(enemy.name) || enemy.heldItem?.name === 'trident';
+        if (ranged && hasThreatSight(bot, enemy)) {
+            threats.push(enemy);
+            continue;
+        }
+        const search = bot.pathfinder.getPathFromTo(movements, enemy.position, goal,
+            { timeout: 25, tickTimeout: 25, searchRadius: distance + 4 });
+        try {
+            if (search.next().value?.result?.status === 'success') threats.push(enemy);
+        } finally { search.return?.(); }
+    }
+    return threats;
+}
+
+function hasThreatSight(bot, enemy) {
+    const from = enemy.position.offset(0, enemy.height ? enemy.height * 0.85 : 1.5, 0);
+    const to = bot.entity.position.offset(0, bot.entity.eyeHeight ?? 1.62, 0);
+    const delta = to.minus(from);
+    const length = delta.norm();
+    if (!length) return true;
+    let unknown = false;
+    const view = Object.create(bot.world);
+    view.getBlock = position => {
+        const block = bot.blockAt(position);
+        if (!block) unknown = true;
+        return block;
+    };
+    const hit = bot.world.raycast.call(view, from, delta.scaled(1 / length), length);
+    return !unknown && !hit;
 }
 
 export function shouldPlaceTorch(bot) {

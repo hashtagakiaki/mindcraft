@@ -214,6 +214,10 @@ An eval-owned isolated CaseServer smoke on 2026-10-02, using source pin `d549e73
 
 `cowardice` と `self_defense` が両方有効なら、HP10以上・空腹度6超で、ゾンビ（子供を含む）、ハスク、村人ゾンビ、地上のドラウンド、クモへ共通の条件で反撃する。HP20なら最大3体、HP20未満なら単独を対象とする。16ブロック以内の敵全てがこの種類で、手にアイテムを持たず、既知の乾いた地面にいて、自分も泳いでおらず、自己防衛が一時停止されていないことが条件。毒・遠隔・爆発を持つ敵、武器持ち、水中、これを超える群れや低体力では退避を選ぶ。これは自動modeの開始判断であり、SDKの `defendSelf` 自体には3体の上限を設けない。
 
+自動modeの遭遇判断と `avoidEnemies` は、敵からbotへの接近経路を採掘・足場・タワー・パルクールなしで最大25msずつ探索する。壁や高低差で接近できない敵を距離だけで退避対象にせず、遠隔・飛行型の敵は読み込み済みブロックによる射線も確認する。探索が未完了なら接近可能とは判定しない。これは読み込み済み地形と通常歩行モデルによる判定で、敵固有の全移動能力を再現するものではない。`isClearPath` も足場を使わない経路だけを成功とする。
+
+`avoidEnemies` は対象全体から離れる一つの目標を使い、敵の位置がマスをまたいだときに更新する。最寄りの敵だけを交互に避けたり、退避中に敵を追って攻撃したりしない。経路探索の失敗、5秒間距離を稼げない状態、または30秒の上限で `false` を返し、取消を含め終了時には移動目標とlistenerを解除する。自動退避が失敗した場合は、その場の位置、敵の位置、近傍地形、HP・空腹・最終被弾時刻が変わるまで同じ退避や自己防衛で作業を再中断しない。[退避fixture](tests/enemy_retreat.test.cjs) は実際のpathfinderによる壁・足場・高低差・複数敵の経路と、射線・進捗停止・取消を確認する。自動modeの再試行条件は [recovery fixture](tests/recovery_replanning.test.cjs) で確認する。
+
 2026-10-22の隔離vanilla 1.21.1 / Normalで、素手・防具なし・自然回復なしの単独戦と複数戦を確認した。旧処理ではゾンビ2体で死亡したが、新処理では2体・3体やクモとの混在を討伐できた。条件別の勝敗・残HPと限界は[戦闘検証記録](docs/melee-combat-20261022.md)を参照。個別の少数試行であり、全地形・全敵編成の勝率を保証する結果ではない。
 
 The `unstuck` mode has been removed. Staying at the same position no longer interrupts an action or starts an automatic escape movement. Mode listings and default profiles omit it; existing saved `unstuck` settings are ignored. Navigation progress checks and action deadlines still apply.

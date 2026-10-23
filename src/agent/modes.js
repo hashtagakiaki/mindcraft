@@ -4,6 +4,14 @@ import * as mc from '../utils/mcdata.js';
 import settings from './settings.js'
 
 const meleeMobs = new Set(['zombie', 'husk', 'zombie_villager', 'drowned', 'spider']);
+const failedRetreats = new WeakMap();
+const terrainRevisions = new WeakMap();
+
+function encounterKey(bot, enemies) {
+    const cell = p => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
+    return `${cell(bot.entity.position)}:${terrainRevisions.get(bot) ?? 0}:${bot.lastDamageTime}:${bot.health}:${bot.food}:` +
+        enemies.map(enemy => `${enemy.id}@${cell(enemy.position)}`).sort().join(';');
+}
 
 async function say(agent, message) {
     agent.bot.modes.behavior_log += message + '\n';
@@ -96,8 +104,12 @@ const modes_list = [
         active: false,
         update: async function (agent) {
             const bot = agent.bot;
-            const enemies = world.getNearbyEntities(bot, 16).filter(entity => mc.isHostile(entity));
+            const enemies = await world.getNearbyThreats(bot, 16);
             const enemy = enemies[0];
+            if (!enemy) {
+                failedRetreats.delete(bot);
+                return;
+            }
             const maxEnemies = bot.health >= 20 ? 3 : 1;
             const groundMelee = enemies.length > 0 && enemies.length <= maxEnemies && enemies.every(opponent => {
                 const block = meleeMobs.has(opponent.name) ? bot.blockAt(opponent.position) : null;
@@ -108,10 +120,17 @@ const modes_list = [
             if (modes_map.self_defense.on && !modes_map.self_defense.paused &&
                 groundMelee && !bot.entity.isInWater &&
                 bot.health >= 10 && bot.food > 6) return;
-            if (enemy && await world.isClearPath(agent.bot, enemy)) {
+            if (enemy && failedRetreats.get(bot) !== encounterKey(bot, enemies)) {
                 say(agent, `Aaa! A ${enemy.name.replace("_", " ")}!`);
                 execute(this, agent, async () => {
-                    await skills.avoidEnemies(agent.bot, 24);
+                    try {
+                        if (!await skills.avoidEnemies(bot, 24))
+                            throw new Error('Retreat failed; waiting for a changed encounter or terrain before retrying.');
+                    } catch (error) {
+                        failedRetreats.set(bot, encounterKey(bot, await world.getNearbyThreats(bot, 16)));
+                        throw error;
+                    }
+                    failedRetreats.delete(bot);
                 });
             }
         }
@@ -123,8 +142,11 @@ const modes_list = [
         on: true,
         active: false,
         update: async function (agent) {
-            const enemy = world.getNearestEntityWhere(agent.bot, entity => mc.isHostile(entity), 8);
-            if (enemy && await world.isClearPath(agent.bot, enemy)) {
+            const bot = agent.bot;
+            const enemies = await world.getNearbyThreats(bot, 16);
+            if (modes_map.cowardice.on && failedRetreats.get(bot) === encounterKey(bot, enemies)) return;
+            const enemy = enemies.find(enemy => bot.entity.position.distanceTo(enemy.position) <= 8);
+            if (enemy) {
                 say(agent, `Fighting ${enemy.name}!`);
                 execute(this, agent, async () => {
                     await skills.defendSelf(agent.bot, 8);
@@ -406,6 +428,10 @@ export function initModes(agent) {
     _agent = agent;
     // the mode controller is added to the bot object so it is accessible from anywhere the bot is used
     agent.bot.modes = new ModeController();
+    agent.bot.on?.('blockUpdate', (_old, block) => {
+        if (block?.position && agent.bot.entity.position.distanceTo(block.position) <= 28)
+            terrainRevisions.set(agent.bot, (terrainRevisions.get(agent.bot) ?? 0) + 1);
+    });
     if (agent.task) {
         agent.bot.restrict_to_inventory = agent.task.restrict_to_inventory;
     }

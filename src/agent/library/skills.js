@@ -20,6 +20,14 @@ const HARVEST_CONFIRM_TIMEOUT_MS = 2000;
 const INTERACTION_CONFIRM_TIMEOUT_MS = 2000;
 const COMBAT_CHECK_INTERVAL_MS = 50;
 const COMBAT_SETTLE_MS = 1500;
+
+function allRetreatGoals(goals) {
+    const goal = new pf.goals.GoalCompositeAll(goals);
+    // The library starts its maximum at Number.MIN_VALUE, which discards
+    // every negative inverted-goal heuristic and leaves search unguided.
+    goal.heuristic = node => Math.max(...goals.map(child => child.heuristic(node)));
+    return goal;
+}
 const FARM_SEARCH_RADIUS = 32;
 const FARM_SEED_RESERVE = 1;
 const FARM_CHEST_RADIUS = 32;
@@ -1123,7 +1131,7 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24, defend=fal
                             return goal;
                         };
                         const goal = retreating
-                            ? new pf.goals.GoalCompositeAll(targets.map(opponent => new pf.goals.GoalInvert(follow(opponent, 3.9))))
+                            ? allRetreatGoals(targets.map(opponent => new pf.goals.GoalInvert(follow(opponent, 3.9))))
                             : follow(target, 2.9);
                         bot.pathfinder.setGoal(goal, true);
                         motionKey = key;
@@ -4649,26 +4657,54 @@ export async function avoidEnemies(bot, distance=16) {
      **/
     bot.modes.pause('self_preservation'); // prevents damage-on-low-health from interrupting the bot
     return trackNavigationSegment(bot, async () => {
-    let enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), distance);
-    while (enemy) {
-        const follow = new pf.goals.GoalFollow(enemy, distance+1); // move a little further away
-        const inverted_goal = new pf.goals.GoalInvert(follow);
-        const movement = navigationMovements(bot);
-        if (navigationRecovery(bot, movement, inverted_goal)) await goToGoal(bot, inverted_goal, movement);
-        bot.pathfinder.setMovements(movement);
-        bot.pathfinder.setGoal(inverted_goal, true);
-        await new Promise(resolve => setTimeout(resolve, 500));
-        enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), distance);
-        if (bot.interrupt_code) {
-            break;
+    const movement = navigationMovements(bot);
+    movement.canDig = false;
+    movement.allow1by1towers = false;
+    let key = null;
+    let pathFailure = null;
+    let bestClearance = -Infinity;
+    let progressAt = Date.now();
+    const deadline = Date.now() + 30_000;
+    const onPath = result => {
+        if (['noPath', 'timeout'].includes(result?.status)) pathFailure = result.status;
+    };
+    bot.on('path_update', onPath);
+    try {
+        while (!bot.interrupt_code) {
+            const enemies = await world.getNearbyThreats(bot, distance);
+            if (bot.interrupt_code) return false;
+            if (!enemies.length) {
+                log(bot, `No threatening enemies remain within ${distance} blocks.`);
+                return true;
+            }
+            const clearance = Math.min(...enemies.map(enemy => bot.entity.position.distanceTo(enemy.position)));
+            if (clearance > bestClearance + 0.5) {
+                bestClearance = clearance;
+                progressAt = Date.now();
+            }
+            if (pathFailure || Date.now() >= deadline || Date.now() - progressAt >= 5_000) {
+                log(bot, `Retreat stopped: ${pathFailure ?? (Date.now() >= deadline ? 'time limit' : 'no distance progress')}.`);
+                return false;
+            }
+            const nextKey = enemies.map(enemy => `${enemy.id}:${Math.floor(enemy.position.x)},${Math.floor(enemy.position.y)},${Math.floor(enemy.position.z)}`).sort().join(';');
+            if (nextKey !== key) {
+                const goal = allRetreatGoals(enemies.map(enemy => {
+                    const p = enemy.position;
+                    return new pf.goals.GoalInvert(new pf.goals.GoalNear(p.x, p.y, p.z, distance + 1));
+                }));
+                if (navigationRecovery(bot, movement, goal)) await goToGoal(bot, goal, movement);
+                if (bot.interrupt_code) return false;
+                bot.pathfinder.setMovements(movement);
+                bot.pathfinder.setGoal(goal, true);
+                key = nextKey;
+            }
+            await new Promise(resolve => setTimeout(resolve, 250));
         }
-        if (enemy && bot.entity.position.distanceTo(enemy.position) < 3) {
-            await attackEntity(bot, enemy, false);
-        }
+        return false;
+    } finally {
+        bot.removeListener('path_update', onPath);
+        bot.pathfinder.setGoal(null);
     }
-    bot.pathfinder.stop();
-    log(bot, `Moved ${distance} away from enemies.`);
-    return true;
     });
 }
 

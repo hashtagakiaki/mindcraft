@@ -25,8 +25,8 @@ async function makeModeFixture() {
   await writeFile(path.join(root, 'package.json'), '{"type":"module"}')
   await writeFile(path.join(agentDir, 'modes.js'), await readFile(path.join(__dirname, '../src/agent/modes.js')))
   await writeFile(path.join(agentDir, 'settings.js'), 'export default { narrate_behavior: false }\n')
-  await writeFile(path.join(agentDir, 'library/skills.js'), 'export async function moveAway(bot, distance) { bot.fixtureMoves.push(distance); if (bot.fixtureMoveError) throw bot.fixtureMoveError } export async function defendSelf() {} export async function avoidEnemies() {}\n')
-  await writeFile(path.join(agentDir, 'library/world.js'), 'export function getNearestBlock() { return null } export function getNearbyEntities(bot) { return bot.fixtureEnemies || [] } export function getNearestEntityWhere(bot, predicate) { return getNearbyEntities(bot).find(predicate) } export async function isClearPath() { return true }\n')
+  await writeFile(path.join(agentDir, 'library/skills.js'), 'export async function moveAway(bot, distance) { bot.fixtureMoves.push(distance); if (bot.fixtureMoveError) throw bot.fixtureMoveError } export async function defendSelf() {} export async function avoidEnemies(bot) { return bot.fixtureRetreatResult ?? true }\n')
+  await writeFile(path.join(agentDir, 'library/world.js'), 'export function getNearestBlock() { return null } export function getNearbyEntities(bot) { return bot.fixtureEnemies || [] } export async function getNearbyThreats(bot) { return getNearbyEntities(bot).filter(e => !e.blocked) } export function getNearestEntityWhere(bot, predicate) { return getNearbyEntities(bot).find(predicate) } export async function isClearPath() { return true }\n')
   await writeFile(path.join(root, 'src/utils/mcdata.js'), 'export function isHostile(entity) { return entity.type === "hostile" }; export function isHuntable() { return false }\n')
   const { initModes } = await import(pathToFileURL(path.join(agentDir, 'modes.js')))
   const position = vector()
@@ -91,6 +91,8 @@ async function makeModeFixture() {
     handleMessage(...args) { automaticMessages.push(args) },
     openChat() {}
   }
+  Object.setPrototypeOf(agent.bot, EventEmitter.prototype)
+  EventEmitter.call(agent.bot)
   initModes(agent)
   const allModesOff = Object.fromEntries(['self_preservation', 'cowardice', 'hunting', 'item_collecting', 'torch_placing', 'elbow_room', 'self_defense', 'follow_player', 'cheat'].map(name => [name, false]))
   agent.bot.modes.loadJson(allModesOff)
@@ -132,9 +134,11 @@ async function testStationaryActionIsNotInterrupted() {
 }
 
 async function testSingleMeleeDefenseBeforeFlight() {
-  const zombie = { id: 1, name: 'zombie', type: 'hostile', metadata: { 16: false } }
+  const zombie = { id: 1, name: 'zombie', type: 'hostile', position: vector(2), metadata: { 16: false } }
   const scenarios = [
     { name: 'unarmed adult zombie', expected: 'self_defense' },
+    { name: 'blocked skeleton does not force escape from reachable melee', enemies: [{ ...zombie, id: 2, name: 'skeleton', blocked: true }, zombie], expected: 'self_defense' },
+    { name: 'blocked nearest enemy does not mask a reachable threat', enemies: [{ ...zombie, blocked: true }, { ...zombie, id: 2, name: 'skeleton' }], expected: 'cowardice' },
     { name: 'low health', health: 9.5, expected: 'cowardice' },
     { name: 'cannot sprint', food: 6, expected: 'cowardice' },
     { name: 'baby zombie', enemies: [{ ...zombie, metadata: { 16: true } }], expected: 'self_defense' },
@@ -174,6 +178,31 @@ async function testSingleMeleeDefenseBeforeFlight() {
       assert.equal(fixture.calls.run.length, 1, 'one behavior owns the encounter')
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }
+}
+
+async function testFailedRetreatWaitsForChangedEncounter() {
+  const fixture = await makeModeFixture()
+  try {
+    const { agent, calls } = fixture
+    const enemy = { id: 1, name: 'zombie', type: 'hostile', position: vector(2) }
+    Object.assign(agent.bot, { health: 1, food: 5, fixtureEnemies: [enemy], fixtureRetreatResult: false })
+    agent.bot.blockAt = () => ({ name: 'air' })
+    agent.bot.modes.loadJson({ cowardice: true, self_defense: true })
+    await agent.bot.modes.update()
+    await updateUntil(() => calls.run.length === 1 && agent.actions.currentAction === null)
+    for (let i = 0; i < 3; i++) await agent.bot.modes.update()
+    assert.equal(calls.run.length, 1, 'unchanged failed escape neither repeats nor starts fighting')
+    assert.deepEqual(fixture.automaticMessages, [], 'failed escape does not report successful recovery')
+    agent.bot.emit('blockUpdate', null, { position: vector(1) })
+    await agent.bot.modes.update()
+    await updateUntil(() => calls.run.length === 2 && agent.actions.currentAction === null)
+    enemy.position = vector(3)
+    await agent.bot.modes.update()
+    await updateUntil(() => calls.run.length === 3 && agent.actions.currentAction === null)
+    enemy.blocked = true
+    await agent.bot.modes.update()
+    assert.equal(calls.run.length, 3, 'wall-separated enemy does not interrupt work')
+  } finally { await rm(fixture.root, { recursive: true, force: true }) }
 }
 
 async function makeAgentFixture() {
@@ -442,6 +471,7 @@ async function main() {
   assert.match(source, /agent\.handleMessage\('system'/, 'mode-generated replanning stays an internal message')
   await testStationaryActionIsNotInterrupted()
   await testSingleMeleeDefenseBeforeFlight()
+  await testFailedRetreatWaitsForChangedEncounter()
   await testAgentIntentAndRecoveryAdmission()
   await testRecoveryDedupAndUserStopRace()
   await testActionTimeoutHasSingleRecoveryOwner()

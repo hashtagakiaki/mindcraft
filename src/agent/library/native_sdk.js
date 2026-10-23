@@ -132,7 +132,7 @@ s('goToPlayer', { username: text(), minDistance: distance({ default: 3 }) }, 'Na
 s('followPlayer', { username: text(), minDistance: distance({ default: 4 }) }, 'Follow a player until interrupted. Returns boolean.', a => [a.username, a.minDistance]);
 s('moveAway', { distance: distance() }, 'Move distance blocks away from current position. Returns boolean.', a => [a.distance]);
 s('moveAwayFromEntity', { entity: field('entity'), distance: distance({ default: 16 }) }, 'Move distance blocks away from an observed Entity reference. Returns boolean.', a => [a.entity, a.distance]);
-s('avoidEnemies', { distance: distance({ default: 16 }) }, 'Move the given distance away from enemy mobs. Returns boolean.', a => [a.distance]);
+s('avoidEnemies', { distance: distance({ default: 16 }) }, 'Retreat from the group of nearby enemies with a confirmed approach route or ranged line of sight. Ignores terrain-separated enemies. Returns true when none remain in range; false on path failure, 5 seconds without distance progress, the 30-second limit, or cancellation.', a => [a.distance]);
 s('stay', { seconds: field('staySeconds', { default: 30, description: '-1 means stay until interrupted.' }) }, 'Stay for seconds, disabling modes; -1 stays until interrupted. Returns boolean.', a => [a.seconds]);
 s('useDoor', { position: optional(position()) }, 'Use the door at absolute position, or the nearest door when omitted. Returns boolean.', a => [a.position ?? null]);
 s('goToBed', {}, 'Sleep in the nearest bed. Returns boolean.', () => []);
