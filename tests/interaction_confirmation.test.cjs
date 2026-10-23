@@ -372,6 +372,15 @@ async function main() {
   assert.equal(crowd.pathfinder.goal, null)
   assert.equal(crowd.listenerCount('attackedTarget'), 0)
 
+  const enclosedThreat = { id: 35, name: 'zombie', type: 'hostile', position: makePosition(2, 0, 0) }
+  const enclosed = makeBot({ entities: [enclosedThreat] })
+  let retreatGoalInstalled = false
+  enclosed.pathfinder.getPathTo = async () => ({ status: 'noPath', path: [] })
+  enclosed.pathfinder.setGoal = goal => { retreatGoalInstalled ||= !!goal; enclosed.pathfinder.goal = goal }
+  assert.equal(await skills.avoidEnemies(enclosed, 8), false,
+    'retreat fails immediately when the loaded path search proves the enclosure has no route')
+  assert.equal(retreatGoalInstalled, false, 'an unreachable retreat goal is never started')
+
   const parentSlime = { id: 33, name: 'slime', type: 'hostile', position: makePosition(2, 0, 0) }
   const childSlime = { id: 34, name: 'slime', type: 'hostile', position: makePosition(2, 0, 0) }
   const splitTargets = []

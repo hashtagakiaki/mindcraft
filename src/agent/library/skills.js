@@ -4650,18 +4650,35 @@ export async function avoidEnemies(bot, distance=16) {
     bot.modes.pause('self_preservation'); // prevents damage-on-low-health from interrupting the bot
     return trackNavigationSegment(bot, async () => {
     let enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), distance);
-    while (enemy) {
-        const follow = new pf.goals.GoalFollow(enemy, distance+1); // move a little further away
-        const inverted_goal = new pf.goals.GoalInvert(follow);
+    while (enemy && !bot.interrupt_code) {
+        const start = bot.entity.position.clone();
+        const startDistance = start.distanceTo(enemy.position);
+        // Snapshot the threat position. An inverted GoalFollow moves its
+        // target while the pathfinder is trying to reach it, which can make
+        // the bot repeatedly replan around a moving boundary instead of
+        // choosing a retreat destination.
+        const target = enemy.position.floored();
+        const retreatGoal = new pf.goals.GoalInvert(
+            new pf.goals.GoalNear(target.x, target.y, target.z, distance+1));
         const movement = navigationMovements(bot);
-        if (navigationRecovery(bot, movement, inverted_goal)) await goToGoal(bot, inverted_goal, movement);
-        bot.pathfinder.setMovements(movement);
-        bot.pathfinder.setGoal(inverted_goal, true);
-        await new Promise(resolve => setTimeout(resolve, 500));
-        enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), distance);
-        if (bot.interrupt_code) {
-            break;
+        const route = await bot.pathfinder.getPathTo(movement, retreatGoal, 1000);
+        if (route?.status !== 'success') {
+            log(bot, `Cannot retreat from ${enemy.name}: no reachable retreat route was found (${route?.status ?? 'unknown'}).`);
+            return false;
         }
+        try {
+            await goToGoal(bot, retreatGoal, movement);
+        } catch (error) {
+            log(bot, `Retreat from ${enemy.name} stopped: ${error.message}.`);
+            return false;
+        }
+        if (bot.interrupt_code) return false;
+        const movedAway = bot.entity.position.distanceTo(enemy.position) > startDistance + 0.5;
+        if (!movedAway) {
+            log(bot, `Retreat from ${enemy.name} made no distance progress; stopping instead of repeating the same route.`);
+            return false;
+        }
+        enemy = world.getNearestEntityWhere(bot, entity => mc.isHostile(entity), distance);
         if (enemy && bot.entity.position.distanceTo(enemy.position) < 3) {
             await attackEntity(bot, enemy, false);
         }
