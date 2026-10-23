@@ -522,6 +522,11 @@ export class Agent {
 
         initModes(this);
 
+        if (settings.agent_runtime === 'codex-session') {
+            const { CodexRuntime } = await import('./codex_runtime.js');
+            this.codexRuntime = new CodexRuntime(this);
+        }
+
         this.bot.on('login', () => {
             if (this._shutdownStarted) return;
             console.log(this.name, 'logged in!');
@@ -1097,11 +1102,14 @@ export class Agent {
                 const stopped = await this.actions.stop('superseded');
                 if (!isCurrent() || !stopped.stopped) return false;
             }
-            const { CodexRuntime } = await import('./codex_runtime.js');
             if (!isCurrent() || workerTask && (this._workerTask !== workerTask || workerTask.cancelRequested)
                 || intentReservation && this._intentReservation !== intentReservation) return false;
-            const runtime = new CodexRuntime(this);
-            this.codexRuntime = runtime;
+            let runtime = this.codexRuntime;
+            if (!runtime || typeof runtime.run !== 'function') {
+                const { CodexRuntime } = await import('./codex_runtime.js');
+                runtime = new CodexRuntime(this);
+                this.codexRuntime = runtime;
+            }
             if (workerTask) workerTask.runtime = runtime;
             acknowledgeAccepted();
             const running = runtime.run(source, isCurrent, this.currentTaskId);

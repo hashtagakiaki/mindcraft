@@ -476,6 +476,11 @@ export class CodexRuntime {
 
     async run(source, isCurrent, taskId = randomUUID()) {
         const agent = this.agent;
+        if (this.active) throw new Error('Codex runtime already has an active task');
+        this.abort = new AbortController();
+        this.nativeInbox.length = 0;
+        this.actionId = null;
+        this.images = null;
         this.taskId = taskId;
         this.terminalOutcome = null;
         this.previousTaskDiagnostic = agent.history.getTaskDiagnostics?.() ?? readTaskDiagnostics(agent);
