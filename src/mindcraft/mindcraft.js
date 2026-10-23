@@ -69,16 +69,23 @@ function saveConsoleChunk(type, stream, text, identity = {}) {
 function initializeConsoleDiagnostics() {
     const diagnostics = rootSettings.diagnostics;
     if (!diagnostics) return;
-    if (diagnostics.schema_version !== 1 || typeof diagnostics.root !== 'string'
-        || !Number.isSafeInteger(diagnostics.console_limit_bytes) || diagnostics.console_limit_bytes <= 0) {
+    if (diagnostics.schema_version !== 1 || typeof diagnostics.root !== 'string')
         throw new Error('Invalid diagnostics settings for console storage');
-    }
-    consoleDiagnosticWriter = new DiagnosticWriter({ root: diagnostics.root, pool: 'console',
-        limitBytes: diagnostics.console_limit_bytes,
-        identity: { ...diagnostics.identity, bot: 'mindcraft-parent' } });
+    if (Number.isSafeInteger(diagnostics.console_limit_bytes) && diagnostics.console_limit_bytes > 0)
+        consoleDiagnosticWriter = new DiagnosticWriter({ root: diagnostics.root, pool: 'console',
+            limitBytes: diagnostics.console_limit_bytes,
+            ownerRoot: diagnostics.owner_root ?? diagnostics.root,
+            ownerLimitBytes: diagnostics.owner_limit_bytes ?? diagnostics.console_limit_bytes,
+            runLimitBytes: diagnostics.run_limit_bytes ?? diagnostics.console_limit_bytes,
+            retentionDays: diagnostics.retention_days ?? null,
+            identity: { ...diagnostics.identity, bot: 'mindcraft-parent' } });
     if (Number.isSafeInteger(diagnostics.maintenance_limit_bytes) && diagnostics.maintenance_limit_bytes > 0)
         maintenanceDiagnosticWriter = new DiagnosticWriter({ root: diagnostics.root, pool: 'maintenance',
             limitBytes: diagnostics.maintenance_limit_bytes,
+            ownerRoot: diagnostics.owner_root ?? diagnostics.root,
+            ownerLimitBytes: diagnostics.owner_limit_bytes ?? diagnostics.maintenance_limit_bytes,
+            runLimitBytes: diagnostics.run_limit_bytes ?? diagnostics.maintenance_limit_bytes,
+            retentionDays: diagnostics.retention_days ?? null,
             identity: { ...diagnostics.identity, bot: 'mindcraft-parent' }, segmentBytes: 1024 * 1024 });
     originalConsoleWrite = { stdout: process.stdout.write, stderr: process.stderr.write };
     for (const stream of ['stdout', 'stderr']) {

@@ -103,16 +103,25 @@ export class CodexRuntime {
             ownerRoot: configuredDiagnostics?.owner_root ?? this.diagnostics.root,
             ownerLimitBytes: configuredDiagnostics?.owner_limit_bytes ?? this.diagnostics.limitBytes,
             runLimitBytes: configuredDiagnostics?.run_limit_bytes ?? this.diagnostics.limitBytes,
+            retentionDays: configuredDiagnostics?.retention_days ?? null,
             identity: { ...this.diagnostics.identity, bot: agent.name },
             processRunId: this.diagnostics.processRunId,
         }) : null;
         this.incidentWriter = this.diagnostics?.incidentLimitBytes > 0 ? new DiagnosticWriter({
             root: this.diagnostics.root, pool: 'incident', limitBytes: this.diagnostics.incidentLimitBytes,
+            ownerRoot: configuredDiagnostics?.owner_root ?? this.diagnostics.root,
+            ownerLimitBytes: configuredDiagnostics?.owner_limit_bytes ?? this.diagnostics.incidentLimitBytes,
+            runLimitBytes: configuredDiagnostics?.run_limit_bytes ?? this.diagnostics.incidentLimitBytes,
+            retentionDays: configuredDiagnostics?.retention_days ?? null,
             identity: { ...this.diagnostics.identity, bot: agent.name },
             processRunId: this.diagnostics.processRunId,
         }) : null;
         this.maintenanceWriter = configuredDiagnostics?.maintenance_limit_bytes > 0 ? new DiagnosticWriter({
             root: this.diagnostics.root, pool: 'maintenance', limitBytes: configuredDiagnostics.maintenance_limit_bytes,
+            ownerRoot: configuredDiagnostics?.owner_root ?? this.diagnostics.root,
+            ownerLimitBytes: configuredDiagnostics?.owner_limit_bytes ?? configuredDiagnostics.maintenance_limit_bytes,
+            runLimitBytes: configuredDiagnostics?.run_limit_bytes ?? configuredDiagnostics.maintenance_limit_bytes,
+            retentionDays: configuredDiagnostics?.retention_days ?? null,
             identity: { ...this.diagnostics.identity, bot: agent.name },
             processRunId: `${this.diagnostics.processRunId}:maintenance`,
             segmentBytes: 1024 * 1024,

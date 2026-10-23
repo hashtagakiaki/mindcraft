@@ -52,10 +52,14 @@ function lock(root, timeoutMs = 500) {
             try {
                 const current = JSON.parse(readFileSync(file, 'utf8'));
                 const actual = processStartTicks(Number(current.pid));
-                if (!actual || actual !== current.startTicks) unlinkSync(file);
+                if (actual !== null && actual !== current.startTicks) unlinkSync(file);
+                else if (actual === null) {
+                    try { process.kill(Number(current.pid), 0); }
+                    catch (probeError) { if (probeError.code === 'ESRCH') unlinkSync(file); }
+                }
             } catch (readError) {
                 if (readError.code === 'ENOENT') continue;
-                try { if (Date.now() - statSync(file).mtimeMs > 30_000) unlinkSync(file); } catch {}
+                throw new Error(`diagnostics quota lock is unreadable: ${file}`, { cause: readError });
             }
             if (Date.now() >= until) throw new Error(`diagnostics quota lock is busy: ${file}`);
             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
@@ -97,11 +101,20 @@ function discoverDiagnosticsRoots(ownerRoot) {
         if (existsSync(manifestPath)) {
             const manifestStat = lstatSync(manifestPath);
             if (manifestStat.isFile() && !manifestStat.isSymbolicLink()) {
+                let manifest;
                 try {
-                    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-                    if (manifest.schemaVersion === 1 && manifest.owner === 'mindcraft') roots.push(dir);
-                } catch {}
-            }
+                    manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+                } catch (error) {
+                    if (existsSync(path.join(dir, 'stream', 'segments')))
+                        throw new Error(`invalid diagnostics owner manifest: ${manifestPath}`, { cause: error });
+                }
+                if (manifest?.schemaVersion === 1 && manifest.owner === 'mindcraft') roots.push(dir);
+                else if (existsSync(path.join(dir, 'stream', 'segments')))
+                    throw new Error(`unsupported diagnostics owner manifest: ${manifestPath}`);
+            } else if (existsSync(path.join(dir, 'stream', 'segments')))
+                throw new Error(`unsafe diagnostics owner manifest: ${manifestPath}`);
+        } else if (existsSync(path.join(dir, 'stream', 'segments'))) {
+            throw new Error(`missing diagnostics owner manifest: ${manifestPath}`);
         }
         if (depth >= 6) continue;
         for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -115,6 +128,81 @@ function ownerSegmentFiles(ownerRoot, pool) {
     const files = [];
     for (const root of discoverDiagnosticsRoots(ownerRoot)) files.push(...segmentFiles(path.join(root, pool)));
     return files;
+}
+
+function diagnosticRootForSegment(file) {
+    return path.dirname(path.dirname(path.dirname(file)));
+}
+
+function validClosedSegment(entry, pool) {
+    const meta = entry.meta;
+    if (!meta || meta.schemaVersion !== 1 || meta.owner !== 'mindcraft' || meta.pool !== pool
+        || meta.file !== path.basename(entry.file) || meta.closed !== true) return false;
+    const root = diagnosticRootForSegment(entry.file);
+    const resolved = path.resolve(entry.file);
+    if (!resolved.startsWith(`${root}${path.sep}`)) return false;
+    try {
+        const file = lstatSync(entry.file);
+        const manifest = lstatSync(entry.manifest);
+        return file.isFile() && !file.isSymbolicLink() && manifest.isFile() && !manifest.isSymbolicLink()
+            && file.dev === meta.device && file.ino === meta.inode;
+    } catch { return false; }
+}
+
+function reconcileStaleWriters(ownerRoot, pool, now) {
+    for (const entry of ownerSegmentFiles(ownerRoot, pool)) {
+        const meta = entry.meta;
+        if (!meta || meta.closed !== false || !Number.isInteger(meta.pid) || typeof meta.processStartTicks !== 'string') continue;
+        const liveTicks = processStartTicks(meta.pid);
+        if (liveTicks === meta.processStartTicks) continue;
+        let writerExitConfirmed = liveTicks !== null;
+        if (liveTicks === null) {
+            try { process.kill(meta.pid, 0); }
+            catch (error) { writerExitConfirmed = error.code === 'ESRCH'; }
+        }
+        if (!writerExitConfirmed) continue;
+        const state = lstatSync(entry.file);
+        if (state.isSymbolicLink() || !state.isFile() || state.dev !== meta.device || state.ino !== meta.inode) continue;
+        meta.closed = true;
+        meta.staleWriter = true;
+        meta.endedAt = meta.lastWriteAt ?? new Date(now).toISOString();
+        meta.bytes = state.size;
+        meta.reservedBytes = 0;
+        writeManifest(entry.manifest, meta);
+    }
+}
+
+function candidatePriority(entry, retentionDays, now) {
+    const root = diagnosticRootForSegment(entry.file);
+    const stateFile = path.join(root, 'version-state.json');
+    if (existsSync(stateFile)) {
+        try {
+            const state = JSON.parse(readFileSync(stateFile, 'utf8'));
+            if (state.schemaVersion === 1 && state.owner === 'mindcraft-tools') {
+                const version = entry.meta.versionId;
+                const current = version && version === state.currentVersionId;
+                const previous = version && version === state.previousVersionId;
+                const ended = Date.parse(entry.meta.endedAt ?? '');
+                return { rank: current ? 2 : previous ? 1 : version ? 0 : 3, ended: Number.isFinite(ended) ? ended : Infinity,
+                    root, versioned: true };
+            }
+            return { rank: 4, ended: Infinity, root, versioned: true };
+        } catch { return { rank: 4, ended: Infinity, root, versioned: true }; }
+    }
+    const ended = Date.parse(entry.meta.endedAt ?? '');
+    const expiry = Number.isFinite(ended) && retentionDays > 0 && ended <= now - retentionDays * 86_400_000;
+    return { rank: expiry ? 0 : 1, ended: Number.isFinite(ended) ? ended : Infinity, root, versioned: false };
+}
+
+function unlinkClosedSegment(entry, pool) {
+    if (!validClosedSegment(entry, pool)) return false;
+    const fileStat = lstatSync(entry.file);
+    const manifestStat = lstatSync(entry.manifest);
+    if (fileStat.dev !== entry.meta.device || fileStat.ino !== entry.meta.inode
+        || manifestStat.isSymbolicLink() || !manifestStat.isFile()) return false;
+    unlinkSync(entry.file);
+    unlinkSync(entry.manifest);
+    return true;
 }
 
 function writeManifest(file, value) {
@@ -155,7 +243,7 @@ export function checkDiagnosticsSpace(root, { warningBytes = 0, rejectBytes = 0 
 export class DiagnosticWriter {
     constructor({ root, pool, limitBytes, ownerRoot = root, ownerLimitBytes = limitBytes,
         runLimitBytes = limitBytes, identity = {}, clock = () => Date.now(), segmentBytes = SEGMENT_BYTES,
-        segmentMs = SEGMENT_MS, processRunId = randomUUID() }) {
+        segmentMs = SEGMENT_MS, processRunId = randomUUID(), retentionDays = null }) {
         if (!path.isAbsolute(root)) throw new TypeError('diagnostics root must be absolute');
         if (!['stream', 'incident', 'console', 'maintenance'].includes(pool)) throw new TypeError(`unknown diagnostics pool: ${pool}`);
         if (!Number.isSafeInteger(limitBytes) || limitBytes <= 0) throw new TypeError('diagnostics limitBytes must be a positive safe integer');
@@ -175,6 +263,9 @@ export class DiagnosticWriter {
         this.segmentBytes = Math.min(segmentBytes, SEGMENT_BYTES);
         this.segmentMs = segmentMs;
         this.processRunId = processRunId;
+        if (retentionDays !== null && (!Number.isSafeInteger(retentionDays) || retentionDays <= 0))
+            throw new TypeError('diagnostics retentionDays must be null or a positive safe integer');
+        this.retentionDays = retentionDays;
         this.sequence = 0;
         this.current = null;
         this.closed = false;
@@ -187,13 +278,22 @@ export class DiagnosticWriter {
         const release = lock(this.ownerRoot);
         try {
             const manifestPath = path.join(this.root, 'manifest.json');
+            let rootManifest;
             if (existsSync(manifestPath)) {
-                const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-                if (manifest.schemaVersion !== 1 || manifest.owner !== 'mindcraft')
+                rootManifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+                if (rootManifest.schemaVersion !== 1 || rootManifest.owner !== 'mindcraft')
                     throw new Error(`unsupported diagnostics root manifest: ${manifestPath}`);
             } else {
-                writeManifest(manifestPath, { schemaVersion: 1, owner: 'mindcraft', createdAt: new Date(this.clock()).toISOString() });
+                rootManifest = { schemaVersion: 1, owner: 'mindcraft', createdAt: new Date(this.clock()).toISOString(), pools: {} };
             }
+            rootManifest.pools ??= {};
+            const poolPolicy = { limitBytes: this.limitBytes, ownerLimitBytes: this.ownerLimitBytes,
+                runLimitBytes: this.runLimitBytes, retentionDays: this.retentionDays };
+            const existingPolicy = rootManifest.pools[this.pool];
+            if (existingPolicy && JSON.stringify(existingPolicy) !== JSON.stringify(poolPolicy))
+                throw new Error(`diagnostics pool policy changed for ${this.pool}: ${manifestPath}`);
+            rootManifest.pools[this.pool] = poolPolicy;
+            writeManifest(manifestPath, rootManifest);
         } finally { release(); }
         mkdirSync(this.poolRoot, { recursive: true, mode: 0o700 });
         if (lstatSync(this.poolRoot).isSymbolicLink() || realpathSync(this.poolRoot) !== this.poolRoot)
@@ -265,12 +365,8 @@ export class DiagnosticWriter {
         const bytes = Buffer.byteLength(line);
         const release = lock(this.ownerRoot);
         try {
+            reconcileStaleWriters(this.ownerRoot, this.pool, now);
             const files = segmentFiles(this.poolRoot);
-            const ownerFiles = ownerSegmentFiles(this.ownerRoot, this.pool);
-            const occupied = ownerFiles.reduce((sum, item) => sum + item.bytes
-                + (item.meta?.closed === false ? Math.max(0, item.meta.reservedBytes - item.bytes) : 0), 0);
-            const runOccupied = files.reduce((sum, item) => sum + item.bytes
-                + (item.meta?.closed === false ? Math.max(0, item.meta.reservedBytes - item.bytes) : 0), 0);
             const rotate = !this.current || this.current.meta.versionId !== (this.identity.versionId ?? null)
                 || this.current.meta.bytes + bytes > this.segmentBytes
                 || now - Date.parse(this.current.meta.openedAt) >= this.segmentMs;
@@ -278,8 +374,47 @@ export class DiagnosticWriter {
             const currentManifestBytes = this.current ? statSync(this.current.manifest).size : 0;
             const releasedReservation = rotate && this.current
                 ? Math.max(0, this.current.meta.reservedBytes - this.current.meta.bytes - currentManifestBytes) : 0;
-            if (occupied - releasedReservation + additionalReservation > this.ownerLimitBytes
-                || runOccupied - releasedReservation + additionalReservation > this.runLimitBytes)
+            const ownerFiles = ownerSegmentFiles(this.ownerRoot, this.pool);
+            const eligible = ownerFiles.filter(item => validClosedSegment(item, this.pool))
+                .map(item => ({ ...item, ...candidatePriority(item, this.retentionDays, now) }))
+                .sort((a, b) => a.rank - b.rank || a.ended - b.ended);
+            const deletedSegments = [];
+            const projected = () => {
+                const all = ownerSegmentFiles(this.ownerRoot, this.pool);
+                const local = segmentFiles(this.poolRoot);
+                const usage = entries => entries.reduce((sum, item) => sum + item.bytes
+                    + (item.meta?.closed === false ? Math.max(0, item.meta.reservedBytes - item.bytes) : 0), 0);
+                const reservation = rotate ? additionalReservation - releasedReservation : 0;
+                return { owner: usage(all) + reservation, run: usage(local) + reservation };
+            };
+            let usage = projected();
+            for (const candidate of eligible) {
+                if (usage.owner <= this.ownerLimitBytes && usage.run <= this.runLimitBytes
+                    && usage.run <= this.limitBytes) break;
+                const isLocal = candidate.root === this.root;
+                const localOver = usage.run > Math.min(this.runLimitBytes, this.limitBytes);
+                if ((localOver && !isLocal) || (!localOver && usage.owner <= this.ownerLimitBytes)) continue;
+                if (unlinkClosedSegment(candidate, this.pool)) {
+                    deletedSegments.push({ bytes: candidate.bytes, versionId: candidate.meta.versionId,
+                        reason: candidate.versioned ? candidate.rank === 0 ? 'older_version'
+                            : candidate.rank === 1 ? 'previous_capacity' : 'current_capacity'
+                            : candidate.rank === 0 ? 'expired' : 'capacity' });
+                    usage = projected();
+                }
+            }
+            if (deletedSegments.length) {
+                const manifestPath = path.join(this.root, 'manifest.json');
+                const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+                manifest.lastQuotaCleanup = { at: new Date(now).toISOString(), pool: this.pool,
+                    segmentCount: deletedSegments.length,
+                    bytes: deletedSegments.reduce((sum, item) => sum + item.bytes, 0),
+                    reasons: deletedSegments.reduce((counts, item) => {
+                        counts[item.reason] = (counts[item.reason] ?? 0) + 1;
+                        return counts;
+                    }, {}) };
+                writeManifest(manifestPath, manifest);
+            }
+            if (usage.owner > this.ownerLimitBytes || usage.run > this.runLimitBytes || usage.run > this.limitBytes)
                 throw new DiagnosticQuotaError(`diagnostics pool ${this.pool} owner/run quota is full`, this.pool);
             if (rotate) {
                 this._closeSegment(now);
