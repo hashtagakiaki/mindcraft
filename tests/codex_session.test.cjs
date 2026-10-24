@@ -568,6 +568,9 @@ for (let batch = 0; batch < 10; batch++) {
     let rejectedWorker
     assert.equal(workerAgent.acceptWorkerTask({ handle: competingHandle, message: 'replace current work' }, value => { rejectedWorker = value }), false)
     assert.equal(rejectedWorker.accepted, false)
+    assert.equal(rejectedWorker.admission.available, false)
+    assert.equal(rejectedWorker.admission.workerTaskId, 'primary')
+    assert.ok(rejectedWorker.admission.reasons.includes('worker-task'))
     assert.equal(workerAgent._workerTask.handle.id, primaryHandle.id, 'busy admission preserves the current worker handle')
     assert.equal(workerHandleMessageCalls, 0, 'accepted task begins in the queued boundary, after the immediate ACK')
     await until(() => workerHandleMessageCalls === 1)
@@ -1453,6 +1456,32 @@ Agent.prototype.start = async function() {
       assert.match(failureRuntime.terminalOutcome.error, /Repeated unchanged operation failure/)
       assert.equal(failureAgent.actions.executing, false)
     }
+    // Successful queries are useful, but repeated observation is not gameplay
+    // progress. Feedback preserves the task and resets after actual movement.
+    const observationAgent = makeAgent('ObservationProgress')
+    observationAgent.coder.executeCode = async code => {
+      await delay(25)
+      if (code === 'advance') observationAgent.bot.entity.position.x++
+      return true
+    }
+    const observationRuntime = new NativeCodexRuntime(observationAgent, { makeSession: ({ execute, prepareResult }) => ({
+      open: async () => {}, close: async () => {}, runTurn: async () => {
+        for (let index = 1; index <= 4; index++) {
+          const result = await execute('observe')
+          assert.equal(result.success, true)
+          assert.equal(result.operationsWithoutProgress, index)
+          const feedback = (await prepareResult(result)).contentItems[0].text
+          assert.equal(feedback.includes('PROGRESS REVIEW:'), index >= 3)
+        }
+        const progress = await execute('advance')
+        assert.equal(progress.operationsWithoutProgress, 0)
+        assert.doesNotMatch((await prepareResult(progress)).contentItems[0].text, /PROGRESS REVIEW:/)
+        return { messages: ['verified after progress'] }
+      }
+    }) })
+    observationAgent.codexRuntime = observationRuntime
+    assert.equal(await observationRuntime.run('operator', () => true, 'observation-progress'), true)
+
     // Distinct repairs and observed progress do not exhaust the unchanged-failure guard.
     const repairAgent = makeAgent('DistinctRepairs')
     repairAgent.coder.executeCode = async code => {

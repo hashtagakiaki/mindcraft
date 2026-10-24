@@ -1882,6 +1882,18 @@ async function openContainerAtSurface(bot, block) {
         const container = await Promise.race([pending, failure]);
         completed = true;
         return container;
+    } catch (error) {
+        if (!signal?.aborted) {
+            const above = bot.blockAt(block.position.offset(0, 1, 0));
+            const evidence = { target: { name: block.name, position: block.position },
+                interaction: resolveBlockInteraction(bot, bot.blockAt(block.position)),
+                above: above ? { name: above.name, position: above.position } : null,
+                sneaking: bot.getControlState?.('sneak') ?? null,
+                heldItem: bot.heldItem?.name ?? null, currentWindow: bot.currentWindow?.type ?? null };
+            recordNavigationDiagnostic(bot, 'container_open_failed', { error: String(error), evidence });
+            error.message += `; container observation: ${JSON.stringify(evidence)}`;
+        }
+        throw error;
     } finally {
         if (typeof originalLookAt === 'function') bot.lookAt = originalLookAt;
         if (typeof originalActivate === 'function') bot.activateBlock = originalActivate;
@@ -2412,6 +2424,11 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     bot.pathfinder.setMovements(final_movements);
     const owner = operationContext();
     const cancellation = owner?.cancellation;
+    // stop() waits for the next path node. A bot stuck before that node must
+    // cancel the owned goal instead, which also settles the real goto promise.
+    const stopOwnedNavigation = () => {
+        if (bot.pathfinder.goal === goal) bot.pathfinder.setGoal(null);
+    };
     const previousActionPhase = cancellation?.phase ?? 'running';
     const recoveryDeadline = Number.isFinite(movementOverride?.navigationRecoveryDeadline) ? movementOverride.navigationRecoveryDeadline : null;
     const navigationStallTimeoutMs = Number.isFinite(settings.navigation_stall_timeout_ms) && settings.navigation_stall_timeout_ms > 0
@@ -2462,7 +2479,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         if (recoveryDeadline && activeRouteNodes.length > 16 && !stallError) {
             stallError = new Error('Navigation recovery exceeded its 16-node route budget.');
             stallError.name = 'NavigationRecoveryBudgetError';
-            bot.pathfinder.stop();
+            stopOwnedNavigation();
         }
         const position = bot.entity.position;
         for (const node of activeRouteNodes) {
@@ -2497,6 +2514,8 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         bot.on?.('path_reset', onPathReset);
         setActionPhase(cancellation, 'navigation');
         const navigation = trackNavigationSegment(bot, () => bot.pathfinder.goto(goal));
+        owner?.signal.addEventListener('abort', stopOwnedNavigation, { once: true });
+        if (owner?.signal.aborted) stopOwnedNavigation();
         timeoutHandle = setInterval(() => {
             if (owner?.signal.aborted || owner?.closed) {
                 clearInterval(timeoutHandle);
@@ -2508,7 +2527,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
                     stallError = new Error('Navigation recovery exceeded its bounded 10-second time budget.');
                     stallError.name = 'NavigationRecoveryBudgetError';
                 }
-                bot.pathfinder.stop();
+                stopOwnedNavigation();
                 return;
             }
             const currentGoalDistance = goal.heuristic(bot.entity.position.floored());
@@ -2520,7 +2539,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             } else if (!stallError && Date.now() - lastProgressAt >= navigationStallTimeoutMs) {
                 stallError = new Error(`Navigation made no goal or new route-segment progress for ${navigationStallTimeoutMs}ms.`);
                 stallError.name = 'NavigationStallTimeoutError';
-                bot.pathfinder.stop();
+                stopOwnedNavigation();
             }
         }, navigationCheckIntervalMs);
         try {
@@ -2574,6 +2593,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         // we need to catch so we can clean up the door check interval, then rethrow the error
         throw err;
     } finally {
+        owner?.signal.removeEventListener('abort', stopOwnedNavigation);
         if (clearOwnedGoalOnFailure && bot.pathfinder.goal === goal) bot.pathfinder.setGoal(null);
         clearInterval(doorCheckInterval);
         if (timeoutHandle) clearInterval(timeoutHandle);

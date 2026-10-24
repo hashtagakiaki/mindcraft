@@ -70,11 +70,12 @@ export class WorkerTaskRegistry {
         return this.snapshot(record);
     }
 
-    reject(record, error) {
+    reject(record, error, admission = null) {
         if (!record.terminal) {
             record.status = 'rejected';
             record.terminal = true;
-            this.append(record, 'terminal', { outcome: { status: 'rejected', error } });
+            record.lastOutcome = { status: 'rejected', error, ...(admission ? { admission } : {}) };
+            this.append(record, 'terminal', { outcome: record.lastOutcome });
         }
         return this.snapshot(record);
     }

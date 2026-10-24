@@ -190,6 +190,14 @@ async function main() {
     assert.deepEqual(results.map(x=>x.position.x),[0,1,2,3])
     assert.deepEqual(results.map(x=>x.contents[0].count),[1,2,3,4])
     assert.ok(results.every(x=>x.status==='observed' && x.observedAt && x.target.properties.facing==='north'))
+    const originalOpenContainer = bot.openContainer
+    bot.openContainer = async () => { throw new Error('Event windowOpen did not fire within timeout of 20000ms') }
+    const unopened = await run('await skills.inspectChestAt(bot,0,64,0);')
+    assert.equal(unopened.success, false)
+    assert.match(unopened.message, /container observation:/)
+    assert.match(unopened.message, /"above":/)
+    assert.match(unopened.message, /windowOpen/)
+    bot.openContainer = originalOpenContainer
     assert.deepEqual(bot.state.opened,bot.state.closed)
     for (const code of ['await skills.goToPosition(0,64,0);','await skills.inspectChestAt(bot,NaN,64,0);',
       'await skills.breakBlockAt(bot,0,Infinity,0);','await skills.placeBlock(bot,"stone",0,64,"0");',

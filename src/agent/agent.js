@@ -92,6 +92,23 @@ export class Agent {
         return true;
     }
 
+    getWorkerTaskAdmission() {
+        const reasons = [];
+        if (settings.agent_runtime !== 'codex-session') reasons.push('runtime-unavailable');
+        if (this._shutdownStarted) reasons.push('shutdown');
+        if (this.managementPaused || !serverProxy.managementReady || !serverProxy.socket?.connected) reasons.push('management-unavailable');
+        if (this._intentReservation) reasons.push('operator-intent');
+        if (this._workerTask && !this._workerTask.terminal) reasons.push('worker-task');
+        if (this.codexRuntime?.active) reasons.push('model-task');
+        if (this.actions?.executing) reasons.push('action');
+        return { available: reasons.length === 0, reasons,
+            workerTaskId: this._workerTask && !this._workerTask.terminal ? this._workerTask.taskId : null,
+            runtimeTaskId: this.codexRuntime?.active ? this.codexRuntime.taskId ?? this.currentTaskId ?? null : null,
+            intentTaskId: this._intentReservation?.taskId ?? null,
+            action: this.actions?.currentAction ? { id: this.actions.currentAction.id,
+                label: this.actions.currentAction.label, phase: this.actions.currentAction.phase } : null };
+    }
+
     acceptWorkerTask(payload, acknowledge) {
         const handle = payload?.handle;
         const message = payload?.message;
@@ -113,19 +130,20 @@ export class Agent {
                 return false;
             }
             acknowledge?.({ accepted: previous.accepted, taskId: handle.taskId, handleId: handle.id,
-                duplicate: true, error: previous.accepted ? undefined : 'worker task was already rejected' });
+                duplicate: true, error: previous.accepted ? undefined : 'worker task was already rejected',
+                ...(previous.admission ? { admission: previous.admission } : {}) });
             return previous.accepted;
         }
         if (admissions.size >= MAX_TASK_DISPATCH_IDS) {
             acknowledge?.({ accepted: false, error: 'worker task dedupe capacity reached' });
             return false;
         }
-        if (this._intentReservation || this._workerTask && !this._workerTask.terminal
-            || this.codexRuntime?.active || this.actions?.executing) {
-            const entry = { handle: { ...handle }, contentHash, accepted: false };
+        const admission = this.getWorkerTaskAdmission();
+        if (!admission.available) {
+            const entry = { handle: { ...handle }, contentHash, accepted: false, admission };
             admissions.set(handle.id, entry);
             acknowledge?.({ accepted: false, taskId: handle.taskId, handleId: handle.id,
-                error: 'bot is busy or another operator intent is being admitted' });
+                error: `bot is busy: ${admission.reasons.join(', ')}`, admission });
             return false;
         }
         const task = { handle: { ...handle }, taskId: handle.taskId, requestId: handle.requestId,
@@ -271,6 +289,12 @@ export class Agent {
             message: typeof options.message === 'string' ? options.message.slice(0, SHUTDOWN_MESSAGE_MAX_CHARS) : null,
         };
         this._shutdownStarted = true;
+        try {
+            this.codexRuntime?.diagnosticRecorder?.('agent_shutdown_started', {
+                taskId: this.currentTaskId ?? null, ...intent,
+                actionId: this.actions?.currentAction?.id ?? null,
+            });
+        } catch (error) { console.error('Could not record shutdown reason:', error); }
         const sessionClosing = this.codexRuntime?.cancel('shutdown');
         this._shutdownIntent = intent;
         this._managementGeneration++;
@@ -720,7 +744,7 @@ export class Agent {
         this.bot.interrupt_code = true;
         this.bot.stopDigging();
         this.bot.collectBlock.cancelTask();
-        this.bot.pathfinder.stop();
+        this.bot.pathfinder.setGoal(null);
         this.bot.pvp.stop();
     }
 

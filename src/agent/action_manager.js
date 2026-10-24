@@ -191,6 +191,11 @@ export class ActionManager {
                 if (finalReason === 'management') this.managementStopFailed = true;
                 action.watchdogAtPhase = action.phase;
                 action.phaseStatus = `stop-failed:${finalReason}`;
+                try {
+                    action.operation?.taskRecord?.('action_stop_watchdog', { taskId: action.operation.taskId,
+                        actionId: action.id, reason: finalReason, stopRequestedPhase: action.stopRequestedPhase,
+                        watchdogAtPhase: action.watchdogAtPhase, interruptionContext: action.interruptionContext });
+                } catch (error) { action.diagnosticError = String(error); }
                 this.agent.cleanKill(`Action ${action.id} did not settle after stop request (${finalReason}); status=${action.phaseStatus}; stopRequestedPhase=${action.stopRequestedPhase || 'unknown'}; watchdogAtPhase=${action.watchdogAtPhase || 'unknown'}.`);
                 finish({
                     stopped: false, reason: finalReason, actionId: action.id,

@@ -41,7 +41,7 @@ export function attachWorkerTaskManagement(socket, { registry, allowed, deny, ge
                     const snapshot = registry.accept(record);
                     callback?.({ success: true, accepted: true, ...snapshot });
                 } else {
-                    const snapshot = registry.reject(record, result?.error || 'Worker rejected the task.');
+                    const snapshot = registry.reject(record, result?.error || 'Worker rejected the task.', result?.admission);
                     callback?.({ success: false, accepted: false, ...snapshot, error: result?.error || 'Worker rejected the task.' });
                 }
             });

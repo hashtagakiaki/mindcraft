@@ -143,7 +143,8 @@ export class CodexRuntime {
                 'bot_dig_result', 'bot_dig_error', 'bot_dig_packet', 'navigation_route_started',
                 'navigation_route_settled', 'codex_request_started', 'codex_request_send_error',
                 'codex_request_timeout', 'codex_response_received', 'tool_response_sent',
-                'tool_call_interrupted', 'codex_session_interrupted', 'mode_action_triggered'].includes(type);
+                'tool_call_interrupted', 'codex_session_interrupted', 'mode_action_triggered',
+                'action_stop_watchdog', 'agent_shutdown_started'].includes(type);
             try {
                 const event = this.diagnosticsWriter.append(type, { taskId: this.active ? this.taskId ?? null : null, ...detail }, { critical });
                 this._recordIncidentEvent(event, type);
@@ -499,6 +500,7 @@ export class CodexRuntime {
         let budgetReason = null;
         let lastFailureKey = null;
         let unchangedFailures = 0;
+        let operationsWithoutProgress = 0;
         let completion = 'unknown';
         let saveSucceeded = null;
         let reportedResponse;
@@ -519,7 +521,8 @@ export class CodexRuntime {
                 'bot_dig_server_confirmation', 'bot_dig_result', 'bot_dig_error', 'bot_dig_packet',
                 'navigation_route_started', 'navigation_route_settled', 'codex_request_started',
                 'codex_request_send_error', 'codex_request_timeout', 'codex_response_received',
-                'tool_response_sent', 'tool_call_interrupted', 'codex_session_interrupted']
+                'tool_response_sent', 'tool_call_interrupted', 'codex_session_interrupted',
+                'action_stop_watchdog', 'agent_shutdown_started']
                 .includes(type);
             try {
                 if (this.diagnosticsWriter) this.diagnosticsWriter.append(type, { taskId, ...detail }, {
@@ -610,7 +613,10 @@ export class CodexRuntime {
                 this._taskScope.operationSignal = agent.actions.currentAction?.controller?.signal ?? null;
                 return agent.coder.executeCode(code);
             }, { timeout: config.action_timeout_ms / 60000, stallTimeoutMs: config.stall_timeout_ms, outputLimit: config.output_limit, taskId });
-            const observed = { ...result, observed: observedState(agent.bot, agent.getObservationScope?.()) };
+            operationsWithoutProgress = result.progressObserved || result.confirmedChanges?.length
+                ? 0 : operationsWithoutProgress + 1;
+            const observed = { ...result, operationsWithoutProgress,
+                observed: observedState(agent.bot, agent.getObservationScope?.()) };
             record('operation_result', { result: observed });
             appendOperationDiagnostic(diagnostics, code, observed);
             await persistDiagnostics();
@@ -678,7 +684,9 @@ export class CodexRuntime {
                 turnCount++;
                 const input = this._appendNativeInbox(
                     'Settled tool result.\nCURRENT OPERATOR REQUEST (still active):\n' + operatorRequest + decisionContext() + '\n'
-                    + (result.documentation ? 'SDK DOCUMENTATION RESULT:\n' : 'COMPLETED OPERATION RESULT:\n') + JSON.stringify(modelOperationResult(result)), this._takeNativeInbox());
+                    + (result.documentation ? 'SDK DOCUMENTATION RESULT:\n' : 'COMPLETED OPERATION RESULT:\n') + JSON.stringify(modelOperationResult(result))
+                    + (result.operationsWithoutProgress >= 3
+                        ? '\nPROGRESS REVIEW: Recent operations have no confirmed gameplay progress. Queries may provide useful new information; identify what was learned. If the same state is only being rechecked, choose a different action or independent prerequisite within the original task. An operation succeeding is not goal completion. This is feedback, not an operation limit or permission restriction.' : ''), this._takeNativeInbox());
                 if (!current()) throw new Error('Stale task tool result');
                 record('tool_result', { input, images: this.images?.length ?? 0 });
                 const images = this.images ?? [];

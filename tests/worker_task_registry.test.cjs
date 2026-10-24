@@ -6,6 +6,11 @@ const { pathToFileURL } = require('node:url')
 async function main() {
   const { WorkerTaskRegistry } = await import(pathToFileURL(require('node:path').resolve(__dirname, '../src/mindcraft/worker_task_registry.js')).href)
   const registry = new WorkerTaskRegistry('hub-1')
+  const rejected = registry.begin({ bot: 'Bot1', requestId: 'busy-rejection', message: 'wait', connectionGeneration: 2 }).record
+  const admission = { available: false, reasons: ['model-task'], runtimeTaskId: 'existing-task' }
+  registry.reject(rejected, 'bot is busy: model-task', admission)
+  assert.deepEqual(registry.snapshot(registry.find({ bot: 'Bot1', requestId: 'busy-rejection' })).outcome.admission,
+    admission, 'task-read retains the actual admission reason after rejection')
   const first = registry.begin({ bot: 'Bot1', requestId: 'r1', message: 'same', connectionGeneration: 2 })
   assert.equal(first.accepted, true)
   const same = registry.begin({ bot: 'Bot1', requestId: 'r1', message: 'same', connectionGeneration: 2 })

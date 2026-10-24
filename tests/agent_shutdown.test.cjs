@@ -396,12 +396,17 @@ async function runAgentShutdownFixtures(root) {
     let resolveStop
     const stopGate = new Promise(resolve => { resolveStop = resolve })
     const { agent, events } = makeMinimalAgent(Agent, () => stopGate, async () => ({ saved: true }))
+    const shutdownRecords = []
+    agent.codexRuntime = { diagnosticRecorder(type, detail) { shutdownRecords.push({ type, detail }) }, cancel: async () => {} }
     agent.vision_interpreter = { async close() { events.cameraClose = true; return { closed: true, drained: false } } }
     agent.actions.executing = true
     assert.equal(typeof agent.shutdown, 'function', 'Agent.shutdown must be implemented')
     const startedAt = Date.now()
     const first = agent.shutdown('parent-stop', { restartIntent: false, code: 0 })
     const duplicate = agent.shutdown('explicit-restart', { restartIntent: true, code: 1 })
+    assert.equal(shutdownRecords.length, 1, 'shutdown origin is captured once before cancelling the runtime')
+    assert.equal(shutdownRecords[0].type, 'agent_shutdown_started')
+    assert.equal(shutdownRecords[0].detail.reason, 'parent-stop')
     assert.strictEqual(first, duplicate, 'concurrent shutdown requests must share the same Promise')
     const outcome = await Promise.race([first, delay(4800).then(() => { throw new Error('shutdown exceeded supervisor grace') })])
     assert.ok(Date.now() - startedAt < 4800, 'child cleanup must finish before parent five-second deadline')

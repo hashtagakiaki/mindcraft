@@ -343,6 +343,31 @@ async function main() {
     // Use the installed pathfinder plugin here so its default postProcessPath
     // (including half-block/shape-aware feet positions) is part of the check.
     const processedPathBot = makeBot()
+    // A stuck real pathfinder cannot reach the next node at which stop()
+    // takes effect. An owned abort must still drain goto and its listeners.
+    const stuckBot = makeBot()
+    pathfinder.pathfinder(stuckBot)
+    const controller = new AbortController()
+    const stuckOwner = { bot: stuckBot, signal: controller.signal, nativeNavigationNoEdits: true,
+      root: { id: null, activeChild: null, closed: false, phase: 'main' }, pending: new Set(),
+      accepting: true, calls: [], facts: [], uncertain: [], diagnostics: [], sequence: 0, waitSequence: 0 }
+    const { runOwnedOperation: runStuckOperation } = await import(pathToFileURL(path.join(root, 'src/agent/library/operation_context.js')))
+    const stuckNavigation = runStuckOperation(stuckOwner, () => skills.goToGoal(stuckBot,
+      new pathfinder.goals.GoalBlock(6, 64, 0)))
+    await new Promise(resolve => setImmediate(resolve))
+    assert.ok(stuckBot.pathfinder.goal, 'the real route is active without physics progress')
+    controller.abort('superseded')
+    const drained = await Promise.race([
+      stuckNavigation.then(() => 'arrived', () => 'cancelled'),
+      delay(250).then(() => 'still-running'),
+    ])
+    // Drain the old implementation too, so a failed check leaves no timer/route.
+    stuckBot.pathfinder.setGoal(null)
+    await stuckNavigation.catch(() => {})
+    assert.equal(drained, 'cancelled', 'abort settles a blocked route without a watchdog restart')
+    assert.equal(stuckBot.listenerCount('path_stop'), 0)
+    assert.equal(stuckBot.listenerCount('goal_updated'), 0)
+    assert.equal(stuckOwner.pending.size, 0)
     pathfinder.pathfinder(processedPathBot)
     const processedPathMovements = new pathfinder.Movements(processedPathBot)
     const processedPathGoal = new pathfinder.goals.GoalBlock(-3, 64, -2)

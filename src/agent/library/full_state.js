@@ -60,6 +60,7 @@ export function getFullState(agent, management = {}) {
             current: agent.isIdle() ? 'Idle' : agent.actions.currentActionLabel,
             isIdle: agent.isIdle()
         },
+        taskAdmission: agent.getWorkerTaskAdmission?.() ?? null,
         surroundings: {
             below,
             legs,

@@ -67,7 +67,9 @@ export function getAllBiomes() { return [{ name: 'plains' }]; }
     assert.equal(staleManagement.managementConnectionReady, false)
     assert.equal(staleManagement.managementServerGeneration, null, 'stale management server generation is not exposed as ready')
     bot.blockAt = () => null
-    const state = getFullState({ name: 'FixtureBot', bot, isIdle: () => true, actions: {} }, {
+    const admission = { available: false, reasons: ['model-task'], runtimeTaskId: 'active-inference' }
+    const state = getFullState({ name: 'FixtureBot', bot, isIdle: () => true, actions: {},
+      getWorkerTaskAdmission: () => admission }, {
       connectionGeneration: 7, serverGeneration: 'hub-generation-1', ready: true,
     })
     assert.deepEqual(state.surroundings, {
@@ -79,6 +81,8 @@ export function getAllBiomes() { return [{ name: 'plains' }]; }
     assert.equal(state.gameplay.health, 9.5, 'management observations preserve the same HP as native task results')
     assert.equal(state.gameplay.health < 10, bot.health < 10, 'a threshold decision must not change at the management boundary')
     assert.equal(state.gameplay.hunger, bot.food)
+    assert.equal(state.action.isIdle, true)
+    assert.deepEqual(state.taskAdmission, admission, 'Idle action does not imply worker admission')
     console.log('world observation fixtures passed')
   } finally {
     await fs.rm(root, { recursive: true, force: true })

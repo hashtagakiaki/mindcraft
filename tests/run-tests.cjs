@@ -303,11 +303,12 @@ async function testNavigation(root) {
   bot = makeBot()
   let stopCalls = 0
   let rejectPending
-  bot.pathfinder.goto = () => {
+  bot.pathfinder.goto = goal => {
+    bot.pathfinder.goal = goal
     setImmediate(() => bot.emit('path_update', { status: 'success', path: [{ x: 1, y: 0, z: 0 }, { x: 2, y: 0, z: 0 }] }))
     return new Promise((resolve, reject) => { rejectPending = reject })
   }
-  bot.pathfinder.stop = () => { stopCalls++; rejectPending(new Error('stopped by progress monitor')) }
+  bot.pathfinder.setGoal = goal => { bot.pathfinder.goal = goal; stopCalls++; rejectPending(new Error('stopped by progress monitor')) }
   const operation = createOperationContext({ id: 'nav-stall', controller: new AbortController() }, { bot }, { intentEpoch: 1 }, 'nav-task')
   await assert.rejects(runOwnedOperation(operation, () => skills.goToGoal(bot, { heuristic: () => 10 })), /made no goal or new route-segment progress.*20ms/)
   assert.equal(stopCalls, 1, 'navigation progress monitor stops a genuinely stalled path once')
@@ -321,11 +322,12 @@ async function testNavigation(root) {
   bot = makeBot()
   stopCalls = 0
   let rejectDetour
-  bot.pathfinder.goto = () => {
+  bot.pathfinder.goto = goal => {
+    bot.pathfinder.goal = goal
     setImmediate(() => bot.emit('path_update', { status: 'success', path: [0, 1, 2, 3].map(x => ({ x, y: 0, z: 0 })) }))
     return new Promise((resolve, reject) => { rejectDetour = reject })
   }
-  bot.pathfinder.stop = () => { stopCalls++; rejectDetour(new Error('detour eventually timed out')) }
+  bot.pathfinder.setGoal = goal => { bot.pathfinder.goal = goal; stopCalls++; rejectDetour(new Error('detour eventually timed out')) }
   const detour = skills.goToGoal(bot, { heuristic: () => 10 })
   const detourRejected = assert.rejects(detour, /made no goal or new route-segment progress/)
   await delay(12)
@@ -342,11 +344,12 @@ async function testNavigation(root) {
   bot = makeBot()
   stopCalls = 0
   let rejectOscillation
-  bot.pathfinder.goto = () => {
+  bot.pathfinder.goto = goal => {
+    bot.pathfinder.goal = goal
     setImmediate(() => bot.emit('path_update', { status: 'success', path: [{ x: 0, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }] }))
     return new Promise((resolve, reject) => { rejectOscillation = reject })
   }
-  bot.pathfinder.stop = () => { stopCalls++; rejectOscillation(new Error('oscillation timed out')) }
+  bot.pathfinder.setGoal = goal => { bot.pathfinder.goal = goal; stopCalls++; rejectOscillation(new Error('oscillation timed out')) }
   const oscillation = skills.goToGoal(bot, { heuristic: () => 10 })
   const oscillationRejected = assert.rejects(oscillation, /made no goal or new route-segment progress/)
   await delay(10)

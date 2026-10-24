@@ -172,6 +172,9 @@ async function main() {
       assert.equal(manager.setPhase('opening-furnace', timedId), true, 'stop cleanup can update the actual phase without losing the requested phase')
       watchdog.callback()
       await timeoutPromise
+      const watchdogEvent = diagnosticEvents.find(event => event.type === 'action_stop_watchdog')
+      assert.equal(watchdogEvent.detail.actionId, timedId)
+      assert.equal(watchdogEvent.detail.watchdogAtPhase, 'opening-furnace')
       assert.equal(cleanKills, 1)
       assert.match(cleanKillMessages[0], /stopRequestedPhase=generating/)
       assert.match(cleanKillMessages[0], /watchdogAtPhase=opening-furnace/)
