@@ -46,6 +46,7 @@ export function observedState(bot, observationScope = createObservationScope(bot
     const p = bot.entity?.position;
     const items = bot.inventory?.items?.() ?? [];
     return { observationScope, position: p ? { x: p.x, y: p.y, z: p.z } : null, dimension: bot.game?.dimension,
+        timeOfDay: Number.isFinite(bot.time?.timeOfDay) ? bot.time.timeOfDay : null,
         health: bot.health, food: bot.food, inventoryUnconfirmed: !!bot.inventoryUnconfirmed,
         items: items.map(item => ({ name: item.name, count: item.count, durabilityUsed: item.durabilityUsed, maxDurability: item.maxDurability })),
         equipment: [5, 6, 7, 8, 45].flatMap(slot => {

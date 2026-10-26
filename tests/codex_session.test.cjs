@@ -124,6 +124,17 @@ async function main() {
     assert.equal(nativeObservation.observationScope.managementConnectionReady, false)
     assert.equal(nativeObservation.observationScope.managementServerGeneration, null)
     assert.match(nativeObservation.observationScope.observedAt, /^\d{4}-\d\d-\d\dT/)
+    assert.equal(nativeObservation.timeOfDay, null, 'missing time stays unknown')
+    agent.bot.time = { timeOfDay: 6000 }
+    const timedObservation = observedState(agent.bot, agent.getObservationScope())
+    assert.equal(modelObservation(timedObservation).timeOfDay, 6000, 'initial model observation includes game time')
+    assert.equal(modelOperationResult({ observed: timedObservation }).observed.timeOfDay, 6000,
+      'settled operation observations use the same game time projection')
+    for (const timeOfDay of [NaN, Infinity, '6000']) {
+      agent.bot.time.timeOfDay = timeOfDay
+      assert.equal(observedState(agent.bot).timeOfDay, null)
+    }
+    delete agent.bot.time
     const rawObservation = { ...nativeObservation, items: [
       { name: 'oak_boat', count: 1 }, { name: 'oak_boat', count: 1 },
       { name: 'wooden_axe', count: 1, durabilityUsed: 2, maxDurability: 59 },
@@ -146,6 +157,18 @@ async function main() {
     assert.equal(projectedOperation.trackingScope, 'public SDK only')
     assert.equal(rawOperation.observed.items.length, 4, 'raw diagnostics remain unchanged')
     await until(() => agent.coder.code_template && agent.coder.code_lint_template)
+    const syncQuery = await agent.actions.runAction('sync-query',
+      () => agent.coder.executeCode('const p = world.getPosition(); log(bot, JSON.stringify(p));'), { timeout: 0 })
+    assert.equal(syncQuery.success, true, 'synchronous SDK observations need no dummy await')
+    assert.match(syncQuery.message, /"y":64/)
+    assert.match(await agent.coder._lintCode('export async function main() { missingIdentifier(); }'), /not defined/,
+      'native lint still rejects undefined variables')
+    assert.match(await agent.coder._lintCode('export async function main() { world.inventedMethod(); }'), /do not exist/,
+      'native lint still rejects unknown SDK methods')
+    settings.agent_runtime = 'legacy'
+    assert.match(await agent.coder._lintCode('export async function main(bot) { return bot; }'), /has no 'await'/,
+      'legacy lint retains require-await')
+    settings.agent_runtime = 'codex-session'
     const result = await agent.actions.runAction('compound', () => agent.coder.executeCode('log(bot, "first");\nawait Promise.resolve();\nlog(bot, "second");'), { timeout: 0, outputLimit: 16000 })
     assert.equal(result.success, true)
     assert.match(result.message, /first[\s\S]*second/)
@@ -862,6 +885,30 @@ Agent.prototype.start = async function() {
     assert.equal(goalReplies.length, 1)
     assert.equal(goalEvents.filter(event => event.type === 'goal_continuation').length, 1)
     await goalSession.close()
+    // Completing a verified goal before the final message needs no automatic turn.
+    const sameTurnEvents = []
+    const sameTurnGoal = new CodexSession({ model: 'fixture',
+      record: type => sameTurnEvents.push(type),
+      onContinuation: () => { throw Error('completed goal must not need a continuation') } })
+    sameTurnGoal.threadId = 'same-turn-thread'
+    sameTurnGoal.request = async method => {
+      if (method === 'thread/goal/set') return { goal: { status: 'active' } }
+      assert.equal(method, 'turn/start')
+      queueMicrotask(async () => {
+        const notify = (method, params) => sameTurnGoal.receive({ method, params: { threadId: sameTurnGoal.threadId, ...params } })
+        await notify('turn/started', { turn: { id: 'verified-turn' } })
+        await notify('thread/goal/updated', { goal: { status: 'complete' } })
+        await notify('item/completed', { item: { type: 'agentMessage', text: '昼間です', phase: 'final_answer' } })
+        await notify('turn/completed', { turn: { id: 'verified-turn', status: 'completed' } })
+      })
+      return {}
+    }
+    const sameTurnResult = await sameTurnGoal.runTurn('timeOfDay = 6000', { goalObjective: '今の時間帯は？' })
+    assert.deepEqual(sameTurnResult.messages, ['昼間です'])
+    assert.equal(sameTurnResult.goal.status, 'complete')
+    assert.ok(sameTurnEvents.indexOf('goal_updated') < sameTurnEvents.indexOf('model_message'))
+    assert.equal(sameTurnEvents.includes('goal_continuation'), false)
+    await sameTurnGoal.close()
     // Fast completion and controller resume exactly once on the same thread.
     const native = new CodexRuntime(agent)
     agent.codexRuntime = native

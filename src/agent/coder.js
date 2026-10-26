@@ -181,7 +181,9 @@ export class Coder {
             return result;
         }
 
-        const eslint = new ESLint();
+        // The host's async main wrapper also accepts entirely synchronous SDK queries.
+        const eslint = new ESLint(settings.agent_runtime === 'codex-session'
+            ? { overrideConfig: { rules: { 'require-await': 'off' } } } : {});
         const results = await eslint.lintText(code);
         const codeLines = code.split('\n');
         const exceptions = results.map(r => r.messages).flat();

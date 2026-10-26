@@ -39,7 +39,6 @@ Minecraft disconnect reasons are decoded with the version-specific chat componen
 With `agent_runtime: "codex-session"`, every SDK method binds the current bot on the host. Pass one named argument object, or omit it when all fields are optional. Internal functions, legacy generated code and chat commands retain their existing signatures; the bot-first examples in the following sections describe those paths.
 
 ```js
-await Promise.resolve();
 const position = world.getPosition();
 const target = world.inspectBlockAt({ position: { x: 10, y: 64, z: -3 } });
 const chests = world.getNearestBlocks({ blockTypes: ['chest'], radius: 16, limit: 3 });
@@ -540,7 +539,7 @@ The bot still selects authorized targets, interprets observations and verifies t
 
 Root `settings.js` の `agent_runtime: "codex-session"` と `allow_insecure_coding: true`、profileの明示的な `codex/<model>` で使用する。既定値は `legacy`。`code_model` による判断・実行の役割分離はこの経路では使わない。Codex app-serverのexperimental dynamic toolsを使用するため、対応するCLIが必要（標準待機・遅延SDK読込・画像・永続thread再開・圧縮を隔離確認したCLIは0.160.1）。モデルとreasoning effortの一致を確認し、fallbackは拒否する。reasoning effortはprofile model objectの `params.reasoning_effort`、既定は `medium`。
 
-`minecraft_execute` で複数skillをまとめたJavaScriptを既存Coder/SES/lintとActionManagerへ渡す。Codex標準のdynamic tool応答待機を使い、settleした結果をその呼出しへ返す。操作ごとのturn interrupt・次turnへの結果手渡し・実行中のLLM pollingは行わない。現在のshared bot rulesと受理済みoperator/peer contextを結果に添え、読込失敗や取消後に判断を再開しない。
+`minecraft_execute` で複数skillをまとめたJavaScriptを既存Coder/SES/lintとActionManagerへ渡す。native runtimeの同期照会はダミーの `await` を必要とせず、非同期操作のawait・所有・取消と他のlint規則は維持する。初期観測と操作結果には、観測時刻・dimensionとともに `timeOfDay`（欠測は `null`）を渡す。Codex標準のdynamic tool応答待機を使い、settleした結果をその呼出しへ返す。操作ごとのturn interrupt・次turnへの結果手渡し・実行中のLLM pollingは行わない。現在のshared bot rulesと受理済みoperator/peer contextを結果に添え、読込失敗や取消後に判断を再開しない。
 
  botの基本指示と共通方針は [`src/process/codex/AGENTS.md`](src/process/codex/AGENTS.md) が正本。sessionの新規開始・thread再開前にbundle内の同ファイルを専用cwdへ `AGENTS.md` としてコピーし、生成SDK一覧を付けてCodex標準workspace instruction loaderで読む。`baseInstructions` の独自上書きやtool resultごとの規約追加は行わない。指示更新は次のsession開始・再開時に読み込む。現在の能力・予算・受理したoperator requestはhostが各判断に渡す。開発用root `AGENTS.md` はbotへ渡さない。native SDK契約変更でcontext protocolを10へ更新し、旧context contractのthreadは一度だけ新規開始する。保存済みの会話・要約とworld namespaceは維持する。
 
@@ -560,7 +559,7 @@ native taskのvisionはJPEGをtool resultの `inputImage` として判断中のC
 
 `codex_session` の既定値は、`execution_window_ms: 45000`、`stall_timeout_ms: 30000`、`action_timeout_ms: 600000`、`output_limit: 16000`、`max_search_radius: 64`、`task_budget_ms: null`、`max_operations: null`、`max_turns: null`。この3つだけは`null`で上限を無効化でき、既定では長時間taskを時間・操作・判断回数で打ち切らない。有限の上限を使う場合は正の数（操作・判断回数は整数）を設定する。各判断の残りbudgetも無制限は`null`を返す。
 
-`codex_session.goals: true` は標準Codex Goalsを使う明示opt-in（既定false）。受理した依頼をthreadの目標に設定し、最初の応答後の自動続行も同じtask・操作ownerで受け取る。CLI 0.162.0で模擬課題の2ターン実行を確認した。Goalsはephemeral threadでは使えないため、world scopeがない場合も保存可能な新規threadを作るが、次の依頼へ自動再開しない。依頼は標準APIの4,000文字上限に従い、上限超過やAPI非対応を通常実行へfallbackしない。自動続行もhostの時間・操作・判断予算、Stop・差替え・shutdownの対象になる。goal statusを終了記録へ残すが、モデルのcompleteはゲーム上の達成を独立検証した意味ではない。次のターンが発生しないactive goalにも既存model待機期限を適用する。単独 `skills.stay` の成功だけでGoalを完了させず、任務途中の待機と独立した待機依頼の終了を通常のGoal判断で扱う。[標準Goals API](https://learn.chatgpt.com/docs/app-server#manage-a-thread-goal)
+`codex_session.goals: true` は標準Codex Goalsを使う明示opt-in（既定false）。受理した依頼をthreadの目標に設定し、最初の応答後の自動続行も同じtask・操作ownerで受け取る。CLI 0.162.0で模擬課題の2ターン実行を確認した。Goalsはephemeral threadでは使えないため、world scopeがない場合も保存可能な新規threadを作るが、次の依頼へ自動再開しない。依頼は標準APIの4,000文字上限に従い、上限超過やAPI非対応を通常実行へfallbackしない。自動続行もhostの時間・操作・判断予算、Stop・差替え・shutdownの対象になる。bot指示は依頼全体の達成を現在の証拠で確認した同じturn内でGoalをcompleteにし、更新成功後に最終回答するよう定める。完了更新だけの次turnを避けるための指示であり、未達Goalの自動続行は維持する。[隔離した実モデル比較](docs/goal-completion-20261026.md)では、時刻観測・同期照会lintの改善と合わせて追加実行の削減を確認した。goal statusを終了記録へ残すが、モデルのcompleteはゲーム上の達成を独立検証した意味ではない。次のターンが発生しないactive goalにも既存model待機期限を適用する。単独 `skills.stay` の成功だけでGoalを完了させず、任務途中の待機と独立した待機依頼の終了を通常のGoal判断で扱う。[標準Goals API](https://learn.chatgpt.com/docs/app-server#manage-a-thread-goal)
 
 task budgetの経過時間はmodel待ち・再試行・operation待ちを含み、operation数は受理した実行要求、旧名 `max_turns` はhostの判断再開数（turn開始と各SDK tool resultによる再開）を数え、Codex内部の検索・圧縮回数は含めない。先に達した上限は停止を要求し、実operationのsettlementを代替しない。
 
