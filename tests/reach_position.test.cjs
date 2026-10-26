@@ -378,10 +378,55 @@ async function main() {
       'default postProcessPath returns feet positions rather than integer A* nodes')
     const processedEndpoint = processedPath.path.at(-1)
     assert.deepEqual([Math.floor(processedEndpoint.x), Math.floor(processedEndpoint.y), Math.floor(processedEndpoint.z)], [-3, 64, -2])
-    assert.equal(new pathfinder.goals.GoalBlock(Math.floor(processedEndpoint.x), Math.floor(processedEndpoint.y),
-      Math.floor(processedEndpoint.z)).isEnd({ x: Math.floor(processedEndpoint.x), y: Math.floor(processedEndpoint.y),
-      z: Math.floor(processedEndpoint.z) }), true,
-    'post-processed feet endpoints are floored exactly once before constructing an integer checkpoint')
+    assert.equal(processedEndpoint.hash, '-3,64,-2', 'Move identity preserves negative A* coordinates')
+
+    // Exercise the real pathfinder's shape post-processing and checkpoint search.
+    // Simulate only physical travel; do not replace its search with integer paths.
+    for (const name of ['white_bed', 'oak_slab', 'chest']) {
+      const shapeBot = makeBot({ scaffoldInventory: {}, solidBlocks: [{ x: -3, y: 64, z: -2, name }] })
+      pathfinder.pathfinder(shapeBot)
+      const block = shapeBot.blockAt(new Vec3(-3, 64, -2))
+      const height = Math.max(...block.shapes.map(shape => shape[4]))
+      const searches = []
+      const getPathFromTo = shapeBot.pathfinder.getPathFromTo.bind(shapeBot.pathfinder)
+      shapeBot.pathfinder.getPathFromTo = function* (...args) {
+        for (const value of getPathFromTo(...args)) {
+          searches.push({ status: value.result.status, endpoint: value.result.path.at(-1) })
+          yield value
+        }
+      }
+      const visitedGoals = []
+      shapeBot.pathfinder.goto = async function (goal) {
+        this.setGoal(goal)
+        const generator = this.getPathFromTo(this.movements, shapeBot.entity.position, goal,
+          { timeout: 1200, tickTimeout: 60, searchRadius: 64 })
+        let result
+        for (const value of generator) { result = value.result; if (result.status !== 'partial') break }
+        visitedGoals.push({ goal, status: result.status })
+        shapeBot.emit('path_update', result)
+        if (result.status !== 'success') {
+          this.setGoal(null)
+          throw Object.assign(new Error(`Shape checkpoint search: ${result.status}`), { name: 'NoPath' })
+        }
+        const endpoint = result.path.at(-1)
+        if (endpoint) shapeBot.entity.position = new Vec3(endpoint.x, endpoint.y, endpoint.z)
+        shapeBot.entity.onGround = true
+        this.setGoal(null)
+      }
+      const shapeResult = await reachPosition(shapeBot, {
+        position: { x: -2.5, y: 64 + height, z: -1.5 }, allowDig: false, allowScaffold: false,
+      })
+      assert.equal(shapeResult.ok, true, `${name}: ${JSON.stringify(shapeResult)}`)
+      assert.equal(shapeBot.entity.position.y, 64 + height)
+      assert.equal(visitedGoals.length, 1, `${name}: one successful physical route`)
+      assert.equal(visitedGoals[0].status, 'success')
+      if (name !== 'chest') {
+        assert.ok(searches.some(search => search.status === 'noPath' && search.endpoint?.hash === '-3,65,-2'),
+          `${name}: incomplete route ends at the partial block`)
+        assert.equal(visitedGoals[0].goal.y, 65, `${name}: checkpoint stays above the support block`)
+      }
+      assert.deepEqual(shapeBot.testState.edits, [], `${name}: no terrain edits`)
+    }
 
     const nativeDefault = makeBot({ wall })
     const nativeDefaultResult = await skills.goToPosition(nativeDefault, {

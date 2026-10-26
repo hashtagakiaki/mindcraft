@@ -68,6 +68,8 @@ log(bot, JSON.stringify(transfer));
 
 `world.getNearestBlocksWhere` applies function predicates to loaded Blocks with coordinates, so conditions on `block.position` are supported. Function predicates use Mineflayer's slower full-block search; numeric block IDs and ID arrays keep its palette optimization. Keep the search radius small and log compact summaries instead of dumping thousands of Blocks.
 
+ベッド・半ブロック・チェストなどの上を通る途中地点には、pathfinderが保持する元の整数探索座標を使います。描画・移動用に補正された足元座標を切り捨てて探索目標に戻さず、到着時も接地中の段差を探索と同じ座標系で判定します。利用者が指定する最終到着マスと、安全な接地の確認条件は従来どおりです。
+
 ### Inspect an explicit target and continue after a failure
 
 Use absolute coordinates to distinguish nearby targets:

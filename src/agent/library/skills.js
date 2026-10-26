@@ -2342,6 +2342,16 @@ export async function giveToPlayer(bot, itemType, username, num=1) {
     return false;
 }
 
+function navigationGoalPosition(bot) {
+    const position = bot.entity.position;
+    const node = position.floored();
+    const block = bot.blockAt(node);
+    // Match getPathFromTo's start-node offset when standing on a partial block.
+    if (bot.entity.onGround && position.y - node.y > 0.001 && block
+        && !bot.pathfinder.movements.emptyBlocks.has(block.type)) node.y++;
+    return node;
+}
+
 export async function goToGoal(bot, goal, movementOverride=null) {
     /**
      * Navigate to the given goal. Use doors and attempt minimally destructive movements.
@@ -2507,7 +2517,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     };
     const navigationWaitStartedAt = new Date().toISOString();
     try {
-        bestGoalDistance = goal.heuristic(bot.entity.position.floored());
+        bestGoalDistance = goal.heuristic(navigationGoalPosition(bot));
         seenRouteSegments.add(positionKey(bot.entity.position.floored()));
         lastProgressAt = Date.now();
         bot.on?.('path_update', onPathUpdate);
@@ -2530,7 +2540,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
                 stopOwnedNavigation();
                 return;
             }
-            const currentGoalDistance = goal.heuristic(bot.entity.position.floored());
+            const currentGoalDistance = goal.heuristic(navigationGoalPosition(bot));
             if (currentGoalDistance <= bestGoalDistance - 0.5) {
                 bestGoalDistance = currentGoalDistance;
                 lastProgressAt = Date.now();
@@ -2562,7 +2572,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             }
         }
         if (stallError) { clearOwnedGoalOnFailure = true; throw stallError; }
-        const endNode = bot.entity.position.floored();
+        const endNode = navigationGoalPosition(bot);
         if (typeof goal.isEnd === 'function' && !goal.isEnd(endNode)) {
             clearOwnedGoalOnFailure = true;
             const error = new Error(`Pathfinder resolved without satisfying its goal (last path status: ${lastPathUpdate?.status ?? 'unknown'}).`);
@@ -4250,10 +4260,16 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                 resultCode = 'no_progress';
                 status = 'stalled'; reason = 'The same route segment failed repeatedly without progress.'; break;
             }
-            // getPathFromTo returns post-processed feet positions (often x/z +0.5),
-            // while GoalBlock consumes integer A* block coordinates.
-            const checkpoint = pathResult.status === 'success' ? pathGoal
-                : new pf.goals.GoalBlock(Math.floor(endpoint.x), Math.floor(endpoint.y), Math.floor(endpoint.z));
+            let checkpoint = pathGoal;
+            if (pathResult.status !== 'success') {
+                // postProcessPath mutates feet coordinates, including partial-block
+                // heights. Move.hash retains the original integer A* coordinates.
+                const node = typeof endpoint.hash === 'string' ? endpoint.hash.split(',').map(Number) : [];
+                if (node.length !== 3 || !node.every(Number.isSafeInteger)) {
+                    throw new Error('Pathfinder checkpoint is missing its original A* coordinates.');
+                }
+                checkpoint = new pf.goals.GoalBlock(...node);
+            }
             activeGoal = checkpoint;
             const before = bot.entity.position.clone();
             let navigationFailure = null;
