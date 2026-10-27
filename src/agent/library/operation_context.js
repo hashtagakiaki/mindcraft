@@ -150,6 +150,18 @@ export function finishOwnedWait(wait, detail) {
     if (store.call.activeWait === wait) store.call.activeWait = null;
 }
 
+// A skill states its own observed outcome where it decides success or failure.
+// The tracked call carries it to skillResults, sdkFailure and native results.
+export function reportSkillOutcome(outcome) {
+    const store = ownership.getStore();
+    if (store && store.call !== store.operation.root) store.call.outcome = outcome;
+}
+
+export function skillFailure(code, reason, detail = {}) {
+    reportSkillOutcome({ ok: false, status: 'failed', code, reason, ...detail });
+    return false;
+}
+
 export function withSkillPhase(phase, body) {
     const store = ownership.getStore();
     return store ? ownership.run({ ...store, phase }, body) : body();
@@ -196,6 +208,11 @@ export function trackSkill(name, body) {
                     call.result = { ok: value.ok === true, status: value.status ?? null,
                         arrivalReached: value.arrivalReached === true, code: value.code,
                         reason: value.reason ?? null, diagnostics: value.diagnostics };
+                } else if (call.outcome) call.result = call.outcome;
+                else if (value === false) {
+                    // Delegated failure keeps the child's observed cause instead of an anonymous false.
+                    const child = operation.calls.findLast(entry => entry.parentCallId === call.id && entry.result?.ok === false);
+                    if (child) call.result = { ...child.result, failedCall: child.skill };
                 }
                 call.status = operation.signal.aborted ? 'cancelled' : value === false ? 'returned_false' : value === true ? 'returned_true' : 'returned';
                 operation.taskRecord?.('sdk_call_result', { taskId: operation.taskId, actionId: operation.actionId,
@@ -237,7 +254,7 @@ export function operationResult(operation) {
     return {
         taskId: operation.taskId,
         operationSettlement: 'settled',
-        skillResults: operation.calls.map(({ promise, activeChild, activeWait, closed, accepting, ...call }) => ({ ...call })),
+        skillResults: operation.calls.map(({ promise, activeChild, activeWait, closed, accepting, outcome, ...call }) => ({ ...call })),
         confirmedChanges: operation.facts.map(event => ({ ...event })),
         unconfirmedChanges: operation.uncertain.map(event => ({ ...event })),
         trackingScope: 'public SDK calls; raw bot/plugin work is not fully tracked',

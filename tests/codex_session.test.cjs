@@ -173,26 +173,29 @@ async function main() {
     assert.equal(result.success, true)
     assert.match(result.message, /first[\s\S]*second/)
     settings.generated_code_fail_on_false = []
-    const falseDefault = await agent.actions.runAction('generated-false-default', () => agent.coder.executeCode('await skills.goToPlayer({username: "missing"});\nlog(bot, "continued after false");'), { timeout: 0 })
+    const falseDefault = await agent.actions.runAction('generated-false-default', () => agent.coder.executeCode('await skills.goToPlayer({playerName: "missing"});\nlog(bot, "continued after false");'), { timeout: 0 })
     assert.equal(falseDefault.success, false, 'native SDK stops on false without caller checks')
     assert.doesNotMatch(falseDefault.message, /continued after false/)
-    assert.equal(falseDefault.sdkFailure.result, false)
+    assert.equal(falseDefault.sdkFailure.result.ok, false)
+    assert.equal(falseDefault.sdkFailure.result.code, 'target_not_found', 'the observed cause reaches sdkFailure without log parsing')
+    assert.match(falseDefault.sdkFailure.error, /target_not_found/)
+    assert.equal(falseDefault.skillResults.find(call => call.skill === 'skills.goToPlayer').result.code, 'target_not_found')
     settings.generated_code_fail_on_false = ['goToPlayer']
     const { goToPlayer } = await load('src/agent/library/skills.js')
     assert.equal(await goToPlayer(agent.bot, 'missing'), false, 'direct SDK/skill callers retain the standard boolean API')
-    const falseConfigured = await agent.actions.runAction('generated-false-configured', () => agent.coder.executeCode('await skills.goToPlayer({username: "missing"});\nlog(bot, "must not run");'), { timeout: 0 })
+    const falseConfigured = await agent.actions.runAction('generated-false-configured', () => agent.coder.executeCode('await skills.goToPlayer({playerName: "missing"});\nlog(bot, "must not run");'), { timeout: 0 })
     assert.equal(falseConfigured.success, false, 'configured generated SDK false stops the generated action')
     assert.match(falseConfigured.message, /skills\.goToPlayer returned false/)
     assert.doesNotMatch(falseConfigured.message, /must not run/)
     assert.equal(falseConfigured.skillResults.some(call => call.skill === 'skills.goToPlayer' && call.status === 'returned_false'), true)
     const caughtFalse = await agent.actions.runAction('generated-caught-false', () => agent.coder.executeCode(
-      'try { await skills.goToPlayer({username: "missing"}); } catch (error) { log(bot, error.message); }\nlog(bot, "continued after catch");'), { timeout: 0 })
+      'try { await skills.goToPlayer({playerName: "missing"}); } catch (error) { log(bot, error.message); }\nlog(bot, "continued after catch");'), { timeout: 0 })
     assert.equal(caughtFalse.success, false, 'caught failure remains a failed native operation')
     assert.match(caughtFalse.message, /continued after catch/)
     const unhandledSdkRejections = []
     const onUnhandledSdkRejection = reason => unhandledSdkRejections.push(reason)
     process.on('unhandledRejection', onUnhandledSdkRejection)
-    const unawaitedFalse = await agent.actions.runAction('generated-unawaited-false', () => agent.coder.executeCode('skills.goToPlayer({username: "missing"});\nawait Promise.resolve();'), { timeout: 0 })
+    const unawaitedFalse = await agent.actions.runAction('generated-unawaited-false', () => agent.coder.executeCode('skills.goToPlayer({playerName: "missing"});\nawait Promise.resolve();'), { timeout: 0 })
     await delay(20)
     process.removeListener('unhandledRejection', onUnhandledSdkRejection)
     assert.equal(unawaitedFalse.success, false, 'unawaited native failure is retained at completion')
@@ -255,7 +258,7 @@ for (let batch = 0; batch < 10; batch++) {
       } else if (scenario === 'false') {
         assert.equal(batchEdits, 2); assert.equal(batchCalls, 3)
         assert.equal(checked.sdkFailure.method, 'places.setAlias')
-        assert.equal(checked.sdkFailure.result, false)
+        assert.deepEqual(checked.sdkFailure.result, { ok: false, status: 'failed', code: 'returned_false', reason: null })
       } else {
         assert.equal(batchEdits, 1); assert.equal(batchCalls, 1)
         assert.match(checked.message, /batch yield/)

@@ -6,6 +6,7 @@
 - upstream stable base `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`、履歴、`LICENSE` を保つ。`develop`へ切替・依存更新・upstream checkoutのコピーをしない。
 - 開発者向け入口はこのrepoの [`README.md`](README.md)。bot共通指示の正本は [`src/process/codex/AGENTS.md`](src/process/codex/AGENTS.md) で、開発用root `AGENTS.md` はbot専用Codex cwdへコピーしない。
 - bot用AGENTSには行動方針・遅延文書の読み方・共通の実行境界を記す。個別SDKの引数・動作・戻り値・固定経路方針は `src/agent/library/native_sdk.js` の遅延文書を正本とし、bot用AGENTSへ追加・重複記載しない。実行時のSDK一覧は自動生成したメソッド名だけにする。
+- native SDKは名前付きobject 1つを受け、actionは判断箇所で作った原因・数量を `{ok,status,code,reason,...}` で返す。要求量に満たない結果を成功にせず、未確認量は `null` にする。別名・型推測・ログ解析・別対象への自動代替を追加せず、内部・legacy呼び出しのboolean契約は保つ。
 
 ## ゲーム内の失敗と復旧
 

@@ -169,14 +169,17 @@ export class Coder {
         while ((match = skillRegex.exec(codeNoComments)) !== null) {
             skills.push(match[1]);
         }
-        const allDocs = settings.agent_runtime === 'codex-session'
-            ? (await import('./library/native_sdk.js')).getNativeSdkDocs(settings)
+        const nativeSdk = settings.agent_runtime === 'codex-session' ? await import('./library/native_sdk.js') : null;
+        const allDocs = nativeSdk ? nativeSdk.getNativeSdkDocs(settings)
             : await this.agent.prompter.skill_libary.getAllSkillDocs();
         const knownSkills = new Set(allDocs.map(doc => doc.split('\n')[0]));
         const missingSkills = skills.filter(skill => !knownSkills.has(skill));
         if (missingSkills.length > 0) {
             result += 'These functions do not exist:\n';
-            result += missingSkills.join('\n');
+            result += missingSkills.map(skill => {
+                const replacement = nativeSdk?.getRetiredNativeSdkReplacement(skill);
+                return replacement ? `${skill} (removed; use ${replacement})` : skill;
+            }).join('\n');
             console.log(result)
             return result;
         }
@@ -389,7 +392,7 @@ function nativeExecutionSafety(windowMs, metadata) {
                 || method === 'skills.fellTree' && workResult?.status !== 'complete'
                 || method === 'skills.goToPosition' && (result?.status !== 'reached' || result?.ok !== true)
                 || method === 'skills.reachPosition' && (result?.status !== 'reached' || result?.ok !== true);
-            if (failed) throw fail(method, new Error(`${method} failed: ${result === false ? "returned false" : result?.status ?? "ok:false"}`), result);
+            if (failed) throw fail(method, new Error(`${method} failed: ${result === false ? "returned false" : result?.status ?? "ok:false"}${result?.code ? ` (${result.code}${result.reason ? `: ${result.reason}` : ''})` : ''}`), result);
             return result;
         },
         fail,

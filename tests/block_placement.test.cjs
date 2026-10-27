@@ -156,7 +156,7 @@ async function main() {
     const invoke = (bot, name = 'furnace', options = { facing: 'north' }, dontCheat = false) => skills.placeBlock(bot, name, 0, 65, 0, options, dontCheat)
     const ordinaryBot = makeBot({ item: 'stone', result: { name: 'stone', properties: {} } })
     const nativeSdk = createNativeSdk({ bot: ordinaryBot, skills })
-    assert.equal(await nativeSdk.skills.placeBlock({ blockType: 'stone', position: { x: 0, y: 65, z: 0 } }), true,
+    assert.deepEqual(await nativeSdk.skills.placeBlock({ blockType: 'stone', position: { x: 0, y: 65, z: 0 } }), { ok: true, status: 'complete' },
       'native placement verifies ordinary blocks without requiring orientation options')
     assert.equal(ordinaryBot.state.packets.filter(([packet]) => packet === 'block_place').length, 1)
     const owned = async (bot, fn) => {

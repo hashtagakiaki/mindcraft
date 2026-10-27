@@ -1,5 +1,5 @@
 import { runWithNavigationPolicy } from './navigation_policy.js';
-import { operationContext } from './operation_context.js';
+import { operationContext, operationCallContext } from './operation_context.js';
 
 // Native model-facing contracts. Internal/legacy SDKs retain their bot-first APIs.
 // No function-source or arity inference: each adapter states its argument mapping.
@@ -86,18 +86,17 @@ const p = (name, fields, description, args, options = {}) => {
 const coords = input => [input.position.x, input.position.y, input.position.z];
 const allQuantity = value => value === 'all' ? -1 : value;
 
-s('log', { message: field('stringValue') }, 'Append a message to operation output. No world mutation.', a => [a.message]);
 s('craftItem', { itemName: text(), quantity: positiveInt({ default: 1, description: 'Minimum new output items to craft; excess recipe output is included in confirmedQuantity.' }) }, 'Craft at least quantity new output items, rounded up to whole recipe outputs; quantity is not the number of recipe executions. Handles required approach and crafting-table use. Returns requestedQuantity, confirmedQuantity and remainingQuantity based on server-confirmed recipe output; incomplete or unknown results stop the current code batch.', a => [a.itemName, a.quantity], { completion: 'complete' });
-s('wait', { milliseconds: distance() }, 'Interruptible wait in milliseconds. Returns boolean.', a => [a.milliseconds]);
+s('wait', { milliseconds: distance() }, 'Interruptible wait in milliseconds.', a => [a.milliseconds]);
 s('smeltItem', { itemName: text(), quantity: positiveInt({ default: 1, description: 'Input items to smelt.' }), furnacePosition: optional(position({ description: 'Use this exact furnace; never substitute another.' })) }, 'Smelt in a furnace. An explicit furnacePosition is exact; omission selects the nearest. Handles required approach and container closure. Returns the output item and server-confirmed requested, confirmed and remaining quantities; incomplete or unknown results stop the current code batch.', a => [a.itemName, a.quantity, a.furnacePosition], { completion: 'complete' });
 s('clearNearestFurnace', { furnacePosition: optional(position({ description: 'Use this exact furnace; never substitute another.' })) }, 'Remove contents of the selected furnace; omission selects the nearest.', a => [a.furnacePosition ?? null]);
-s('attackNearest', { mobType: text(), kill: field('boolean', { default: true }) }, 'Attack the nearest matching mob; kill:false makes one attack. Returns boolean.', a => [a.mobType, a.kill]);
-s('attackEntity', { entity: field('entity'), kill: field('boolean', { default: true }) }, 'Attack an observed Entity reference; kill:false makes one attack. Returns boolean.', a => [a.entity, a.kill]);
-s('defendSelf', { radius: radius(9) }, 'Defend against nearby hostile enemies, retargeting close threats and keeping distance from the group. radius admits new enemies; engaged targets remain tracked within max(radius,24). Returns true only after confirmed deaths and a quiet interval for death-spawned enemies; false on no targets, loss or interruption.', a => [a.radius]);
-s('collectBlock', { blockType: text(), count: positiveInt({ default: 1, description: 'Blocks to collect, not drop quantity.' }), exclude: field('positions', { default: null, nullable: true, description: 'Positions to skip, never positions to collect.' }) }, 'Collect matching blocks. Returns boolean.', a => [a.blockType, a.count, a.exclude]);
-s('pickupNearbyItems', {}, 'Pick up nearby dropped items. Returns boolean.', () => []);
+s('attackNearest', { mobType: text(), kill: field('boolean', { default: true }) }, 'Attack the nearest matching mob; kill:false makes one attack.', a => [a.mobType, a.kill]);
+s('attackEntity', { entity: field('entity'), kill: field('boolean', { default: true }) }, 'Attack an observed Entity reference; kill:false makes one attack.', a => [a.entity, a.kill]);
+s('defendSelf', { radius: radius(9) }, 'Defend against nearby hostile enemies, retargeting close threats and keeping distance from the group. radius admits new enemies; engaged targets remain tracked within max(radius,24). Completes only after confirmed deaths and a quiet interval for death-spawned enemies; no targets, loss or interruption fail.', a => [a.radius]);
+s('collectBlock', { blockType: text(), count: positiveInt({ default: 1, description: 'Blocks to collect, not drop quantity.' }), exclude: field('positions', { default: null, nullable: true, description: 'Positions to skip, never positions to collect.' }) }, 'Collect matching blocks. requestedQuantity/confirmedQuantity/remainingQuantity count server-confirmed broken blocks (unit:"block"); collectedItems separately reports picked-up drop items. Fewer confirmed blocks than count is partial/unknown and fails.', a => [a.blockType, a.count, a.exclude]);
+s('pickupNearbyItems', {}, 'Pick up nearby dropped items.', () => []);
 for (const [name, description] of [
-    ['breakBlockAt', 'Break one absolute block. Handles loaded/unchanged target and non-editing approach. Selects a harvest tool when available; if no held tool can harvest the block but its bare-hand dig time is finite, breaks it by hand and it may drop nothing. Normal survival success waits for server-confirmed air. Await once: no separate approach/equip or immediate air check is needed for that same block. Returns true on success; a false result stops minecraft_execute. Caller selects an authorized target; this does not verify the whole request.'],
+    ['breakBlockAt', 'Break one absolute block. Handles loaded/unchanged target and non-editing approach. Selects a harvest tool when available; if no held tool can harvest the block but its bare-hand dig time is finite, breaks it by hand and it may drop nothing. Normal survival success waits for server-confirmed air. Await once: no separate approach/equip or immediate air check is needed for that same block. A target that is already air returns ok:true with status:"no_change"; other failures stop minecraft_execute. Caller selects an authorized target; this does not verify the whole request.'],
     ['approachBlock', 'Approach without digging/scaffolding until a reachable surface aim point is found. Rechecks the actual eye ray; center visibility is not required. Returns ready with fresh observation and interaction aim/face/distance. In minecraft_execute, unknown/blocked stops execution and preserves that result in sdkFailure. breakBlockAt already approaches when needed.'],
 ]) s(name, { position: position() }, description, coords);
 s('inspectChest', { position: optional(position()) }, 'Move into interaction range, open and inspect the explicit chest, or nearest when omitted. This inspection changes your position; it is not a remote inventory query. Returns a timestamped observation and closes the container. When gathering supplies, withdraw needed items here before inspecting another chest and stop exploring once requirements are met. An explicit position is never substituted. Handles approach, target recheck and closure; do not add a separate move to this chest first. A reachable interaction surface does not guarantee that the container opens. On an open timeout, read the target, above-block and sneak observations before changing the approach.', a => a.position ? coords(a) : [], { completion: 'observed' });
@@ -106,46 +105,54 @@ s('placeBlock', {
     facing: optional(enumeration(['north', 'south', 'east', 'west', 'up', 'down'])),
     axis: optional(enumeration(['x', 'y', 'z'])), half: optional(enumeration(['top', 'bottom'])),
     attachTo: optional(enumeration(['top', 'bottom', 'north', 'south', 'east', 'west'])),
-    dontCheat: field('boolean', { default: false }),
-}, 'Place a block at absolute position and verify its resulting server block state for every placement. facing/axis/half/attachTo use intended block state; attachTo is the side containing support. Supports are selected internally unless attachTo is specified. Returns boolean.', a => {
+}, 'Place a block at absolute position and verify its resulting server block state for every placement. facing/axis/half/attachTo use intended block state; attachTo is the side containing support. Supports are selected internally unless attachTo is specified. A same-named existing block fails with code:"already_present" because its state is not verified.', a => {
     const orientation = Object.fromEntries(['facing', 'axis', 'half', 'attachTo'].filter(key => has(a, key)).map(key => [key, a[key]]));
-    return [a.blockType, ...coords(a), orientation, a.dontCheat];
+    return [a.blockType, ...coords(a), orientation, false];
 }, { constraint: (a, fail) => {
     const orientation = ['facing', 'axis', 'half', 'attachTo'].filter(key => has(a, key));
     if (has(a, 'axis') && (has(a, 'facing') || has(a, 'half'))) fail('axis', 'cannot combine with facing or half');
 } });
-s('equip', { itemName: text() }, 'Equip the named item. Returns boolean.', a => [a.itemName]);
-s('discard', { itemName: text(), quantity: quantity() }, 'Discard quantity items; quantity:"all" explicitly discards all matching items. Returns boolean.', a => [a.itemName, allQuantity(a.quantity)]);
+s('equip', { itemName: text() }, 'Equip the named item.', a => [a.itemName]);
+s('discard', { itemName: text(), quantity: quantity() }, 'Discard quantity items; quantity:"all" explicitly discards all matching items. Returns inventory-confirmed requested, confirmed and remaining item quantities; fewer than requested fails as partial.', a => [a.itemName, allQuantity(a.quantity)]);
 for (const name of ['putInChest', 'takeFromChest']) s(name, {
     itemName: text(), quantity: quantity(), chestPosition: optional(position()),
 }, 'Transfer quantity items; quantity:"all" explicitly requests all matching available items. chestPosition selects exactly one chest and never substitutes another; omission uses nearest. Handles approach, target recheck and closure; do not add a separate move to this chest first. Returns server-confirmed requested, confirmed and remaining quantities; incomplete or unknown results stop the current code batch.', a => [a.itemName, allQuantity(a.quantity), has(a, 'chestPosition') ? { chestPosition: a.chestPosition, details: true } : { details: true }], { completion: 'complete' });
-s('consume', { itemName: field('stringValue', { default: '', description: 'Empty string selects available food.' }) }, 'Consume food or a potion. Returns boolean.', a => [a.itemName]);
-s('giveToPlayer', { itemName: text(), playerName: text(), quantity: positiveInt({ default: 1 }) }, 'Give quantity items to the visible player. Returns boolean.', a => [a.itemName, a.playerName, a.quantity]);
+s('consume', { itemName: field('stringValue', { default: '', description: 'Empty string selects the inventory food with the most food points, excluding rotten_flesh, spider_eye, poisonous_potato, pufferfish, chorus_fruit, suspicious_stew and golden apples; an explicit itemName uses only that item.' }) }, 'Consume food or a potion. Completion requires an observed inventory decrease; no_food, missing_item, food_full and effect_unconfirmed are distinct failure codes.', a => [a.itemName]);
+s('giveToPlayer', { itemName: text(), playerName: text(), quantity: positiveInt({ default: 1 }) }, 'Give quantity items to the visible player. confirmedQuantity counts items thrown from this inventory; receivedQuantity is observed pickup by that player, or null when receipt was not observed (code:"receipt_unconfirmed").', a => [a.itemName, a.playerName, a.quantity]);
 s('goToPosition', { position: position() }, 'Reach the requested Minecraft feet block (floor(x), floor(y), floor(z)); the exact coordinate within that block is not required. Success requires a loaded, grounded, safe arrival confirmed across two physics ticks. Confirmed dirt/cobblestone route scaffolds are removed before success; emergency egress scaffolds are retained. Returns {ok,status,arrivalReached,finalPosition,reason,code,diagnostics}; only status:reached is complete, and other statuses stop the code batch. Read diagnostics: search_limit is a bounded search limit, no_progress is the stall condition, and target_unloaded means terminal observations are unavailable. already_at_goal means the safe target block was already occupied; it does not mean movement occurred. route_not_found means no route was found with current loaded chunks, movement policy and search limits, not that the world destination is impossible. After a no-dig noPath, a search-only probe of at most 250ms can return digging_required when a route with digging is found; it never executes that route. A probe timeout returns search_limit. Consider reachPosition only if the requested route itself is allowed to dig; emergency egress may dig or place confirmed blocks to escape an observed hazard first. A found digging candidate does not prove successful passage or that digging is the only option. Missing scaffold materials reject routes needing them; scaffold-free routes remain available. Existing safe-drop, liquid and unknown-terrain limits still apply.', a => [{
     position: a.position, allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt', 'cobblestone'],
 }]);
 s('reachPosition', { position: position() }, 'Reach the requested Minecraft feet block (floor(x), floor(y), floor(z)); the exact coordinate within that block is not required. Success requires a loaded, grounded, safe arrival confirmed across two physics ticks. Route digging and confirmed dirt/cobblestone scaffolds may remain; route edits must be server-confirmed. Returns {ok,status,arrivalReached,finalPosition,reason,code,diagnostics}; only status:reached is complete, and other statuses stop the code batch. Read diagnostics: search_limit is a bounded search limit, no_progress is the stall condition, and target_unloaded means terminal observations are unavailable. already_at_goal means the safe target block was already occupied; it does not mean movement occurred. route_not_found means no route was found with current loaded chunks, movement policy and search limits, not that the world destination is impossible. Missing scaffold materials reject routes needing them; scaffold-free routes remain available. Existing safe-drop, liquid and unknown-terrain limits still apply.', a => [{
     position: a.position, allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false, cleanupOwnedScaffolds: false,
 }]);
-s('goToNearestBlock', { blockType: text(), minDistance: distance({ default: 2 }), radius: radius(64) }, 'Navigate to the nearest matching block within radius. Returns boolean.', a => [a.blockType, a.minDistance, a.radius]);
-s('goToNearestEntity', { entityType: text(), minDistance: distance({ default: 2 }), radius: radius(64) }, 'Navigate to the nearest matching entity within radius. Returns boolean.', a => [a.entityType, a.minDistance, a.radius]);
-s('goToPlayer', { username: text(), minDistance: distance({ default: 3 }) }, 'Navigate near a visible player. Returns boolean.', a => [a.username, a.minDistance]);
-s('followPlayer', { username: text(), minDistance: distance({ default: 4 }) }, 'Follow a player until interrupted. Returns boolean.', a => [a.username, a.minDistance]);
-s('moveAway', { distance: distance() }, 'Move distance blocks away from current position. Returns boolean.', a => [a.distance]);
-s('moveAwayFromEntity', { entity: field('entity'), distance: distance({ default: 16 }) }, 'Move distance blocks away from an observed Entity reference. Returns boolean.', a => [a.entity, a.distance]);
-s('avoidEnemies', { distance: distance({ default: 16 }) }, 'Retreat from the group of nearby enemies with a confirmed approach route or ranged line of sight. Ignores terrain-separated enemies. Returns true when none remain in range; false on path failure, 5 seconds without distance progress, the 30-second limit, or cancellation.', a => [a.distance]);
-s('stay', { seconds: field('staySeconds', { default: 30, description: '-1 means stay until interrupted.' }) }, 'Stay for seconds, disabling modes; -1 stays until interrupted. Returns boolean.', a => [a.seconds]);
-s('useDoor', { position: optional(position()), open: optional(field('boolean')) }, 'Use a wooden door or fence gate at position, or the nearest when omitted. open:true opens and leaves it open; open:false closes it. Explicit state is server-confirmed without walking through. Omitting open keeps the legacy open, walk through, close behavior. Returns boolean.', a => [a.position ?? null, has(a, 'open') ? { open: a.open } : {}]);
-s('goToBed', {}, 'Sleep in the nearest bed. Returns boolean.', () => []);
+s('goToNearestBlock', { blockType: text(), minDistance: distance({ default: 2 }), radius: radius(64) }, 'Navigate to the nearest matching block within radius.', a => [a.blockType, a.minDistance, a.radius]);
+s('goToNearestEntity', { entityType: text(), minDistance: distance({ default: 2 }), radius: radius(64) }, 'Navigate to the nearest matching entity within radius.', a => [a.entityType, a.minDistance, a.radius]);
+s('goToPlayer', { playerName: text(), minDistance: distance({ default: 3 }) }, 'Navigate near a visible player.', a => [a.playerName, a.minDistance]);
+s('followPlayer', { playerName: text(), minDistance: distance({ default: 4 }) }, 'Follow a player until interrupted.', a => [a.playerName, a.minDistance]);
+s('moveAway', { distance: distance() }, 'Move distance blocks away from current position.', a => [a.distance]);
+s('moveAwayFromEntity', { entity: field('entity'), distance: distance({ default: 16 }) }, 'Move distance blocks away from an observed Entity reference.', a => [a.entity, a.distance]);
+s('avoidEnemies', { distance: distance({ default: 16 }) }, 'Retreat from the group of nearby enemies with a confirmed approach route or ranged line of sight. Ignores terrain-separated enemies. Completes when none remain in range; path failure, 5 seconds without distance progress, the 30-second limit, or cancellation fail.', a => [a.distance]);
+s('stay', { seconds: field('staySeconds', { default: 30, description: '-1 means stay until interrupted.' }) }, 'Stay for seconds, disabling modes; -1 stays until interrupted.', a => [a.seconds]);
+s('useDoor', { position: optional(position()), open: optional(field('boolean')) }, 'Use a wooden door or fence gate at position, or the nearest when omitted. open:true opens and leaves it open; open:false closes it. Explicit state is server-confirmed without walking through. Omitting open keeps the legacy open, walk through, close behavior.', a => [a.position ?? null, has(a, 'open') ? { open: a.open } : {}]);
+s('goToBed', {}, 'Sleep in the nearest bed.', () => []);
 s('tillAndSow', { position: position(), seedType: optional(text({ description: 'Seed item or supported crop name; omission only tills.' })) }, 'Till absolute ground position and optionally plant a crop. True requires confirmed requested planting.', a => [...coords(a), a.seedType ?? null]);
 s('activateNearestBlock', { blockType: text(), position: optional(position()) }, 'Activate the nearest matching block, or the exact block at position when supplied.', a => [a.blockType, a.position]);
 s('showVillagerTrades', { entityId: field('nonnegativeInteger') }, 'Read and return structured trades from the specified villager entity ID.', a => [a.entityId], { kind: 'query' });
-s('tradeWithVillager', { entityId: field('nonnegativeInteger'), index: positiveInt({ description: 'Trade index, one-based.' }), times: positiveInt() }, 'Execute a specified villager trade times times. Returns boolean.', a => [a.entityId, a.index, a.times]);
-s('digDown', { distance: positiveInt({ default: 10, description: 'Vertical blocks to dig.' }) }, 'Dig down, stopping at water/lava or unsafe falls. Returns boolean.', a => [a.distance]);
-s('goToSurface', {}, 'Find and navigate to the surface. Returns boolean.', () => []);
-s('useToolOn', { toolName: text(), targetName: text() }, 'Equip tool (or "hand") and use on nearest entity/block. Use useItem for activation without a target.', a => [a.toolName, a.targetName]);
+s('tradeWithVillager', { entityId: field('nonnegativeInteger'), index: positiveInt({ description: 'Trade index, one-based.' }), times: positiveInt() }, 'Execute a specified villager trade times times. Returns requested, confirmed and remaining trade counts (unit:"trade") confirmed from received output; a use limit or unconfirmed output fails as partial/unknown.', a => [a.entityId, a.index, a.times]);
+s('digDown', { distance: positiveInt({ default: 10, description: 'Vertical blocks to dig.' }) }, 'Dig down, stopping at water/lava or unsafe falls.', a => [a.distance]);
+s('goToSurface', {}, 'Find and navigate to the surface.', () => []);
+s('useToolOn', { toolName: text(), targetName: text({ description: 'Block or entity type; use useItem for activation without a target.' }) }, 'Equip tool (or "hand") and use on nearest entity/block.', a => [a.toolName, a.targetName], { constraint: (a, fail) => {
+    if (a.targetName.toLowerCase() === 'nothing') fail('targetName', 'a block or entity type; use skills.useItem({itemName}) for activation without a target');
+} });
 s('useToolOnBlock', { toolName: text(), position: position() }, 'Resolve the currently loaded block at this position immediately before using the tool.', a => [a.toolName, a.position]);
-s('useItem', { itemName: text() }, 'Activate a held item without targeting a block or entity. Confirms the use input only; later effects are separate observations.', a => [a.itemName]);
+s('useItem', {
+    itemName: text(), hand: enumeration(['main', 'off'], { default: 'main' }),
+    holdMs: field('nonnegativeNumber', { default: 0, max: 30000, description: 'Hold before release, e.g. bow draw or shield block; 0 activates once.' }),
+    position: optional(position({ description: 'Absolute point to aim at first.' })),
+    entity: optional(field('entity', { description: 'Observed Entity to aim at; resolved by id immediately before use.' })),
+}, 'Equip, optionally aim, activate, hold for holdMs, then always release (also on failure or cancellation). Completion means the input sequence was sent and released (effect:"not_observed"); hits, eating or block changes are separate observations.', a => [a.itemName, { hand: a.hand, holdMs: a.holdMs, position: a.position ?? null, entity: a.entity ?? null }], { constraint: (a, fail) => {
+    if (has(a, 'position') && has(a, 'entity')) fail('entity', 'omitted when position is supplied; aim at one target');
+} });
 s('tendNearbyFarm', { ...farmFields }, 'Tend connected farmland by default; radius scope works a circular area. Harvest and replant; an explicit chestPosition stores harvested produce there, while omission leaves it in inventory. Returns confirmed counts, remaining work and status; incomplete work or storage stops the current code batch.', a => a.scope === 'radius' ? { ...a, radius: a.radius ?? 32 } : { ...a, searchRadius: a.searchRadius ?? 32 }, { argsObject: true, constraint: farmConstraint, completion: 'farm' });
 s('fellTree', { startPosition: optional(position()), searchRadius: radius(24, { positive: true, max: 64 }) }, 'Fell one natural single-trunk tree, collect logs and remove this call’s pillars. Returns complete/partial/cancelled/blocked/not_found and confirmed counts. Bring an axe, free slots and scaffolding; inspect leftoverScaffolds/grounded. In minecraft_execute, an incomplete status stops execution and preserves the result in sdkFailure.', a => [a]);
 
@@ -154,9 +161,13 @@ w('getNearestFreeSpace', { size: positiveInt({ default: 1 }), radius: radius(8) 
 w('getBlockAtOffset', { offset: position({ default: Object.freeze({ x: 0, y: 0, z: 0 }), description: 'Relative to bot feet, not absolute position.' }) }, 'Synchronously read a loaded block at a relative offset; returns Block or null.', a => [a.offset.x, a.offset.y, a.offset.z]);
 w('getSurroundingBlocks', {}, 'Synchronously describe blocks below, at legs and at head; unloaded blocks are unknown.', () => []);
 w('getFirstBlockAboveHead', { ignoreTypes: field('strings', { default: null, nullable: true, description: 'Omission ignores air and cave_air.' }), radius: radius(32) }, 'Synchronously search upward from the head; returns block description, none or unknown.', a => [a.ignoreTypes, a.radius]);
-w('getNearestBlocks', { blockTypes: field('strings', { default: null, nullable: true, description: 'Omission searches all non-air block IDs.' }), radius: radius(8), limit: positiveInt({ default: 10000 }) }, 'Synchronously return nearest observed Blocks. Default radius is 8; unloaded targets remain unknown.', a => [a.blockTypes, a.radius, a.limit]);
-w('getNearestBlocksWhere', { predicate: field('blockPredicate'), radius: radius(8), limit: positiveInt({ default: 10000 }) }, 'Synchronously search using a predicate on loaded Blocks with position, numeric block ID, or array of numeric block IDs. Function predicates scan full Blocks; ID matching uses the faster palette search. Returns Blocks.', a => [a.predicate, a.radius, a.limit]);
-w('getNearestBlock', { blockType: text(), radius: radius(16) }, 'Synchronously return nearest matching Block or null.', a => [a.blockType, a.radius]);
+w('getNearestBlocks', {
+    blockTypes: field('strings', { default: null, nullable: true, description: 'Omission searches all non-air block IDs.' }),
+    predicate: optional(field('function', { description: 'Block => boolean; exclusive with blockTypes. It may see palette Blocks without position first, so return true for a name match when block.position is absent.' })),
+    radius: radius(8), limit: positiveInt({ default: 10000 }),
+}, 'Synchronously return nearest observed Blocks, ordered by distance; none found returns []. Default radius is 8: pass radius explicitly for wider searches. Use limit:1 and [0] for the nearest one. Unloaded targets remain unknown.', a => [a.blockTypes, a.radius, a.limit], { constraint: (a, fail) => {
+    if (has(a, 'predicate') && a.blockTypes !== null) fail('predicate', 'omitted when blockTypes is supplied; use one search selector');
+} });
 w('getNearbyEntities', { radius: radius(16) }, 'Synchronously return observed Entity references ordered by distance.', a => [a.radius]);
 w('getNearestEntityWhere', { predicate: field('function'), radius: radius(16) }, 'Synchronously return nearest Entity matching the predicate, or null.', a => [a.predicate, a.radius]);
 w('getNearbyPlayers', { radius: radius(16) }, 'Synchronously return nearby player Entity references, excluding this bot.', a => [a.radius]);
@@ -169,7 +180,6 @@ for (const [name, description] of [
     ['getNearbyPlayerNames', 'Synchronously list distinct other player names (within 64 blocks).'],
     ['getBiomeName', 'Synchronously return the biome at this bot’s position.'],
 ]) w(name, {}, description, () => []);
-w('isEntityType', { name: text() }, 'Synchronously test a Minecraft entity type name. Returns boolean; no bot is needed internally.', a => [a.name], { bindBot: false });
 w('getNearbyBlockTypes', { radius: radius(16) }, 'Synchronously list distinct nearby block names.', a => [a.radius]);
 w('isClearPath', { target: field('entity') }, 'Check whether an observed target Entity can be reached without digging/placing/opening doors. Returns Promise<boolean>.', a => [a.target]);
 
@@ -215,7 +225,6 @@ function expected(descriptor, config) {
         function: 'a predicate function', entity: 'an observed Entity with finite position and integer id',
         block: 'an observed Block with name and Vec3 position', goal: 'a pathfinder Goal with isEnd() and heuristic()',
         movements: 'a Movements reference with blocksCantBreak Set', timestamp: 'an ISO timestamp',
-        blockPredicate: 'a Block predicate function, block ID, or array of block IDs',
         staySeconds: 'finite nonnegative seconds or -1 until interrupted',
     };
     let result = descriptor.type === 'enum' ? descriptor.values.map(value => JSON.stringify(value)).join(' | ')
@@ -240,9 +249,8 @@ function sampleValue(descriptor, config) {
         case 'strings': return '["chest"]';
         case 'boolean': return 'true';
         case 'function': return 'entity => entity.name === "cow"';
-        case 'blockPredicate': return 'block => block.name === "chest"';
         case 'entity': return 'world.getNearbyEntities()[0]';
-        case 'block': return 'world.getNearestBlock({blockType:"chest"})';
+        case 'block': return 'world.getNearestBlocks({blockTypes:["chest"],limit:1})[0]';
         case 'goal': return 'observedGoal';
         case 'movements': return 'observedMovements';
         case 'object': return 'observedEntity';
@@ -282,7 +290,6 @@ function validateValue(value, descriptor, fieldName, fail, config) {
         case 'quantity': valid = value === 'all' || integer(value) && value > 0; break;
         case 'enum': valid = descriptor.values.includes(value); break;
         case 'function': valid = typeof value === 'function'; break;
-        case 'blockPredicate': valid = typeof value === 'function' || integer(value) && value >= 0 || Array.isArray(value) && value.every(id => integer(id) && id >= 0); break;
         case 'strings': valid = Array.isArray(value) && value.every(nonempty); break;
         case 'object': valid = objectLike(value); break;
         case 'goal': valid = objectLike(value) && typeof value.isEnd === 'function' && typeof value.heuristic === 'function'; break;
@@ -353,8 +360,20 @@ export function getNativeSdkDocs(config = {}) {
         });
         const policy = definition.navigationPolicy
             ? `\nFixed implicit-route policy: allowDig=${definition.navigationPolicy.allowDig}, scaffold=${definition.navigationPolicy.scaffold}. This policy applies to this skill's movement and plugin pathing; work targets retain the skill's own permissions.` : '';
-        return `${definition.namespace}.${definition.name}\nSignature: ${signature(definition)}. Host binds the bot; pass only one named object. ${Object.keys(definition.fields).length ? Object.values(definition.fields).every(d => d.optional || has(d, 'default')) ? 'Input may be omitted; defaults apply.' : 'Required fields must be supplied.' : 'Accepts () or ({}).'}\n${definition.description}${policy}\n${fields.join('\n')}\nNative execution: minecraft_execute stops on action false/error/ok:false; queries remain data. Failure blocks further SDK calls even after catch or omitted await. The host owns cancellation and execution_window_ms yielding. These guarantees cover SDK calls.\nExample: ${example(definition, config)}\nRuntime availability: ${availability[definition.namespace]}\nSearch-radius defaults are capped by max_search_radius (${searchLimit(config)}). Invalid input throws SdkArgumentError (INVALID_ARGUMENT) before this method calls the internal SDK. Raw bot/plugin access is outside this guarantee.`;
+        return `${definition.namespace}.${definition.name}\nSignature: ${signature(definition)}. Host binds the bot; pass only one named object. ${Object.keys(definition.fields).length ? Object.values(definition.fields).every(d => d.optional || has(d, 'default')) ? 'Input may be omitted; defaults apply.' : 'Required fields must be supplied.' : 'Accepts () or ({}).'}\n${definition.description}${policy}\n${fields.join('\n')}\nNative execution: actions without a domain result return {ok,status,code?,reason?,...observed details}; quantity results add unit, requestedQuantity, confirmedQuantity and remainingQuantity (null when unknown). minecraft_execute stops on action error/ok:false and keeps that result in sdkFailure; queries remain data. Failure blocks further SDK calls even after catch or omitted await. The host owns cancellation and execution_window_ms yielding. These guarantees cover SDK calls.\nExample: ${example(definition, config)}\nRuntime availability: ${availability[definition.namespace]}\nSearch-radius defaults are capped by max_search_radius (${searchLimit(config)}). Invalid input throws SdkArgumentError (INVALID_ARGUMENT) before this method calls the internal SDK. Raw bot/plugin access is outside this guarantee.`;
     });
+}
+
+// Retired native names fail lint with their replacement instead of an implicit compatibility path.
+const RETIRED_METHODS = Object.freeze({
+    'skills.log': 'log(bot, message)',
+    'world.isEntityType': 'compare names from world.getNearbyEntityTypes() or Entity.name',
+    'world.getNearestBlock': 'world.getNearestBlocks({blockTypes:["chest"], radius:16, limit:1})[0]',
+    'world.getNearestBlocksWhere': 'world.getNearestBlocks({predicate: block => ..., radius, limit})',
+});
+
+export function getRetiredNativeSdkReplacement(method) {
+    return RETIRED_METHODS[method] ?? null;
 }
 
 export function getNativeSdkMethodNames() {
@@ -394,6 +413,7 @@ export function createNativeSdk(bindings, config = {}) {
             const internalName = definition.namespace === 'skills' && definition.name === 'craftItem' ? 'craftItem'
                 : definition.namespace === 'skills' && definition.name === 'inspectChest' ? 'inspectChest'
                 : definition.namespace === 'world' && definition.name === 'getBlockAtOffset' ? 'getBlockAtPosition'
+                : definition.namespace === 'world' && definition.name === 'getNearestBlocks' && has(input, 'predicate') ? 'getNearestBlocksWhere'
                 : definition.namespace === 'skills' && definition.name === 'useToolOnBlock' ? 'useToolOnBlockAt'
                 : definition.namespace === 'places' && definition.name === 'find' ? 'findRecords'
                 : definition.namespace === 'places' && definition.name === 'inspect' ? 'inspectRecord'
@@ -423,8 +443,8 @@ export function createNativeSdk(bindings, config = {}) {
                 args = [input.blockType, input.position];
             } else if (definition.namespace === 'skills' && definition.name === 'useToolOnBlock') {
                 args = [input.toolName, input.position];
-            } else if (definition.namespace === 'skills' && definition.name === 'useItem') {
-                args = [input.itemName];
+            } else if (definition.namespace === 'world' && definition.name === 'getNearestBlocks' && has(input, 'predicate')) {
+                args = [input.predicate, input.radius, input.limit];
             } else if (definition.namespace === 'skills' && definition.name === 'showVillagerTrades') {
                 args = [input.entityId, true];
             } else if (definition.namespace === 'vision' && definition.name === 'lookAtPosition') {
@@ -445,11 +465,16 @@ export function createNativeSdk(bindings, config = {}) {
             // Preserve pure synchronous world results by never making this wrapper async.
             const invoke = () => {
                 const context = operationContext();
+                const parentCall = operationCallContext();
                 const factStart = context?.facts.length ?? 0;
                 const uncertaintyStart = context?.uncertain.length ?? 0;
+                const callStart = context?.calls.length ?? 0;
                 const call = internal(...(definition.bindBot ? [bindings.bot, ...args] : args));
-                if (definition.kind !== 'action' || !call?.then || definition.completion === 'truthy') return call;
-                return call.then(value => projectDomainResult(definition, value, context, factStart, uncertaintyStart, input));
+                if (definition.kind !== 'action' || !call?.then) return call;
+                // The first tracked call this adapter started is the internal skill itself.
+                const tracked = () => context?.calls.slice(callStart).find(entry => entry.parentCallId === (parentCall?.id ?? null));
+                if (definition.completion === 'truthy') return call.then(value => actionResult(value, tracked()?.result));
+                return call.then(value => projectDomainResult(definition, value, context, factStart, uncertaintyStart, input, tracked()?.result));
             };
             const isPositionMove = definition.namespace === 'skills' && movementResultMethods.has(definition.name);
             const result = definition.navigationPolicy && !isPositionMove
@@ -462,7 +487,15 @@ export function createNativeSdk(bindings, config = {}) {
     return Object.freeze(Object.fromEntries(Object.entries(namespaces).map(([key, value]) => [key, Object.freeze(value)])));
 }
 
-function projectDomainResult(definition, value, context, factStart, uncertaintyStart, input) {
+// Boolean skills become {ok,status,code,reason,...}; the outcome reported at the
+// decision point wins, so a legacy true for partial work is not native success.
+function actionResult(value, outcome) {
+    if (typeof value !== 'boolean') return value;
+    if (outcome) return { ...outcome, ok: outcome.ok === true, status: outcome.status ?? (outcome.ok === true ? 'complete' : 'failed') };
+    return value ? { ok: true, status: 'complete' } : { ok: false, status: 'failed', code: 'returned_false', reason: null };
+}
+
+function projectDomainResult(definition, value, context, factStart, uncertaintyStart, input, outcome = null) {
     const facts = context?.facts.slice(factStart) ?? [];
     const uncertain = context?.uncertain.slice(uncertaintyStart) ?? [];
     const method = `${definition.namespace}.${definition.name}`;

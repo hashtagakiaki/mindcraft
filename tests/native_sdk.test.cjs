@@ -9,7 +9,7 @@ const { pathToFileURL } = require('node:url')
 const repo = path.resolve(__dirname, '..')
 
 async function main() {
-  const { createNativeSdk, getNativeSdkDocs, getNativeSdkMethodNames, getNativeSdkExecutionMetadata, NATIVE_SDK_DEFINITIONS, SdkArgumentError } =
+  const { createNativeSdk, getNativeSdkDocs, getNativeSdkMethodNames, getNativeSdkExecutionMetadata, getRetiredNativeSdkReplacement, NATIVE_SDK_DEFINITIONS, SdkArgumentError } =
     await import(pathToFileURL(path.join(repo, 'src/agent/library/native_sdk.js')))
   const calls = []
   const namespaces = {}
@@ -22,6 +22,7 @@ async function main() {
   }
   for (const name of ['craftItem', 'inspectChest', 'useToolOnBlockAt']) namespaces.skills[name] = (...args) => { calls.push({ method: `skills.${name}`, args }); return args }
   namespaces.world.getBlockAtPosition = (...args) => { calls.push({ method: 'world.getBlockAtPosition', args }); return args }
+  namespaces.world.getNearestBlocksWhere = (...args) => { calls.push({ method: 'world.getNearestBlocksWhere', args }); return args }
   for (const name of ['findRecords', 'inspectRecord', 'rememberHereRecord', 'rememberObservedAtRecord', 'rememberReportedRecord']) namespaces.places[name] = (...args) => { calls.push({ method: `places.${name}`, args }); return args }
   const botA = { username: 'A', inventory: { items: () => [{ name: 'dirt', count: 1 }] } }
   const botB = { username: 'B' }
@@ -34,7 +35,12 @@ async function main() {
   const execution = getNativeSdkExecutionMetadata()
   assert.deepEqual(docs.map(doc => doc.split('\n')[0]), methodNames)
   assert.ok(docs.every(doc => !/Signature:.*\(bot[,)]/.test(doc)))
-  assert.equal(execution['world.isEntityType'].kind, 'query')
+  assert.equal(methodNames.length, 78)
+  for (const retired of ['skills.log', 'world.isEntityType', 'world.getNearestBlock', 'world.getNearestBlocksWhere']) {
+    assert.ok(!methodNames.includes(retired), `${retired} is not model-facing`)
+    assert.ok(getRetiredNativeSdkReplacement(retired), `${retired} names its replacement`)
+  }
+  assert.equal(execution['world.getNearestBlocks'].kind, 'query')
   assert.equal(execution['places.find'].kind, 'query')
   assert.equal(execution['skills.showVillagerTrades'].kind, 'query')
   assert.equal(execution['places.verify'].kind, 'query', 'verification observations remain query data even though they refresh a saved observation record')
@@ -56,7 +62,7 @@ async function main() {
       assert.ok(!exposed.includes('skills.goToGoal'))
       assert.ok(!exposed.includes('skills.reachPositionWithScaffoldCleanup'))
       for (const internal of ['skills.craftRecipe', 'skills.inspectChestAt', 'skills.viewChest', 'skills.useToolOnBlockAt']) assert.ok(!exposed.includes(internal))
-    } else assert.deepEqual(exposed.sort(), exports.filter(name => !['world.shouldPlaceTorch', 'world.getNearbyThreats'].includes(name)).map(name => name === 'world.getBlockAtPosition' ? 'world.getBlockAtOffset' : name).sort())
+    } else assert.deepEqual(exposed.sort(), exports.filter(name => !['world.shouldPlaceTorch', 'world.getNearbyThreats', 'world.getNearestBlock', 'world.getNearestBlocksWhere', 'world.isEntityType'].includes(name)).map(name => name === 'world.getBlockAtPosition' ? 'world.getBlockAtOffset' : name).sort())
   }
 
   const invalid = (method, args, field) => {
@@ -105,7 +111,15 @@ async function main() {
 
   const predicate = entity => entity.name === 'cow'
   assert.deepEqual(sdk.world.getNearestEntityWhere({ predicate }), [botA, predicate, 16])
-  assert.deepEqual(sdk.world.isEntityType({ name: 'cow' }), ['cow'])
+  const blockPredicate = block => block.name === 'chest'
+  assert.deepEqual(sdk.world.getNearestBlocks({ predicate: blockPredicate, radius: 6, limit: 1 }), [botA, blockPredicate, 6, 1])
+  assert.equal(calls.at(-1).method, 'world.getNearestBlocksWhere', 'predicate searches keep the optimized internal predicate scan')
+  assert.deepEqual(sdk.world.getNearestBlocks({ blockTypes: ['chest'], limit: 1 }), [botA, ['chest'], 8, 1])
+  invalid(sdk.world.getNearestBlocks, [{ blockTypes: ['chest'], predicate: blockPredicate }], 'predicate')
+  invalid(sdk.world.getNearestBlocks, [{ predicate: 7 }], 'predicate')
+  assert.equal(sdk.world.getNearestBlock, undefined)
+  assert.equal(sdk.world.isEntityType, undefined)
+  assert.equal(sdk.skills.log, undefined)
   const entity = { id: 4, position: { x: 0, y: 64, z: 0 }, metadata: [] }
   assert.deepEqual(sdk.world.getVillagerProfession({ entity }), [entity])
   assert.deepEqual(await sdk.skills.attackEntity({ entity, kill: false }), [botA, entity, false])
@@ -122,10 +136,18 @@ async function main() {
     assert.equal(result[2], -1)
   }
   assert.deepEqual(await sdk.skills.putInChest({ itemName: 'oak_log', quantity: 2, chestPosition: input.position }), [botA, 'oak_log', 2, { chestPosition: input.position, details: true }])
-  assert.deepEqual(await sdk.skills.goToPlayer({ username: 'Steve' }), [botA, 'Steve', 3])
+  assert.deepEqual(await sdk.skills.goToPlayer({ playerName: 'Steve' }), [botA, 'Steve', 3])
+  invalid(sdk.skills.goToPlayer, [{ username: 'Steve' }], 'username')
+  invalid(sdk.skills.useToolOn, [{ toolName: 'bow', targetName: 'nothing' }], 'targetName')
+  assert.deepEqual(await sdk.skills.useItem({ itemName: 'bow', holdMs: 1200, position: input.position }),
+    [botA, 'bow', { hand: 'main', holdMs: 1200, position: input.position, entity: null }])
+  assert.deepEqual(await sdk.skills.useItem({ itemName: 'shield', hand: 'off' }), [botA, 'shield', { hand: 'off', holdMs: 0, position: null, entity: null }])
+  invalid(sdk.skills.useItem, [{ itemName: 'bow', position: input.position, entity }], 'entity')
+  invalid(sdk.skills.useItem, [{ itemName: 'bow', holdMs: 30001 }], 'holdMs')
+  invalid(sdk.skills.placeBlock, [{ blockType: 'stone', position: input.position, dontCheat: true }], 'dontCheat')
   assert.deepEqual(await sdk.skills.goToNearestBlock({ blockType: 'chest' }), [botA, 'chest', 2, 64])
   invalid(sdk.skills.goToNearestBlock, [{ blockType: 'chest', navigation: { allowDig: true } }], 'navigation')
-  invalid(sdk.skills.followPlayer, [{ username: 'Steve', preserveEnvironment: false }], 'preserveEnvironment')
+  invalid(sdk.skills.followPlayer, [{ playerName: 'Steve', preserveEnvironment: false }], 'preserveEnvironment')
   assert.deepEqual(sdk.skills.goToPosition({ position: input.position }), [botA, {
     position: input.position, arrivalMode: 'block', allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt', 'cobblestone'],
   }])
@@ -224,10 +246,11 @@ async function main() {
   const missing = createNativeSdk({ bot: botA })
   invalid(missing.places.find, [null], 'arguments')
   assert.throws(() => missing.places.find({ text: 'chest' }), /unavailable/)
-  const sentinel = Promise.resolve('done')
-  const asyncSdk = createNativeSdk({ bot: botA, skills: { wait: () => sentinel } })
-  assert.equal(asyncSdk.skills.wait({ milliseconds: 0 }), sentinel, 'ownership promise identity is preserved')
-  assert.equal(await asyncSdk.skills.wait({ milliseconds: 0 }), 'done')
+  const asyncSdk = createNativeSdk({ bot: botA, skills: { wait: async () => 'done', equip: async () => false, discard: async () => true } })
+  assert.equal(await asyncSdk.skills.wait({ milliseconds: 0 }), 'done', 'non-boolean action values pass through')
+  assert.deepEqual(await asyncSdk.skills.equip({ itemName: 'stone' }), { ok: false, status: 'failed', code: 'returned_false', reason: null },
+    'an untracked boolean failure becomes an explicit failed action result')
+  assert.deepEqual(await asyncSdk.skills.discard({ itemName: 'stone', quantity: 1 }), { ok: true, status: 'complete' })
   console.log(`native SDK contracts passed (${methodNames.length} methods; bot binding, docs, units, invalid input without internal calls, cross-realm objects, sync/async preservation)`)
 }
 

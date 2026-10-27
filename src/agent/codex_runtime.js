@@ -20,7 +20,7 @@ const MAX_NATIVE_INBOX_MESSAGES = 32;
 const MAX_NATIVE_DEDUPE_IDS = 256;
 const MAX_OPERATION_IMAGES = 4;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
-const NATIVE_CONTEXT_PROTOCOL = 10;
+const NATIVE_CONTEXT_PROTOCOL = 11;
 const PROCESS_RUN_ID = randomUUID();
 
 export function validateCodexRuntime(profile) {

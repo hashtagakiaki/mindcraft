@@ -278,7 +278,9 @@ async function main() {
     const nativeDocs = getNativeSdkDocs(settings)
     const nativeNames = new Set(nativeDocs.map(doc=>doc.split('\n')[0]))
     const internalOnlyNativeHelpers = new Set(['skills.goToGoal','skills.reachPositionWithScaffoldCleanup',
-      'skills.craftRecipe','skills.inspectChestAt','skills.viewChest','world.getBlockAtPosition','world.shouldPlaceTorch'])
+      'skills.craftRecipe','skills.inspectChestAt','skills.viewChest','world.getBlockAtPosition','world.shouldPlaceTorch',
+      // Retired native duplicates: log(bot, message), getNearestBlocks({predicate|blockTypes, limit}) and observed Entity names.
+      'skills.log','world.getNearestBlock','world.getNearestBlocksWhere','world.isEntityType'])
     for (const name of legacyNames) if (!internalOnlyNativeHelpers.has(name)) assert.ok(nativeNames.has(name), `native catalog preserves ${name}`)
     assert.ok(nativeDocs.every(doc=>!doc.includes('(bot,')), 'native examples use the public argument contract')
     const placeNavigationDocs = nativeDocs.filter(doc => ['places.goTo\n','places.goToAlias\n','places.tendFarm\n'].some(prefix => doc.startsWith(prefix)))
@@ -328,9 +330,9 @@ async function main() {
     agent.places.sdk.verify=async()=>({ok:true,status:'missing'})
     bot.entity.position = new Vec3(4.5,64,0.5)
     const movesBeforeAlreadyArrived=bot.state.moves.length
-    const observationFalse=await run('await Promise.resolve(); log(bot,JSON.stringify({entity:world.isEntityType({name:"dirt"})})); log(bot,JSON.stringify(await places.verify({placeId:"missing"}))); log(bot,JSON.stringify(await skills.goToPosition({position:{x:4.1,y:64,z:0.1}})));')
+    const observationFalse=await run('await Promise.resolve(); log(bot,JSON.stringify(await places.verify({placeId:"missing"}))); log(bot,JSON.stringify(await skills.goToPosition({position:{x:4.1,y:64,z:0.1}})));')
     assert.equal(observationFalse.success,true,'a false observation does not stop subsequent actions')
-    assert.match(observationFalse.message,/"entity":false/)
+    assert.match(observationFalse.message,/"status":"missing"/)
     assert.equal(bot.state.moves.length,movesBeforeAlreadyArrived,'an already satisfied destination does not start pathfinding')
     bot.state.route='unreachable'
     bot.entity.position = new Vec3(10.5,64,0.5)
