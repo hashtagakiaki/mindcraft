@@ -412,8 +412,9 @@ export function sendBotChatToServer(agentName, json) {
 }
 
 export function sendNativeBotChatToServer(agentName, json, acknowledge) {
-    if (!serverProxy.managementReady || !serverProxy.managementCredential) {
-        acknowledge?.({ accepted: false, error: 'authenticated management connection required' });
+    // The hub binds the sender identity to this registered connection in both auth modes.
+    if (!serverProxy.managementReady) {
+        acknowledge?.({ accepted: false, error: 'management connection is not ready' });
         return false;
     }
     const socket = serverProxy.getSocket();

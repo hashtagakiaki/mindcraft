@@ -5,6 +5,11 @@ import * as mc from '../utils/mcdata.js';
 import settings from './settings.js'
 
 const meleeMobs = new Set(['zombie', 'husk', 'zombie_villager', 'drowned', 'spider']);
+// Retreat only from threats that endanger the bot now; distant creepers and
+// ranged mobs that are merely visible would otherwise cancel every action.
+const CREEPER_RETREAT_DISTANCE = 7;
+const RANGED_RETREAT_DAMAGE_MS = 3000;
+const RANGED_RETREAT_HEALTH = 10;
 const failedRetreats = new WeakMap();
 const terrainRevisions = new WeakMap();
 
@@ -12,6 +17,15 @@ function encounterKey(bot, enemies) {
     const cell = p => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
     return `${cell(bot.entity.position)}:${terrainRevisions.get(bot) ?? 0}:${bot.lastDamageTime}:${bot.health}:${bot.food}:` +
         enemies.map(enemy => `${enemy.id}@${cell(enemy.position)}`).sort().join(';');
+}
+
+function imminentThreats(bot, enemies) {
+    const recentlyDamaged = Number.isFinite(bot.lastDamageTime) && Date.now() - bot.lastDamageTime <= RANGED_RETREAT_DAMAGE_MS;
+    return enemies.filter(enemy => {
+        if (enemy.name === 'creeper') return bot.entity.position.distanceTo(enemy.position) <= CREEPER_RETREAT_DISTANCE;
+        if (world.isRangedThreat(enemy)) return recentlyDamaged || bot.health < RANGED_RETREAT_HEALTH;
+        return true;
+    });
 }
 
 async function say(agent, message) {
@@ -130,13 +144,13 @@ const modes_list = [
     },
     {
         name: 'cowardice',
-        description: 'Run away from dangerous encounters; let self-defense handle unarmed ground melee enemies when healthy and able to sprint. Interrupts all actions.',
+        description: 'Run away from dangerous encounters (creepers within 7 blocks; visible ranged mobs only after recent damage or below 10 health); let self-defense handle unarmed ground melee enemies when healthy and able to sprint. Interrupts all actions.',
         interrupts: ['all'],
         on: true,
         active: false,
         update: async function (agent) {
             const bot = agent.bot;
-            const enemies = await world.getNearbyThreats(bot, 16);
+            const enemies = imminentThreats(bot, await world.getNearbyThreats(bot, 16));
             const enemy = enemies[0];
             if (!enemy) {
                 failedRetreats.delete(bot);
@@ -159,7 +173,7 @@ const modes_list = [
                         if (!await skills.avoidEnemies(bot, 24))
                             throw new Error('Retreat failed; waiting for a changed encounter or terrain before retrying.');
                     } catch (error) {
-                        failedRetreats.set(bot, encounterKey(bot, await world.getNearbyThreats(bot, 16)));
+                        failedRetreats.set(bot, encounterKey(bot, imminentThreats(bot, await world.getNearbyThreats(bot, 16))));
                         throw error;
                     }
                     failedRetreats.delete(bot);
@@ -179,7 +193,7 @@ const modes_list = [
         update: async function (agent) {
             const bot = agent.bot;
             const enemies = await world.getNearbyThreats(bot, 16);
-            if (modes_map.cowardice.on && failedRetreats.get(bot) === encounterKey(bot, enemies)) return;
+            if (modes_map.cowardice.on && failedRetreats.get(bot) === encounterKey(bot, imminentThreats(bot, enemies))) return;
             const enemy = enemies.find(enemy => bot.entity.position.distanceTo(enemy.position) <= 8);
             if (enemy) {
                 say(agent, `Fighting ${enemy.name}!`);

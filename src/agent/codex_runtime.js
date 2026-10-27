@@ -141,7 +141,7 @@ export class CodexRuntime {
             const critical = ['action_started', 'action_stop_requested', 'action_settled', 'sdk_call_started',
                 'sdk_call_rejected', 'sdk_call_result', 'sdk_call_error', 'server_confirmation',
                 'unconfirmed_change', 'bot_dig_requested', 'bot_dig_admitted', 'bot_dig_server_confirmation',
-                'bot_dig_result', 'bot_dig_error', 'bot_dig_packet', 'navigation_route_started',
+                'bot_dig_result', 'bot_dig_error', 'bot_dig_rejected', 'bot_dig_packet', 'navigation_route_started',
                 'navigation_route_settled', 'codex_request_started', 'codex_request_send_error',
                 'codex_request_timeout', 'codex_response_received', 'tool_response_sent',
                 'tool_call_interrupted', 'codex_session_interrupted', 'mode_action_triggered',
@@ -408,8 +408,8 @@ export class CodexRuntime {
             || native.receiverConnectionGeneration !== scope.connectionGeneration
             || serverProxy.connectionGeneration !== scope.connectionGeneration
             || serverProxy.serverGeneration !== native.hubGeneration
-            || !serverProxy.managementReady || !serverProxy.managementCredential) {
-            return { accepted: false, error: 'no current authenticated native task inbox' };
+            || !serverProxy.managementReady) {
+            return { accepted: false, error: 'no current native task inbox' };
         }
         return this._acceptInboxMessage({ source: 'peer', sender, message, messageId: native.id,
             dedupeKey: `peer\u0000${native.senderSpawnId}\u0000${native.senderTaskId}\u0000${native.id}`,
@@ -433,6 +433,17 @@ export class CodexRuntime {
         return this._acceptInboxMessage({ source: 'operator', sender: 'ADMIN', message,
             messageId: envelope.messageId,
             dedupeKey: `operator\u0000${scope.taskId}\u0000${envelope.messageId}` });
+    }
+
+    // Host events (e.g. death) that the running task must see on its next turn.
+    acceptSystemEvent(message) {
+        const scope = this._taskScope;
+        if (!this.active || !this.acceptingNativeInbox || !scope?.isCurrent()) {
+            return { accepted: false, error: 'no active native task inbox' };
+        }
+        const messageId = randomUUID();
+        return this._acceptInboxMessage({ source: 'system', sender: 'SYSTEM', message, messageId,
+            dedupeKey: `system\u0000${scope.taskId}\u0000${messageId}` });
     }
 
     _acceptInboxMessage({ source, sender, message, messageId, dedupeKey, metadata = {} }) {
@@ -519,7 +530,7 @@ export class CodexRuntime {
                 'finished', 'action_started', 'action_stop_requested', 'action_settled',
                 'sdk_call_started', 'sdk_call_rejected', 'sdk_call_result', 'sdk_call_error',
                 'server_confirmation', 'unconfirmed_change', 'bot_dig_requested', 'bot_dig_admitted',
-                'bot_dig_server_confirmation', 'bot_dig_result', 'bot_dig_error', 'bot_dig_packet',
+                'bot_dig_server_confirmation', 'bot_dig_result', 'bot_dig_error', 'bot_dig_rejected', 'bot_dig_packet',
                 'navigation_route_started', 'navigation_route_settled', 'codex_request_started',
                 'codex_request_send_error', 'codex_request_timeout', 'codex_response_received',
                 'tool_response_sent', 'tool_call_interrupted', 'codex_session_interrupted',
@@ -557,7 +568,9 @@ export class CodexRuntime {
             agent.history.taskDiagnosticsUnavailable = null;
             try {
                 const saved = await agent.history.save();
-                if (saved?.saved === false) record('diagnostic_checkpoint_error', { error: saved.error || saved.skipped || 'save failed' });
+                // During shutdown the final history save persists these diagnostics instead.
+                if (saved?.saved === false && !agent.history.shutdownStarted)
+                    record('diagnostic_checkpoint_error', { error: saved.error || saved.skipped || 'save failed' });
                 return saved?.saved !== false;
             } catch (error) {
                 record('diagnostic_checkpoint_error', { error: String(error) });
@@ -663,7 +676,7 @@ export class CodexRuntime {
             const currentCapabilities = () => {
                 const connected = serverProxy.managementReady && serverProxy.socket?.connected === true;
                 return { vision: !!settings.allow_vision, place_memory: !!(connected && agent.places?.isEnabled()),
-                    native_peer_messages: !!(connected && serverProxy.managementCredential && this._taskScope.isCurrent()),
+                    native_peer_messages: !!(connected && this._taskScope.isCurrent()),
                     operator_task_context: !!(connected && this._taskScope.isCurrent()),
                     max_search_radius: config.max_search_radius, execution_window_ms: config.execution_window_ms,
                     sdk_stops_on_failure: true, navigation_edits: false };

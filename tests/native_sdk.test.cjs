@@ -35,7 +35,7 @@ async function main() {
   const execution = getNativeSdkExecutionMetadata()
   assert.deepEqual(docs.map(doc => doc.split('\n')[0]), methodNames)
   assert.ok(docs.every(doc => !/Signature:.*\(bot[,)]/.test(doc)))
-  assert.equal(methodNames.length, 78)
+  assert.equal(methodNames.length, 79)
   for (const retired of ['skills.log', 'world.isEntityType', 'world.getNearestBlock', 'world.getNearestBlocksWhere']) {
     assert.ok(!methodNames.includes(retired), `${retired} is not model-facing`)
     assert.ok(getRetiredNativeSdkReplacement(retired), `${retired} names its replacement`)
@@ -62,7 +62,7 @@ async function main() {
       assert.ok(!exposed.includes('skills.goToGoal'))
       assert.ok(!exposed.includes('skills.reachPositionWithScaffoldCleanup'))
       for (const internal of ['skills.craftRecipe', 'skills.inspectChestAt', 'skills.viewChest', 'skills.useToolOnBlockAt']) assert.ok(!exposed.includes(internal))
-    } else assert.deepEqual(exposed.sort(), exports.filter(name => !['world.shouldPlaceTorch', 'world.getNearbyThreats', 'world.getNearestBlock', 'world.getNearestBlocksWhere', 'world.isEntityType'].includes(name)).map(name => name === 'world.getBlockAtPosition' ? 'world.getBlockAtOffset' : name).sort())
+    } else assert.deepEqual(exposed.sort(), exports.filter(name => !['world.shouldPlaceTorch', 'world.getNearbyThreats', 'world.isRangedThreat', 'world.getNearestBlock', 'world.getNearestBlocksWhere', 'world.isEntityType'].includes(name)).map(name => name === 'world.getBlockAtPosition' ? 'world.getBlockAtOffset' : name).sort())
   }
 
   const invalid = (method, args, field) => {

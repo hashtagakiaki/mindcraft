@@ -202,6 +202,14 @@ function installStopContract (bot, state) {
   })
 }
 
+function excludePathBreak (bot, position) {
+  const movements = bot.pathfinder?.movements
+  if (!Array.isArray(movements?.exclusionAreasBreak)) return
+  const target = { x: position.x, y: position.y, z: position.z }
+  movements.exclusionAreasBreak.push(block => block.position.x === target.x && block.position.y === target.y &&
+    block.position.z === target.z ? Infinity : 0)
+}
+
 function installDigContract (bot, state, options) {
   // Share the same surface admission as SDK approach/goals. Native's center
   // distance can reject a reachable corner before any digging packet is sent.
@@ -291,7 +299,7 @@ function installDigContract (bot, state, options) {
         origin, target: block?.position && { x: block.position.x, y: block.position.y, z: block.position.z },
         block: block?.name ?? null, ...detail }
       const critical = ['bot_dig_requested', 'bot_dig_admitted', 'bot_dig_server_confirmation',
-        'bot_dig_result', 'bot_dig_error', 'bot_dig_packet'].includes(type)
+        'bot_dig_result', 'bot_dig_error', 'bot_dig_rejected', 'bot_dig_packet'].includes(type)
       if (owner?.taskRecord) return owner.taskRecord(type, payload)
       try { return bot._mindcraftDiagnosticRecord?.(type, payload) }
       catch (error) { if (critical) throw error; return false }
@@ -311,10 +319,17 @@ function installDigContract (bot, state, options) {
     if (bot.interrupt_code) throw new Error('Digging aborted by interrupt')
     const ignoreLook = forceLook === 'ignore'
     const interaction = digInteraction(bot, block, ignoreLook)
-    if (!bot.canDigBlock(block)) throw new Error(`Block is not diggable: ${block.position}`)
+    const reject = reason => {
+      record('bot_dig_rejected', { reason })
+      // The pathfinder retries a rejected break every tick after resetting its
+      // path; exclude the block so the next plan routes around it instead.
+      if (origin === 'unattributed' || origin === 'navigation') excludePathBreak(bot, block.position)
+      return new Error(reason)
+    }
+    if (!bot.canDigBlock(block)) throw reject(`Block is not diggable: ${block.position}`)
 
     const expectedDigMs = bot.digTime(block)
-    if (!Number.isFinite(expectedDigMs)) throw new Error(`Cannot dig ${block.name} with the current tool`)
+    if (!Number.isFinite(expectedDigMs)) throw reject(`Cannot dig ${block.name} with the current tool`)
     const held = bot.heldItem
     record('bot_dig_admitted', { expectedDigMs, heldTool: held ? { name: held.name, durabilityUsed: held.durabilityUsed ?? null,
       maxDurability: held.maxDurability ?? null } : null, health: Number.isFinite(bot.health) ? bot.health : null,

@@ -162,6 +162,7 @@ async function setupNavigationFixture(root) {
   await write(root, 'src/agent/library/navigation_policy.js', await readFile(path.join(repo, 'src/agent/library/navigation_policy.js')))
   await write(root, 'src/agent/library/operation_context.js', await readFile(path.join(repo, 'src/agent/library/operation_context.js')))
   await write(root, 'src/agent/library/crafting_sync.js', await readFile(path.join(repo, 'src/agent/library/crafting_sync.js')))
+  await write(root, 'src/agent/library/item_handoff.js', await readFile(path.join(repo, 'src/agent/library/item_handoff.js')))
   await write(root, 'src/utils/mcdata.js', 'export function mustCollectManually(name) { return name === "wheat"; } export function isHostile(entity) { return entity?.type === "hostile"; } export function getBlockId() { return 1; } export function getItemId(name) { return ({ oak_log: 1, oak_planks: 36, crafting_table: 300, wooden_pickaxe: 820, stone_pickaxe: 825, stick: 848 })[name] ?? null; } export function getItemCraftingRecipes(name) { return name === "oak_planks" || name === "stone_pickaxe" ? [[{}]] : []; } export function ingredientsFromPrismarineRecipe(recipe) { return recipe.requiredItems || {}; } export function calculateLimitingResource() { return { num: 1, limitingResource: "cobblestone" }; }')
   await write(root, 'src/agent/library/world.js', `
 export function getNearestBlock(bot) { return bot.navigation.block || null; }
@@ -275,6 +276,48 @@ async function testNavigation(root) {
   bot.inventory.findInventoryItem = () => ({ type: 1, count: 1 })
   assert.equal(await skills.giveToPlayer(bot, 'log', 'player'), false)
   assert.equal(bot.tossCalls, 0, 'item is not tossed after moving away is rejected')
+
+  // Bot-to-bot handoff: both sides negotiate timing over linked handoff channels.
+  const { createItemHandoff } = await import(pathToFileURL(path.join(root, 'src/agent/library/item_handoff.js')))
+  const makeHandoffPair = () => {
+    const channels = {}
+    for (const [self, peer] of [['giver', 'receiver'], ['receiver', 'giver']])
+      channels[self] = createItemHandoff({ isPeer: name => name === peer,
+        send: (to, signal) => setTimeout(() => channels[to].deliver(self, structuredClone(signal)), 1) })
+    return channels
+  }
+  const makeHandoffBot = (name, peer, count, channel) => {
+    const items = count ? [{ name: 'oak_log', type: 1, count }] : []
+    const position = { x: name === 'giver' ? 0 : 3, y: 0, z: 0 }
+    Object.assign(position, { offset: () => position, distanceTo: other => Math.abs(position.x - other.x) })
+    return { username: name, output: '', itemHandoff: channel, interrupt_code: null, entity: { position, height: 1.6 },
+      players: { [peer]: { entity: { position: { x: name === 'giver' ? 3 : 0, y: 0, z: 0, offset() { return this } }, height: 1.6 } } },
+      modes: { isOn: mode => mode === 'cheat', pause() {}, unpause() {} }, chat() {}, async lookAt() {}, on() {}, removeListener() {},
+      nearestEntity: () => null, inventory: { items: () => items, findInventoryItem: itemName => items.find(item => item.name === itemName && item.count > 0) || null },
+      tossed: 0, async toss(_type, _meta, amount) { items[0].count -= amount; this.tossed += amount; this.onToss?.(amount) } }
+  }
+  for (const receiverFirst of [true, false]) {
+    const channels = makeHandoffPair()
+    const giver = makeHandoffBot('giver', 'receiver', 5, channels.giver)
+    const receiver = makeHandoffBot('receiver', 'giver', 0, channels.receiver)
+    giver.onToss = amount => setTimeout(() => receiver.inventory.items().push({ name: 'oak_log', type: 1, count: amount }), 5)
+    const receiving = receiverFirst ? skills.receiveFromPlayer(receiver, 'oak_log', 'giver', 3, 5000) : null
+    await delay(receiverFirst ? 30 : 0)
+    const giving = skills.giveToPlayer(giver, 'oak_log', 'receiver', 3, 5000)
+    await delay(receiverFirst ? 0 : 30)
+    const [given, received] = await Promise.all([giving, receiving ?? skills.receiveFromPlayer(receiver, 'oak_log', 'giver', 3, 5000)])
+    assert.equal(given, true, `giver completes when receiver ${receiverFirst ? 'starts first' : 'starts later'}`)
+    assert.equal(received, true, `receiver completes when it ${receiverFirst ? 'starts first' : 'starts later'}`)
+    assert.equal(giver.tossed, 3, 'giver throws only the requested quantity')
+  }
+  {
+    const channels = makeHandoffPair()
+    const giver = makeHandoffBot('giver', 'receiver', 5, channels.giver)
+    assert.equal(await skills.giveToPlayer(giver, 'oak_log', 'receiver', 1, 50), false, 'giver stops when the receiving bot never starts')
+    assert.equal(giver.tossed, 0, 'nothing is thrown without a ready receiver')
+    const receiver = makeHandoffBot('receiver', 'giver', 0, channels.receiver)
+    assert.equal(await skills.receiveFromPlayer(receiver, 'oak_log', 'giver', 1, 50), false, 'receiver stops when the giving bot never starts')
+  }
   bot = makeBot()
   bot.findBlocks = () => []
   assert.equal(await skills.goToBed(bot), false)
@@ -283,6 +326,12 @@ async function testNavigation(root) {
   bot.sleep = async () => { bot.slept = true }
   assert.equal(await skills.goToBed(bot), false)
   assert.equal(bot.slept, false, 'bed is not used after failed navigation')
+  bot = makeBot()
+  bot.sleep = async () => { bot.isSleeping = true; setTimeout(() => { bot.interrupt_code = true }, 10) }
+  bot.wake = async () => { bot.woke = true; bot.isSleeping = false }
+  assert.equal(await skills.goToBed(bot), false, 'an interrupted sleep fails instead of waiting for morning')
+  assert.equal(bot.woke, true, 'the bot leaves the bed when its action is cancelled')
+  assert.match(bot.output, /Sleeping was interrupted/)
 
   bot = makeBot({ reject: true })
   assert.equal(await skills.goToNearestBlock(bot, 'chest'), false, 'rejected pathfinding resolves to navigation failure')

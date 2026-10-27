@@ -444,6 +444,13 @@ export async function isClearPath(bot, target) {
 
 // Threat admission is deliberately terrain-only: mobs cannot build the bot's
 // inventory scaffolds, and a route down to a mob is not a route up to the bot.
+const RANGED_THREATS = new Set(['skeleton', 'stray', 'bogged', 'pillager', 'witch', 'blaze',
+    'ghast', 'phantom', 'vex', 'wither', 'ender_dragon', 'guardian', 'elder_guardian', 'shulker']);
+
+export function isRangedThreat(enemy) {
+    return RANGED_THREATS.has(enemy?.name) || enemy?.heldItem?.name === 'trident';
+}
+
 export async function getNearbyThreats(bot, distance=16) {
     const threats = [];
     const movements = new pf.Movements(bot);
@@ -455,10 +462,7 @@ export async function getNearbyThreats(bot, distance=16) {
     for (const enemy of getNearbyEntities(bot, distance).filter(mc.isHostile)) {
         // Ranged/flying threats can attack across a gap without a walking
         // route. Unknown blocks do not establish a clear firing line.
-        const ranged = ['skeleton', 'stray', 'bogged', 'pillager', 'witch', 'blaze',
-            'ghast', 'phantom', 'vex', 'wither', 'ender_dragon', 'guardian',
-            'elder_guardian', 'shulker'].includes(enemy.name) || enemy.heldItem?.name === 'trident';
-        if (ranged && hasThreatSight(bot, enemy)) {
+        if (isRangedThreat(enemy) && hasThreatSight(bot, enemy)) {
             threats.push(enemy);
             continue;
         }

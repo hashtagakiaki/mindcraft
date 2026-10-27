@@ -315,9 +315,13 @@ export function createMindServer(host_public = false, port = 8080) {
             if (json?.nativeMessage) {
                 const native = json.nativeMessage;
                 const identity = socket.data.identity;
-                if (!protectedMode || identity?.role !== 'bot' || !identity.spawnId
-                    || agent_connections[identity.agentName]?.socket !== socket
-                    || agent_connections[identity.agentName]?.connectionGeneration !== native.senderConnectionGeneration
+                // Protected mode names the sender from its bot credential; legacy mode from
+                // the registered agent socket, so other legacy clients cannot pose as a bot.
+                const senderAgent = protectedMode
+                    ? (identity?.role === 'bot' && identity.spawnId ? identity.agentName : null)
+                    : Object.keys(agent_connections).find(name => agent_connections[name].socket === socket) ?? null;
+                if (!senderAgent || agent_connections[senderAgent]?.socket !== socket
+                    || agent_connections[senderAgent]?.connectionGeneration !== native.senderConnectionGeneration
                     || !allowedBot(receiver, agentName) || agent_connections[agentName].socket !== receiver
                     || typeof native.id !== 'string' || !native.id
                     || typeof native.senderTaskId !== 'string' || !native.senderTaskId
@@ -327,10 +331,11 @@ export function createMindServer(host_public = false, port = 8080) {
                     acknowledge?.({ accepted: false, error: 'native peer identity or task scope is invalid' });
                     return;
                 }
-                const routed = { ...json, nativeMessage: { ...native, senderAgent: identity.agentName,
-                    senderSpawnId: identity.spawnId, receiverConnectionGeneration: agent_connections[agentName].connectionGeneration,
+                const routed = { ...json, nativeMessage: { ...native, senderAgent,
+                    senderSpawnId: protectedMode ? identity.spawnId : `legacy:${senderAgent}`,
+                    receiverConnectionGeneration: agent_connections[agentName].connectionGeneration,
                     hubGeneration: managementGeneration } };
-                receiver.emit('chat-message', sender, routed, result => {
+                receiver.emit('chat-message', senderAgent, routed, result => {
                     if (result?.accepted === true && result.messageId === native.id && result.taskId === native.senderTaskId)
                         acknowledge?.({ accepted: true, messageId: native.id, taskId: native.senderTaskId,
                             receiverTaskId: result.receiverTaskId ?? null });

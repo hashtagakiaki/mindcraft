@@ -184,6 +184,21 @@ function setOwnValue(record, key, value) {
     Object.defineProperty(record, key, { value, enumerable: true, configurable: true, writable: true });
 }
 
+async function removeOwnerlessLock(lockPath) {
+    let pid;
+    try { pid = JSON.parse(await readFile(lockPath, 'utf8')).pid; }
+    catch { return false; }
+    if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+    try {
+        process.kill(pid, 0);
+        return false;
+    } catch (error) {
+        if (error.code !== 'ESRCH') return false;
+    }
+    await unlink(lockPath);
+    return true;
+}
+
 export class PlaceStore {
     constructor({ stateDir, worldId, lockHandle, lockToken, lockPath, filePath, document }) {
         this.stateDir = stateDir;
@@ -210,7 +225,14 @@ export class PlaceStore {
         let lockHandle;
         let lockCreated = false;
         try {
-            lockHandle = await open(lockPath, 'wx', 0o600);
+            try {
+                lockHandle = await open(lockPath, 'wx', 0o600);
+            } catch (error) {
+                // A crashed writer leaves its lock behind; reclaim it only after
+                // confirming that the recorded owner process no longer exists.
+                if (error.code !== 'EEXIST' || !await removeOwnerlessLock(lockPath)) throw error;
+                lockHandle = await open(lockPath, 'wx', 0o600);
+            }
             lockCreated = true;
             await lockHandle.writeFile(JSON.stringify({ pid: process.pid, token: lockToken, worldId: normalizedWorldId }));
             await lockHandle.sync();

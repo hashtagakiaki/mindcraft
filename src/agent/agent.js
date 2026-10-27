@@ -496,6 +496,7 @@ export class Agent {
         if (this._shutdownStarted || !(await this.waitForManagementReady())) return;
         if (this._shutdownStarted) return;
         this.bot = initBot(this.name);
+        this.bot.itemHandoff = convoManager.itemHandoff;
         Object.defineProperty(this.bot, 'inventoryUnconfirmed', {
             configurable: true,
             enumerable: false,
@@ -649,20 +650,18 @@ export class Agent {
 
                 this.shut_up = false;
 
+                // Other bots' public chat (e.g. mode narration) is not an instruction.
+                if (convoManager.isOtherAgent(username)) return;
+
                 console.log(this.name, 'received message from', username, ':', message);
 
-                if (convoManager.isOtherAgent(username)) {
-                    console.warn('received whisper from other bot??')
+                if (preserveStopCommand) {
+                    await this.handleMessage(username, message, null, { recipients, ...metadata, onAccepted, intentReservation });
+                    return;
                 }
-                else {
-                    if (preserveStopCommand) {
-                        await this.handleMessage(username, message, null, { recipients, ...metadata, onAccepted, intentReservation });
-                        return;
-                    }
-                    let translation = await handleEnglishTranslation(message);
-                    if (this._shutdownStarted || managementPausedAtReceipt || managementGeneration !== (this._managementGeneration || 0)) return;
-                    await this.handleMessage(username, translation, null, { recipients, ...metadata, onAccepted, intentReservation });
-                }
+                let translation = await handleEnglishTranslation(message);
+                if (this._shutdownStarted || managementPausedAtReceipt || managementGeneration !== (this._managementGeneration || 0)) return;
+                await this.handleMessage(username, translation, null, { recipients, ...metadata, onAccepted, intentReservation });
             } catch (error) {
                 console.error('Error handling message:', error);
             } finally {
@@ -1348,7 +1347,12 @@ export class Agent {
                     death_pos_text = `x: ${death_pos.x.toFixed(2)}, y: ${death_pos.y.toFixed(2)}, z: ${death_pos.z.toFixed(2)}`;
                 }
                 let dimension = this.bot.game.dimension;
-                this.handleMessage('system', `You died at position ${death_pos_text || "unknown"} in the ${dimension} dimension with the final message: '${message}'. ${deathPlaceSaved ? "Your place of death is saved as 'last_death_position' if you want to return." : 'The death location could not be confirmed or saved.'} Previous actions were stopped and you have respawned.`);
+                const deathReport = `You died at position ${death_pos_text || "unknown"} in the ${dimension} dimension with the final message: '${message}'. ${deathPlaceSaved ? "Your place of death is saved as 'last_death_position' if you want to return." : 'The death location could not be confirmed or saved.'} Previous actions were stopped and you have respawned.`;
+                // A running native task keeps its turn loop; deliver the death into its inbox instead.
+                if (this.codexRuntime?.active) {
+                    const delivered = this.codexRuntime.acceptSystemEvent(deathReport);
+                    if (!delivered.accepted) console.warn(`Death report was not delivered to the native task: ${delivered.error}`);
+                } else this.handleMessage('system', deathReport);
             }
         });
         this.bot.on('idle', () => {

@@ -407,6 +407,8 @@ for (let batch = 0; batch < 10; batch++) {
           assert.equal(nativeRuntime.acceptOperatorContext('different facts', contextEnvelope).accepted, false,
             'the same message ID cannot be reused with different content')
           assert.equal(nativeRuntime.acceptOperatorContext('wrong task', { ...contextEnvelope, taskId: 'another-task' }).accepted, false)
+          assert.equal(nativeRuntime.acceptSystemEvent('You died at position x: 1 and have respawned.').accepted, true,
+            'host events such as death enter the running task inbox')
           for (let index = nativeRuntime.seenNativeMessageIds.size; index < 256; index++) nativeRuntime.seenNativeMessageIds.set(`filled-${index}`, 'fixture-hash')
           const oldAfterCapacity = nativeRuntime.acceptPeerMessage('PeerReceiver', 'please inspect the chest', native,
             { connectionGeneration: 5 })
@@ -429,6 +431,8 @@ for (let batch = 0; batch < 10; batch++) {
       'an accepted peer message appears once at the following native turn')
     assert.equal(peerInputs.filter(input => input.includes('iron stock increased at the shared base')).length, 1,
       'operator context is delivered once without replacing the current task')
+    assert.equal(peerInputs.filter(input => input.includes('system from SYSTEM') && input.includes('You died at position')).length, 1,
+      'a death report reaches the next native turn once')
     assert.equal(peerInputs[1].includes('sender task other-task'), true, 'sender task identity is distinct from receiver task')
     assert.equal(peerAgent.currentTaskId, 'peer-sender-task')
     const invalidatedAgent = makeAgent('NativeInboxInvalidation')
@@ -1743,11 +1747,11 @@ Agent.prototype.start = async function() {
     assert.ok(nextTask.budget.remainingMs <= firstTask.budget.remainingMs)
     assert.match(inputs[0], /"native_peer_messages":false/)
     assert.deepEqual(JSON.parse(resumedRequest), acceptedRequest, 'resumed decisions retain the accepted goal even when later history changes')
-    // Capabilities follow effective connection/authentication, including legacy management.
+    // Capabilities follow the effective connection; legacy management also carries peer messages.
     const capabilityProxy = { socket: serverProxy.socket, managementReady: serverProxy.managementReady,
       managementCredential: serverProxy.managementCredential }
     for (const scenario of [
-      { connected: true, ready: true, authenticated: false, places: true, expectedPeer: false, expectedPlaces: true, expectedContext: true },
+      { connected: true, ready: true, authenticated: false, places: true, expectedPeer: true, expectedPlaces: true, expectedContext: true },
       { connected: true, ready: true, authenticated: true, places: true, expectedPeer: true, expectedPlaces: true, expectedContext: true },
       { connected: false, ready: true, authenticated: true, places: true, expectedPeer: false, expectedPlaces: false, expectedContext: false },
       { connected: true, ready: false, authenticated: true, places: true, expectedPeer: false, expectedPlaces: false, expectedContext: false },

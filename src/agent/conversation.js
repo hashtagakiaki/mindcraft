@@ -2,6 +2,7 @@ import settings from './settings.js';
 import { containsCommand } from './commands/index.js';
 import { randomUUID } from 'node:crypto';
 import { sendBotChatToServer, sendNativeBotChatToServer } from './mindserver_proxy.js';
+import { createItemHandoff } from './library/item_handoff.js';
 
 let agent;
 let agent_names = [];
@@ -51,6 +52,10 @@ class ConversationManager {
         this.awaiting_response = false;
         this.connection_timeout = null;
         this.wait_time_limit = WAIT_TIME_START;
+        this.itemHandoff = createItemHandoff({
+            send: (to, handoff) => sendBotChatToServer(to, { handoff }),
+            isPeer: name => this.otherAgentInGame(name),
+        });
     }
 
     initAgent(a) {
@@ -202,11 +207,15 @@ class ConversationManager {
                 finish(null, { accepted: true, messageId, senderTaskId: scope.taskId,
                     receiverTaskId: result.receiverTaskId ?? null, acceptance: 'receiver-inbox' });
             });
-            if (!sent) finish(new Error('Authenticated management connection is unavailable'));
+            if (!sent) finish(new Error('Management connection is unavailable'));
         });
     }
 
     async receiveFromBot(sender, received, scope = {}) {
+        if (received?.handoff) {
+            if (this.isOtherAgent(sender)) this.itemHandoff.deliver(sender, received.handoff);
+            return;
+        }
         if (received?.nativeMessage) {
             const native = received.nativeMessage;
             if (native.senderAgent !== sender || typeof native.senderSpawnId !== 'string'

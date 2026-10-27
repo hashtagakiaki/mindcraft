@@ -26,7 +26,7 @@ async function makeModeFixture() {
   await writeFile(path.join(agentDir, 'modes.js'), await readFile(path.join(__dirname, '../src/agent/modes.js')))
   await writeFile(path.join(agentDir, 'settings.js'), 'export default { narrate_behavior: false }\n')
   await writeFile(path.join(agentDir, 'library/skills.js'), 'export async function moveAway(bot, distance) { bot.fixtureMoves.push(distance); if (bot.fixtureMoveError) throw bot.fixtureMoveError } export async function defendSelf() {} export async function avoidEnemies(bot) { return bot.fixtureRetreatResult ?? true }\n')
-  await writeFile(path.join(agentDir, 'library/world.js'), 'export function getNearestBlock() { return null } export function getNearbyEntities(bot) { return bot.fixtureEnemies || [] } export async function getNearbyThreats(bot) { return getNearbyEntities(bot).filter(e => !e.blocked) } export function getNearestEntityWhere(bot, predicate) { return getNearbyEntities(bot).find(predicate) } export async function isClearPath() { return true }\n')
+  await writeFile(path.join(agentDir, 'library/world.js'), 'export function getNearestBlock() { return null } export function getNearbyEntities(bot) { return bot.fixtureEnemies || [] } export async function getNearbyThreats(bot) { return getNearbyEntities(bot).filter(e => !e.blocked) } export function getNearestEntityWhere(bot, predicate) { return getNearbyEntities(bot).find(predicate) } export async function isClearPath() { return true } export function isRangedThreat(e) { return [\'skeleton\'].includes(e.name) || e.heldItem?.name === \'trident\' }\n')
   await writeFile(path.join(root, 'src/utils/mcdata.js'), 'export function isHostile(entity) { return entity.type === "hostile" }; export function isHuntable() { return false }\n')
   const { initModes } = await import(pathToFileURL(path.join(agentDir, 'modes.js')))
   const position = vector()
@@ -138,19 +138,21 @@ async function testSingleMeleeDefenseBeforeFlight() {
   const scenarios = [
     { name: 'unarmed adult zombie', expected: 'self_defense' },
     { name: 'blocked skeleton does not force escape from reachable melee', enemies: [{ ...zombie, id: 2, name: 'skeleton', blocked: true }, zombie], expected: 'self_defense' },
-    { name: 'blocked nearest enemy does not mask a reachable threat', enemies: [{ ...zombie, blocked: true }, { ...zombie, id: 2, name: 'skeleton' }], expected: 'cowardice' },
+    { name: 'blocked nearest enemy does not mask a reachable threat', enemies: [{ ...zombie, blocked: true }, { ...zombie, id: 2, name: 'skeleton' }], damaged: true, expected: 'cowardice' },
     { name: 'low health', health: 9.5, expected: 'cowardice' },
     { name: 'cannot sprint', food: 6, expected: 'cowardice' },
     { name: 'baby zombie', enemies: [{ ...zombie, metadata: { 16: true } }], expected: 'self_defense' },
     { name: 'adult flag omitted at its protocol default', enemies: [{ ...zombie, metadata: {} }], expected: 'self_defense' },
     { name: 'age metadata is not required', enemies: [{ ...zombie, metadata: undefined }], expected: 'self_defense' },
     ...['husk', 'zombie_villager', 'drowned', 'spider'].map(name => ({ name, enemies: [{ ...zombie, name }], expected: 'self_defense' })),
-    { name: 'ranged drowned', enemies: [{ ...zombie, name: 'drowned', heldItem: { name: 'trident' } }], expected: 'cowardice' },
+    { name: 'ranged drowned', enemies: [{ ...zombie, name: 'drowned', heldItem: { name: 'trident' } }], damaged: true, expected: 'cowardice' },
     { name: 'armed zombie', enemies: [{ ...zombie, heldItem: { name: 'iron_sword' } }], expected: 'cowardice' },
     { name: 'swimming bot', swimming: true, expected: 'cowardice' },
     { name: 'enemy in water', block: { name: 'water' }, expected: 'cowardice' },
     { name: 'target terrain unknown', block: null, expected: 'cowardice' },
-    { name: 'ranged skeleton', enemies: [{ ...zombie, name: 'skeleton' }], expected: 'cowardice' },
+    { name: 'ranged skeleton after recent damage', enemies: [{ ...zombie, name: 'skeleton' }], damaged: true, expected: 'cowardice' },
+    { name: 'ranged skeleton at low health', health: 9.5, enemies: [{ ...zombie, name: 'skeleton' }], expected: 'cowardice' },
+    { name: 'undamaged bot fights a close ranged mob instead of fleeing', enemies: [{ ...zombie, name: 'skeleton' }], expected: 'self_defense' },
     { name: 'creeper', enemies: [{ ...zombie, name: 'creeper' }], expected: 'cowardice' },
     { name: 'multiple enemies', enemies: [zombie, { ...zombie, id: 2 }], expected: 'cowardice' },
     { name: 'healthy pair', health: 20, enemies: [zombie, { ...zombie, id: 2 }], expected: 'self_defense' },
@@ -158,7 +160,8 @@ async function testSingleMeleeDefenseBeforeFlight() {
     { name: 'four opponents', health: 20, enemies: [1, 2, 3, 4].map(id => ({ ...zombie, id })), expected: 'cowardice' },
     { name: 'mixed melee pair', health: 20, enemies: [zombie, { ...zombie, id: 2, name: 'spider' }], expected: 'self_defense' },
     { name: 'poison mixed into a group', health: 20, enemies: [zombie, { ...zombie, id: 2, name: 'cave_spider' }], expected: 'cowardice' },
-    { name: 'ranged mixed into a group', health: 20, enemies: [zombie, { ...zombie, id: 2, name: 'skeleton' }], expected: 'cowardice' },
+    { name: 'ranged mixed into a group after recent damage', health: 20, enemies: [zombie, { ...zombie, id: 2, name: 'skeleton' }], damaged: true, expected: 'cowardice' },
+    { name: 'undamaged ranged mob does not stop defense against melee', health: 20, enemies: [zombie, { ...zombie, id: 2, name: 'skeleton' }], expected: 'self_defense' },
     { name: 'defense off', defense: false, expected: 'cowardice' },
     { name: 'defense paused by a skill', paused: true, expected: 'cowardice' }
   ]
@@ -167,7 +170,7 @@ async function testSingleMeleeDefenseBeforeFlight() {
     try {
       const { agent } = fixture
       Object.assign(agent.bot, { health: scenario.health ?? 10, food: scenario.food ?? 7,
-        fixtureEnemies: scenario.enemies ?? [zombie] })
+        fixtureEnemies: scenario.enemies ?? [zombie], lastDamageTime: scenario.damaged ? Date.now() : 0 })
       agent.bot.entity.isInWater = scenario.swimming ?? false
       agent.bot.blockAt = () => Object.hasOwn(scenario, 'block') ? scenario.block : { name: 'air' }
       agent.bot.modes.loadJson({ cowardice: true, self_defense: scenario.defense ?? true })

@@ -294,6 +294,41 @@ export async function shutdown(request) { return closeHandler?.(request) }
     process.env.MINDCRAFT_SESSION_FILE = path.join(publicLink, 'session.json')
     assert.throws(() => module.createMindServer(false, 0), /static root/, 'symlinked session parent cannot place credentials under static files')
     await assert.rejects(stat(path.join(publicRoot, 'session.json')), { code: 'ENOENT' })
+
+    // Legacy management carries native peer messages between registered bot sockets only.
+    sourceSettings.management_auth_mode = 'legacy'
+    delete process.env.MINDCRAFT_SESSION_FILE
+    const legacyModule = await import(pathToFileURL(path.join(root, 'src/mindcraft/mindserver.js')).href + '?legacy')
+    server = legacyModule.createMindServer(false, 0)
+    await new Promise((resolve, reject) => { server.once('listening', resolve); server.once('error', reject) })
+    const legacyUrl = `http://localhost:${server.address().port}`
+    legacyModule.registerAgent({ profile: { name: 'botA' }, host: 'localhost', port: 1 }, null)
+    legacyModule.registerAgent({ profile: { name: 'botB' }, host: 'localhost', port: 1 }, null)
+    const legacyA = await connect(legacyUrl), legacyB = await connect(legacyUrl), outsider = await connect(legacyUrl)
+    clients.push(legacyA, legacyB, outsider)
+    assert.equal((await ack(legacyA, 'connect-agent-process', 'botA', { connectionGeneration: 5 })).accepted, true)
+    assert.equal((await ack(legacyB, 'connect-agent-process', 'botB', { connectionGeneration: 9 })).accepted, true)
+    let legacyChat
+    legacyB.on('chat-message', (sender, json, acknowledge) => {
+      legacyChat = { sender, json }
+      acknowledge?.({ accepted: true, messageId: json.nativeMessage.id, taskId: json.nativeMessage.senderTaskId, receiverTaskId: 'botB-task' })
+    })
+    const legacyNative = { id: 'legacy-message-1', senderTaskId: 'botA-task', senderActionId: 'action-1',
+      senderConnectionGeneration: 5, senderManagementGeneration: 1 }
+    assert.deepEqual(await ack(legacyA, 'chat-message', 'botB', { message: 'legacy hello', nativeMessage: legacyNative }),
+      { accepted: true, messageId: 'legacy-message-1', taskId: 'botA-task', receiverTaskId: 'botB-task' },
+      'a registered legacy bot can deliver a native peer message')
+    assert.equal(legacyChat.sender, 'botA')
+    assert.equal(legacyChat.json.nativeMessage.senderAgent, 'botA', 'legacy sender identity comes from the registered socket')
+    assert.equal(legacyChat.json.nativeMessage.senderSpawnId, 'legacy:botA')
+    assert.equal(legacyChat.json.nativeMessage.receiverConnectionGeneration, 9)
+    legacyChat = null
+    assert.equal((await ack(outsider, 'chat-message', 'botB', { message: 'spoof', nativeMessage: { ...legacyNative, id: 'spoof' } })).accepted, false,
+      'an unregistered legacy client cannot send native peer messages')
+    assert.equal(legacyChat, null)
+    for (const client of clients) client.disconnect()
+    clients = []
+    await new Promise(resolve => server.close(resolve))
     process.stdout.write('management_auth.test.cjs: all assertions passed\n')
   } finally {
     console.log = previousLog

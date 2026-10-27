@@ -2294,13 +2294,14 @@ export async function consume(bot, itemName="") {
 }
 
 
-export async function giveToPlayer(bot, itemType, username, num=1) {
+export async function giveToPlayer(bot, itemType, username, num=1, timeoutMs=30000) {
     /**
      * Give one of the specified item to the specified player
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {string} itemType, the name of the item to give.
      * @param {string} username, the username of the player to give the item to.
      * @param {number} num, the number of items to give. Defaults to 1.
+     * @param {number} timeoutMs, how long to wait for a receiving bot to call receiveFromPlayer.
      * @returns {Promise<boolean>} true if the item was given, false otherwise.
      * @example
      * await skills.giveToPlayer(bot, "oak_log", "player1");
@@ -2312,6 +2313,21 @@ export async function giveToPlayer(bot, itemType, username, num=1) {
     if (!player) {
         return failSkill(bot, 'target_not_found', `Could not find ${username}.`, { playerName: username });
     }
+    if (!bot.itemHandoff?.isPeer(username)) return await throwToPlayer(bot, itemType, username, num, player, null);
+    // Another bot receives only while it runs receiveFromPlayer; wait for its ready signal.
+    const ready = await bot.itemHandoff.waitFor(bot, username, signal => signal.type === 'ready' && signal.itemName === itemType, timeoutMs);
+    if (!ready) return failSkill(bot, 'receiver_not_ready', `${username} did not start receiveFromPlayer for ${itemType} within ${timeoutMs}ms.`,
+        { itemName: itemType, playerName: username, unit: 'item', requestedQuantity: num, confirmedQuantity: 0, remainingQuantity: num });
+    const handoff = { id: ready.id, doneSent: false };
+    bot.itemHandoff.send(username, { type: 'giving', id: handoff.id });
+    try {
+        return await throwToPlayer(bot, itemType, username, num, player, handoff);
+    } finally {
+        if (!handoff.doneSent) bot.itemHandoff.send(username, { type: 'cancel', id: handoff.id });
+    }
+}
+
+async function throwToPlayer(bot, itemType, username, num, player, handoff) {
     if (!await goToPlayer(bot, username, 3)) return false;
     // if we are 2 below the player
     if (bot.entity.position.y < player.position.y - 1) {
@@ -2358,8 +2374,15 @@ export async function giveToPlayer(bot, itemType, username, num=1) {
     try {
         if (!await discard(bot, itemType, num)) return false;
         const tossed = Math.max(0, before - inventoryItemCount(bot, itemType));
+        if (handoff) {
+            // The receiving bot reports its own inventory increase.
+            bot.itemHandoff.send(username, { type: 'done', id: handoff.id, quantity: tossed });
+            handoff.doneSent = true;
+            const receipt = await bot.itemHandoff.waitFor(bot, username, signal => signal.type === 'received' && signal.id === handoff.id, 10000);
+            received = receipt?.quantity ?? 0;
+        }
         const start = Date.now();
-        while (received < tossed && !bot.interrupt_code && Date.now() - start <= 3000) {
+        while (!handoff && received < tossed && !bot.interrupt_code && Date.now() - start <= 3000) {
             await new Promise(resolve => setTimeout(resolve, 100));
         }
         const quantities = { itemName: itemType, playerName: username, unit: 'item', requestedQuantity: num,
@@ -2372,6 +2395,76 @@ export async function giveToPlayer(bot, itemType, username, num=1) {
     } finally {
         bot.removeListener('playerCollect', onCollect);
     }
+}
+
+export async function receiveFromPlayer(bot, itemType, username, num=1, timeoutMs=30000) {
+    /**
+     * Receive items another player or bot gives with skills.giveToPlayer.
+     * With another bot, both sides negotiate timing: whichever call starts first waits for the other.
+     * Collects dropped items of the given type and confirms by inventory increase.
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @param {string} itemType, the name of the item expected.
+     * @param {string} username, the giver.
+     * @param {number} num, the number of items expected. Defaults to 1.
+     * @param {number} timeoutMs, how long to wait for the giver and the items.
+     * @returns {Promise<boolean>} true if all requested items arrived, false otherwise.
+     * @example
+     * await skills.receiveFromPlayer(bot, "oak_log", "player1", 4);
+     **/
+    if (bot.username === username) {
+        return failSkill(bot, 'invalid_target', `You cannot receive items from yourself.`, { playerName: username });
+    }
+    const giver = bot.players?.[username]?.entity;
+    if (!giver) {
+        return failSkill(bot, 'target_not_found', `Could not find ${username}.`, { playerName: username });
+    }
+    const before = inventoryItemCount(bot, itemType);
+    const gained = () => Math.max(0, inventoryItemCount(bot, itemType) - before);
+    const quantities = () => ({ itemName: itemType, playerName: username, unit: 'item', requestedQuantity: num,
+        confirmedQuantity: gained(), remainingQuantity: Math.max(0, num - gained()) });
+    const deadline = Date.now() + timeoutMs;
+    let handoffId = null;
+    let ending = null;
+    if (bot.itemHandoff?.isPeer(username)) {
+        handoffId = randomUUID();
+        const ready = { type: 'ready', id: handoffId, itemName: itemType, quantity: num };
+        const giving = await bot.itemHandoff.waitFor(bot, username, signal => signal.type === 'giving' && signal.id === handoffId,
+            timeoutMs, { onTick: () => bot.itemHandoff.send(username, ready) });
+        if (!giving) return failSkill(bot, 'giver_not_ready', `${username} did not start giveToPlayer for ${itemType} within ${timeoutMs}ms.`, quantities());
+        // done carries the thrown count; cancel means the giver stopped before throwing.
+        void bot.itemHandoff.waitFor(bot, username, signal => (signal.type === 'done' || signal.type === 'cancel') && signal.id === handoffId,
+            Math.max(1, deadline - Date.now())).then(signal => { ending = signal ?? { type: 'timeout' }; });
+    }
+    const isWanted = entity => entity.name === 'item' && entity.getDroppedItem?.()?.name === itemType
+        && bot.entity.position.distanceTo(entity.position) < 12;
+    await bot.lookAt(giver.position.offset(0, giver.height ?? 1.6, 0));
+    let doneAt = null;
+    while (gained() < num && !bot.interrupt_code && Date.now() <= deadline) {
+        if (ending?.type === 'cancel' || ending?.type === 'timeout') break;
+        if (ending?.type === 'done') {
+            doneAt ??= Date.now();
+            // Stop once everything thrown arrived, or after a short pickup window.
+            if (gained() >= ending.quantity || Date.now() - doneAt > 5000) break;
+        }
+        const drop = bot.nearestEntity(isWanted);
+        if (drop && bot.entity.position.distanceTo(drop.position) > 1.5) {
+            const movements = navigationMovements(bot);
+            movements.canDig = false;
+            bot.pathfinder.setMovements(movements);
+            await goToGoal(bot, new pf.goals.GoalFollow(drop, 0.5));
+        }
+        await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    const received = gained();
+    if (handoffId) bot.itemHandoff.send(username, { type: 'received', id: handoffId, quantity: received });
+    if (received === 0) {
+        if (ending?.type === 'cancel') return failSkill(bot, 'giver_cancelled', `${username} stopped giving ${itemType} before throwing it.`, quantities());
+        return failSkill(bot, 'receipt_unconfirmed', `Nothing was received from ${username}.`, quantities());
+    }
+    reportSkillOutcome(received >= num ? { ok: true, status: 'complete', ...quantities() }
+        : { ok: false, status: 'partial', code: 'insufficient_items', reason: `Received only ${received} of ${num} ${itemType}.`, ...quantities() });
+    log(bot, `Received ${received} ${itemType} from ${username}.`);
+    return received >= num;
 }
 
 function navigationGoalPosition(bot) {
@@ -4692,6 +4785,10 @@ export async function goToBed(bot) {
     await bot.sleep(bed);
     log(bot, `You are in bed.`);
     while (bot.isSleeping) {
+        if (isActionCancelled(bot)) {
+            await bot.wake().catch(() => {});
+            return failSkill(bot, 'cancelled', 'Sleeping was interrupted; left the bed.');
+        }
         await new Promise(resolve => setTimeout(resolve, 500));
     }
     log(bot, `You have woken up.`);
@@ -6166,6 +6263,7 @@ inspectChest = trackSkill("skills.inspectChest", inspectChest);
 viewChest = trackSkill("skills.viewChest", viewChest);
 consume = trackSkill("skills.consume", consume);
 giveToPlayer = trackSkill("skills.giveToPlayer", giveToPlayer);
+receiveFromPlayer = trackSkill("skills.receiveFromPlayer", receiveFromPlayer);
 goToGoal = trackSkill("skills.goToGoal", goToGoal);
 goToPosition = trackSkill("skills.goToPosition", goToPosition);
 reachPosition = trackSkill("skills.reachPosition", reachPosition);

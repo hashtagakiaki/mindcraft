@@ -134,7 +134,30 @@ async function main() {
     assert.equal(runOptions[0].options.interruptionContext.decisionId, modeDecisionEvent.detail.decisionId)
     assert.equal(runOptions[0].options.interruptionContext.evidence.target.id, 9,
       'the mode decision ID and captured enemy/health evidence enter ActionManager together')
-    console.log('enemy retreat: real wall/scaffold and directional reachability, ranged sight, group escape, failure, progress and cancellation passed')
+    // cowardice retreats only from imminent threats; the rest is left to the running action or self-defense.
+    const triggeredMode = async ({ enemies, health = 20, food = 20, damagedAgoMs = null }) => {
+      const bot = makeBot()
+      for (const item of enemies) bot.entities[item.id] = item
+      Object.assign(bot, { health, food, lastDamageTime: damagedAgoMs === null ? 0 : Date.now() - damagedAgoMs })
+      const events = []
+      bot._mindcraftDiagnosticRecord = (type, detail) => events.push({ type, detail })
+      initModes({ ...modeAgent, bot, prompter: { getInitModes: () => ({ self_preservation: false, cowardice: true, self_defense: true,
+        hunting: false, item_collecting: false, torch_placing: false, elbow_room: false, idle_staring: false }) } })
+      await bot.modes.update()
+      const event = events.find(item => item.type === 'mode_action_triggered')
+      return event ? `${event.detail.sourceMode}:${event.detail.reason}` : null
+    }
+    assert.equal(await triggeredMode({ enemies: [enemy(20, 15.5, 'skeleton')] }), null,
+      'a visible distant skeleton does not interrupt a healthy undamaged bot')
+    assert.equal(await triggeredMode({ enemies: [enemy(20, 15.5, 'skeleton')], damagedAgoMs: 500 }), 'cowardice:dangerous_encounter',
+      'recent damage makes a visible ranged mob a retreat threat')
+    assert.equal(await triggeredMode({ enemies: [enemy(20, 15.5, 'skeleton')], health: 8 }), 'cowardice:dangerous_encounter',
+      'low health makes a visible ranged mob a retreat threat')
+    assert.equal(await triggeredMode({ enemies: [enemy(21, 4.5), enemy(22, 15.5, 'creeper')] }), 'self_defense:nearby_threat',
+      'a distant creeper does not stop self-defense against a nearby zombie')
+    assert.equal(await triggeredMode({ enemies: [enemy(22, 5.5, 'creeper')] }), 'cowardice:dangerous_encounter',
+      'a creeper within the retreat distance still triggers retreat')
+    console.log('enemy retreat: real wall/scaffold and directional reachability, ranged sight, group escape, failure, progress, cancellation and imminent-threat retreat passed')
   } finally { await rm(root, { recursive: true, force: true }) }
 }
 main().catch(error => { console.error(error); process.exitCode = 1 })

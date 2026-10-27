@@ -346,6 +346,17 @@ async function main() {
     assert.equal(bot.listenerCount(`blockUpdate:${block.position}`), 0)
   }
   {
+    // A pathfinder break that the dig contract rejects is excluded from the next plan.
+    const { bot, block, diagnostics } = fixture()
+    bot.pathfinder.movements = { exclusionAreasBreak: [] }
+    bot.canDigBlock = () => false
+    await rejects(bot.dig(block, true), /not diggable/)
+    assert.ok(diagnostics.some(event => event.type === 'bot_dig_rejected' && /not diggable/.test(event.reason)))
+    const [exclusion] = bot.pathfinder.movements.exclusionAreasBreak
+    assert.equal(exclusion({ position: block.position }), Infinity)
+    assert.equal(exclusion({ position: block.position.offset(1, 0, 0) }), 0)
+  }
+  {
     const { bot, block } = fixture()
     bot.blockAt = () => ({ ...block, type: 0, name: 'air' })
     await rejects(bot.dig(block, 'ignore'), /Target block changed/)

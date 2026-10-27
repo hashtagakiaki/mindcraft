@@ -19,6 +19,26 @@ async function main() {
     store = await PlaceStore.open({ stateDir, worldId: WORLD_A })
     await assert.rejects(PlaceStore.open({ stateDir, worldId: WORLD_A }), { code: 'STORE_LOCKED' })
 
+    // A lock left by an exited process is reclaimed; a live or unreadable owner still blocks.
+    const { spawnSync } = require('node:child_process')
+    const exitedPid = spawnSync(process.execPath, ['-e', '']).pid
+    const lockedDir = async (name, content) => {
+      const dir = path.join(temp, name)
+      await require('node:fs/promises').mkdir(dir, { recursive: true })
+      await require('node:fs/promises').writeFile(path.join(dir, '.place-store.lock'), content)
+      return dir
+    }
+    const staleDir = await lockedDir('stale-lock', JSON.stringify({ pid: exitedPid, token: 'old-token', worldId: WORLD_A }))
+    const reclaimed = await PlaceStore.open({ stateDir: staleDir, worldId: WORLD_A })
+    const reclaimedLock = JSON.parse(await require('node:fs/promises').readFile(path.join(staleDir, '.place-store.lock'), 'utf8'))
+    assert.equal(reclaimedLock.pid, process.pid, 'the reclaimed lock records the new owner')
+    assert.notEqual(reclaimedLock.token, 'old-token')
+    await reclaimed.close()
+    const liveDir = await lockedDir('live-lock', JSON.stringify({ pid: process.pid, token: 'live-token', worldId: WORLD_A }))
+    await assert.rejects(PlaceStore.open({ stateDir: liveDir, worldId: WORLD_A }), { code: 'STORE_LOCKED' }, 'a live owner keeps the lock')
+    const corruptDir = await lockedDir('corrupt-lock', '{not json')
+    await assert.rejects(PlaceStore.open({ stateDir: corruptDir, worldId: WORLD_A }), { code: 'STORE_LOCKED' }, 'an unreadable lock is not reclaimed')
+
     const farmResponse = await store.rememberPlace({
       name: 'North wheat farm', kind: 'farm', purposes: ['wheat'],
       position: { x: 4, y: 64, z: 8 }, dimension: 'overworld', source: 'user'
