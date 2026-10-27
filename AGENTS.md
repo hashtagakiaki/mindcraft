@@ -6,6 +6,12 @@
 - upstream stable base `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`、履歴、`LICENSE` を保つ。`develop`へ切替・依存更新・upstream checkoutのコピーをしない。
 - 開発者向け入口はこのrepoの [`README.md`](README.md)。bot共通指示の正本は [`src/process/codex/AGENTS.md`](src/process/codex/AGENTS.md) で、開発用root `AGENTS.md` はbot専用Codex cwdへコピーしない。
 
+## ゲーム内の失敗と復旧
+
+- Minecraft内の失敗は容易に復旧できるため、損失予防の安全性より目的達成・試行速度・実装の単純さを優先する。復旧するより高くつく行動制限・事前確認・保全機構をSDKやbot指示へ追加しない。判断の正本は親の [ゲーム内の失敗と復旧の判断](../AGENTS.md#ゲーム内の失敗と復旧の判断)。
+- 危険脱出では必要な設置・破壊・資源消費・一時的な設備損傷を許容する。浅瀬専用条件や通常移動の地形保全方針をそのまま復旧の制約にせず、脱出を優先して後から修復する。これは設計・判断原則であり、現在のSDKの対応範囲や探索上限を変更済みとは扱わない。
+- 認証情報、ホスト、保存データの境界と明示的な個別指示は維持する。確認は実際の成功・失敗を判別して次の行動を選ぶために行い、ゲーム内の損傷予防だけを目的に重複させない。
+
 ## よく使う確認
 
 Node 20と既存read-only dependenciesを使う。diagnostics quota lockはNode helperがLinux util-linux `flock` commandを呼び出す。install/ciやpackage postinstallは禁止。共有quota lock inodeは使用中にunlinkしない。
