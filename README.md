@@ -22,7 +22,7 @@ Run focused fixtures while iterating and the required suite once for final verif
 
 ## Personal development fork
 
-botには目的と明示的な制約を渡し、方法・準備・実行・失敗からの回復を自律的に判断させる。共通指示は判断基準とSDKの実行境界に絞り、個別作業の固定手順を増やさない。確認済みの操作結果を活用して余分な往復を減らし、依頼全体の成果は最後に確認する。正本は [bot用AGENTS.md](src/process/codex/AGENTS.md)。
+操作者はbotに目的と明示的な制約を渡し、方法・準備・実行・失敗からの回復を自律的に判断させる。共通指示には、在庫との照合、道具と前提資材の準備、原因に応じた回復、実際の成果確認という進め方を具体的に記す。重複や個別場面の固定手順を抑えつつ、短い依頼から行動するための判断材料を残す。SDKの実行境界と確認済みの操作結果を活用し、余分な往復を減らす。正本は [bot用AGENTS.md](src/process/codex/AGENTS.md)。
 
 管理UIの状態APIと `!stats` は、HP・空腹度を丸めずに返す。統括役とbotが同じ実測値でしきい値を判定でき、HP 9.5 が管理側だけ10になることを防ぐ。
 
