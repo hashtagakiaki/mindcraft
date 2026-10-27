@@ -5,6 +5,7 @@
 - `hashtagakiaki/mindcraft` の `autonomy` branchが開発source。`origin` のみpushし、upstream `mindcraft-bots/mindcraft` はread-only。
 - upstream stable base `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73`、履歴、`LICENSE` を保つ。`develop`へ切替・依存更新・upstream checkoutのコピーをしない。
 - 開発者向け入口はこのrepoの [`README.md`](README.md)。bot共通指示の正本は [`src/process/codex/AGENTS.md`](src/process/codex/AGENTS.md) で、開発用root `AGENTS.md` はbot専用Codex cwdへコピーしない。
+- bot用AGENTSには行動方針・遅延文書の読み方・共通の実行境界を記す。個別SDKの引数・動作・戻り値・固定経路方針は `src/agent/library/native_sdk.js` の遅延文書を正本とし、bot用AGENTSへ追加・重複記載しない。実行時のSDK一覧は自動生成したメソッド名だけにする。
 
 ## ゲーム内の失敗と復旧
 
