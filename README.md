@@ -104,6 +104,10 @@ Native tasks can read `diagnostics.lastTask()` to explain the previous task's ex
 
 Native decision instructions require comparing the entire request with observed state, checking a cause before changing the failing conditions, and verifying again after the last mutation. Resumed turns repeat the accepted request alongside the completed operation result. A failed method or recovery-only inspection is not treated as sufficient evidence of an impossible task. These are model instructions, not an automatic goal validator; the existing task budgets still apply. [The isolated recovery verification](docs/native-goal-recovery-20261006.md) records actual chest repair and occluded harvesting with `gpt-6-luna` at medium effort.
 
+資材探索では必要量の所在が分かったら回収へ移り、不足分だけ追加探索します。操作失敗後は、原因を変えられる別手段を次の実行で試し、その結果または試せない具体的な根拠を確かめてから未達を報告します。共通指示による行動方針であり、モデルが必ず従う保証ではありません。
+
+`skills.useDoor({position?, open?})` は木製ドアと柵のゲートに対応します。`open:true` は開けたまま、`open:false` は閉じた状態にし、サーバーのblock更新を確認します。状態指定時は自動で通過しないため、動物の誘導中も開けておけます。省略時は従来の「開ける→通過→閉じる」を保ちます。legacyは `skills.useDoor(bot, position, {open:true})`。既に要求状態なら再クリックせず成功し、状態が不明・未確認なら失敗します。
+
 The Node20 `tests/targeted_sdk.test.cjs`, `tests/vision_sdk_validation.test.cjs` and `tests/codex_session.test.cjs` fixtures exercise the real Coder/SES/ActionManager boundary. They cover distinct targets, validation before side effects, unknown/occluded/unreachable targets, cancellation and close, compatibility, and diagnosis in a new task after a saved TypeError.
 
 ### Fell one tree and clean up its pillars
@@ -524,6 +528,8 @@ Native生成コードでは、SDK操作を短い有限ループで呼び出せ�
 nativeの座標移動はいずれも、最大512ブロック、最大32経路区間、180秒の期限内で再探索し、地形編集はサーバー確認を行い、既存の安全な着地上限を守ります。足場にはインベントリ内のdirtまたはcobblestoneを使います。経路が足場を必要としなければ素材は不要です。botが読み込み済みのwater、lava、連続する接触ダメージ領域、または落下中に始まった場合、まず8ブロック以内の安全な接地地点を探索します。退避中に通れる危険領域は観測済みの連結範囲だけで、上限は危険ブロック64個、経路node16個、10秒です。サーバー観測で安全な着地を確認した後は呼び出し元の通常移動に戻り、退避用の危険領域許可は再利用しません。waterとlavaからは上限付きの上昇遷移を使う場合がありますが、到着先は乾燥し、読み込み済みで、足場が必要です。未知領域、新たな危険、未対応の遷移、安全な着地先がない場合は明示的な失敗で停止します。経路探索の詳細はaction outputへ出し、native結果には編集履歴と足場座標一覧を含めません。legacyのbot-first `reachPosition`は詳細optionsとbest-effort cleanupを維持し、nativeの固定方針ではそれらを公開しません。
 
 #### Hazard recovery evidence and remaining boundary
+
+8ブロックは局所復旧の探索半径で、世界全体の到達可能性を判定する値ではありません。危険ブロック64個・経路node16個・10秒の上限も維持します。診断出力には探索上限と危険ブロック上限への到達を記録し、局所探索で着地点を得られなかったことを明示します。チェストへの接近・転送でも元の移動失敗理由を保持し、一般的な `blocked` だけに置き換えません。
 
 When the bot starts in a hazardous state, `goToGoal`, coordinate navigation and dynamic follow/retreat first use the shared egress policy. The policy reads loaded feet/head/support blocks and current falling velocity; it does not infer safety from `isInWater` or `isInLava` flags alone. It traverses only the connected hazard types observed at the start, rejects re-entry after leaving that region, and confirms a grounded dry landing on full safe support before resuming the requested goal. Contact-hazard traversal retains physical collision shapes. A shallow-water staging fallback may still place one caller-permitted, server-confirmed dirt/cobblestone block when no natural landing is reachable; it never replaces water or existing terrain. Cancellation does not start new cleanup work. Deep water without a reachable landing, unknown chunks, powder snow/bubble-column transitions, and other unsupported movement states remain explicit failures.
 

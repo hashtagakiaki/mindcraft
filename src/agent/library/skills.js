@@ -1794,7 +1794,7 @@ async function resolveChestTransferTarget(bot, chestPosition) {
     if (chestPosition === undefined) {
         const chest = world.getNearestBlock(bot, 'chest', 32);
         if (!chest) log(bot, `Could not find a chest nearby.`);
-        return chest;
+        return { chest, reason: chest ? null : 'chest_unavailable' };
     }
     const x = chestPosition.x, y = chestPosition.y, z = chestPosition.z;
     let target = world.inspectBlockAt(bot, x, y, z);
@@ -1802,35 +1802,35 @@ async function resolveChestTransferTarget(bot, chestPosition) {
         const reached = await goToPosition(bot, Math.floor(x) + 1.5, Math.floor(y), Math.floor(z) + 0.5, 1);
         if (!reached) {
             log(bot, `Chest target at ${target.position.x}, ${target.position.y}, ${target.position.z} is unknown and its exact approach position was not reached.`);
-            return null;
+            return { chest: null, reason: 'chest_target_unloaded: exact approach position was not reached' };
         }
         target = world.inspectBlockAt(bot, x, y, z);
         if (!target.loaded) {
             log(bot, `Chest target at ${target.position.x}, ${target.position.y}, ${target.position.z} is still unknown after approaching its exact position.`);
-            return null;
+            return { chest: null, reason: 'chest_target_unloaded: still unknown after approach' };
         }
     }
     if (!['chest', 'trapped_chest'].includes(target.name)) {
         log(bot, `Target at ${target.position.x}, ${target.position.y}, ${target.position.z} is ${target.name}, not a chest.`);
-        return null;
+        return { chest: null, reason: 'chest_target_is_not_container' };
     }
     const approach = await approachBlock(bot, x, y, z);
     if (approach.status !== 'ready') {
         log(bot, `Could not reach chest at ${target.position.x}, ${target.position.y}, ${target.position.z}: ${approach.reason || approach.status}.`);
-        return null;
+        return { chest: null, reason: approach.reason || approach.status };
     }
     // Navigation can change what is loaded or present. Re-observe this exact
     // coordinate and never replace it with a nearby chest.
     target = world.inspectBlockAt(bot, x, y, z);
     if (!target.loaded) {
         log(bot, `Chest target at ${target.position.x}, ${target.position.y}, ${target.position.z} became unknown after approach.`);
-        return null;
+        return { chest: null, reason: 'chest_target_unloaded: became unknown after approach' };
     }
     if (!['chest', 'trapped_chest'].includes(target.name)) {
         log(bot, `Target at ${target.position.x}, ${target.position.y}, ${target.position.z} changed to ${target.name} after approach; it is not a chest.`);
-        return null;
+        return { chest: null, reason: 'chest_target_changed' };
     }
-    return bot.blockAt(new Vec3(x, y, z).floored());
+    return { chest: bot.blockAt(new Vec3(x, y, z).floored()), reason: null };
 }
 
 // Native activateBlock accepts face/cursor but still looks at the center. Keep
@@ -1922,10 +1922,11 @@ export async function putInChest(bot, itemName, num=-1, options={}) {
     const chestPosition = validateChestTransferOptions(options, signature);
     const initialAvailable = inventoryItemCount(bot, itemName);
     let requestedQuantity = num === -1 ? initialAvailable : num;
-    let chest = await resolveChestTransferTarget(bot, chestPosition);
+    const target = await resolveChestTransferTarget(bot, chestPosition);
+    const chest = target.chest;
     if (!chest) {
         if (chestPosition === undefined) log(bot, `Could not find a chest nearby.`);
-        return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: 0, reason: 'chest_unavailable' });
+        return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: 0, reason: target.reason });
     }
     if (chestPosition === undefined && !await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2))
         return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: 0, chest, reason: 'chest_unreachable' });
@@ -2012,10 +2013,11 @@ export async function takeFromChest(bot, itemName, num=-1, options={}) {
     const signature = 'skills.takeFromChest(bot, itemName, num, options)';
     validateChestTransferQuantity(num, signature);
     const chestPosition = validateChestTransferOptions(options, signature);
-    let chest = await resolveChestTransferTarget(bot, chestPosition);
+    const target = await resolveChestTransferTarget(bot, chestPosition);
+    const chest = target.chest;
     if (!chest) {
         if (chestPosition === undefined) log(bot, `Could not find a chest nearby.`);
-        return chestTransferResult(options, { itemName, requestedQuantity: num === -1 ? null : num, confirmedQuantity: 0, reason: 'chest_unavailable' });
+        return chestTransferResult(options, { itemName, requestedQuantity: num === -1 ? null : num, confirmedQuantity: 0, reason: target.reason });
     }
     if (chestPosition === undefined && !await goToPosition(bot, chest.position.x, chest.position.y, chest.position.z, 2))
         return chestTransferResult(options, { itemName, requestedQuantity: num === -1 ? null : num, confirmedQuantity: 0, chest, reason: 'chest_unreachable' });
@@ -2139,7 +2141,7 @@ export async function approachBlock(bot, x, y, z) {
     if (!target.loaded) return { status: 'unknown', target, reason: 'Target unloaded during navigation.' };
     if (ready(target)) return { status: 'ready', target };
     return { status: target.interaction.status === 'unknown' ? 'unknown' : 'blocked', target,
-        reason: target.interaction.reason || navigationError };
+        reason: navigationError || target.interaction.reason };
 }
 
 export async function inspectChestAt(bot, x, y, z) {
@@ -2368,8 +2370,10 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             log(bot, `[navigation-recovery] ${JSON.stringify({ kind: recovery.kind, hazardBlocks: recovery.blocks?.size ?? 0,
                 safeCandidates: recovery.candidates?.length ?? 0,
                 candidateDiagnostics: recovery.goal ? undefined : recovery.candidateDiagnostics,
+                searchLimits: { radius: NAVIGATION_RECOVERY_RADIUS, hazardBlocks: NAVIGATION_RECOVERY_MAX_HAZARD_BLOCKS, pathNodes: 16, durationMs: NAVIGATION_RECOVERY_MAX_DURATION_MS },
+                hazardBlockLimitReached: recovery.blocks?.size === NAVIGATION_RECOVERY_MAX_HAZARD_BLOCKS,
                 policy: 'egress-before-goal' })}`);
-            if (!recovery.goal) throw new Error(`Navigation recovery from ${recovery.kind} has no loaded safe landing within ${NAVIGATION_RECOVERY_RADIUS} blocks.`);
+            if (!recovery.goal) throw new Error(`Navigation recovery from ${recovery.kind} found no reachable landing in the local search (radius ${NAVIGATION_RECOVERY_RADIUS}, hazard blocks ${recovery.blocks?.size ?? 0}/${NAVIGATION_RECOVERY_MAX_HAZARD_BLOCKS}, path nodes 16, duration ${NAVIGATION_RECOVERY_MAX_DURATION_MS}ms). This bounded search does not establish that the task or every other route is impossible.`);
             const previousMovements = bot.pathfinder.movements;
             navigationRecoveryActive.add(bot);
             try {
@@ -4823,22 +4827,26 @@ export async function stay(bot, seconds=30) {
     return true;
 }
 
-export async function useDoor(bot, door_pos=null) {
+export async function useDoor(bot, door_pos=null, options={}) {
     /**
-     * Use the door at the given position.
+     * Use a wooden door or fence gate, optionally setting its open state without crossing.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
      * @param {Vec3} door_pos, the position of the door to use. If null, the nearest door will be used.
+     * @param {object} options, optional { open: boolean }; omission keeps open/traverse/close behavior.
      * @returns {Promise<boolean>} true if the door was used, false otherwise.
      * @example
      * let door = world.getNearestBlock(bot, "oak_door", 16).position;
      * await skills.useDoor(bot, door);
      **/
+    if (!options || typeof options !== 'object' || Array.isArray(options)
+        || (Object.hasOwn(options, 'open') && typeof options.open !== 'boolean')) {
+        throw new TypeError('skills.useDoor options.open must be a boolean when supplied.');
+    }
+    const species = ['oak', 'spruce', 'birch', 'jungle', 'acacia', 'dark_oak', 'mangrove', 'cherry', 'bamboo', 'crimson', 'warped'];
+    const usable = new Set(species.flatMap(name => [`${name}_door`, `${name}_fence_gate`]));
     if (!door_pos) {
-        for (let door_type of ['oak_door', 'spruce_door', 'birch_door', 'jungle_door', 'acacia_door', 'dark_oak_door',
-                               'mangrove_door', 'cherry_door', 'bamboo_door', 'crimson_door', 'warped_door']) {
-            door_pos = world.getNearestBlock(bot, door_type, 16)?.position;
-            if (door_pos) break;
-        }
+        door_pos = [...usable].map(name => world.getNearestBlock(bot, name, 16)).filter(Boolean)
+            .sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position))[0]?.position;
     } else {
         door_pos = Vec3(door_pos.x, door_pos.y, door_pos.z);
     }
@@ -4852,9 +4860,29 @@ export async function useDoor(bot, door_pos=null) {
         if (!await goToPosition(bot, door_pos.x, door_pos.y, door_pos.z, 1)) return false;
         let doorBlock = bot.blockAt(door_pos);
         const isOpen = block => block?.getProperties?.().open === true;
-        if (!doorBlock || !doorBlock.name?.includes('door')) {
-            log(bot, `Could not find a door at ${door_pos}.`);
+        if (!doorBlock || !usable.has(doorBlock.name)) {
+            log(bot, `Could not find a wooden door or fence gate at ${door_pos}.`);
             return false;
+        }
+        if (Object.hasOwn(options, 'open')) {
+            if (typeof doorBlock.getProperties?.().open !== 'boolean') {
+                log(bot, `Door or gate state is unknown at ${door_pos}.`);
+                return false;
+            }
+            if (isOpen(doorBlock) === options.open) return true;
+            const changed = waitForBlockUpdate(bot, door_pos,
+                block => block?.name === doorBlock.name && block.getProperties?.().open === options.open,
+                INTERACTION_CONFIRM_TIMEOUT_MS);
+            try {
+                await bot.lookAt(door_pos);
+                await bot.activateBlock(doorBlock);
+                const confirmed = await changed.promise;
+                if (!confirmed || bot.interrupt_code) {
+                    log(bot, `Could not confirm ${options.open ? 'opening' : 'closing'} the door or gate at ${door_pos}.`);
+                    return false;
+                }
+                return true;
+            } finally { changed.cleanup(); }
         }
         if (!isOpen(doorBlock)) {
             const opening = waitForBlockUpdate(bot, door_pos, isOpen, INTERACTION_CONFIRM_TIMEOUT_MS);

@@ -197,6 +197,31 @@ async function main() {
   assert.equal(await skills.useDoor(unreachableDoor, doorPos), false, 'door navigation failure prevents crossing')
   assert.equal(unreachableDoor.controlStates, undefined)
 
+  for (const name of ['oak_door', 'oak_fence_gate', 'bamboo_fence_gate', 'warped_fence_gate']) {
+    let state = makeBlock(name, doorPos, { open: false })
+    let activations = 0
+    const gate = makeBot({ block: state, blockStates: [[doorPos, state]],
+      onActivateBlock(_block, bot) {
+        activations++
+        state = makeBlock(name, doorPos, { open: !state.getProperties().open })
+        emitBlock(bot, doorPos, state)
+      }
+    })
+    assert.equal(await skills.useDoor(gate, doorPos, { open: true }), true, name)
+    assert.equal(gate.blockAt(doorPos).getProperties().open, true)
+    assert.equal(gate.controlStates, undefined, 'state selection does not cross the opening')
+    assert.equal(await skills.useDoor(gate, doorPos, { open: true }), true)
+    assert.equal(activations, 1, 'an already matching state is not toggled')
+    assert.equal(await skills.useDoor(gate, doorPos, { open: false }), true)
+    assert.equal(gate.blockAt(doorPos).getProperties().open, false)
+    assert.equal(gate.listenerCount('blockUpdate'), 0)
+  }
+  const unresponsiveGateBlock = makeBlock('oak_fence_gate', doorPos)
+  const unresponsiveGate = makeBot({ block: unresponsiveGateBlock, blockStates: [[doorPos, unresponsiveGateBlock]] })
+  assert.equal(await skills.useDoor(unresponsiveGate, doorPos, { open: true }), false, 'gate changes require a server block update')
+  assert.equal(unresponsiveGate.controlStates, undefined)
+  assert.equal(unresponsiveGate.listenerCount('blockUpdate'), 0)
+
   const target = { id: 17, name: 'zombie', position: makePosition(1, 0, 0) }
   for (const mode of ['matching-dead', 'other-dead-and-gone', 'gone', 'interrupt', 'attack-reject']) {
     const bot = makeBot({

@@ -238,12 +238,18 @@ async function main() {
     bot.state.visible = false; bot.state.route = 'occluded'
     const partial = await skills.approachBlock(bot,0,64,0)
     assert.equal(partial.status,'blocked'); assert.equal(partial.target.visible,false)
-    assert.match(partial.reason,/surface aim/)
+    assert.match(partial.reason,/NavigationArrivalUnconfirmedError/)
     assert.equal(await skills.breakBlockAt(bot,0,64,0),false)
     assert.equal(bot.state.digs.length,0)
     bot.state.route = 'unreachable'
     const unreachable = await skills.inspectChestAt(bot,0,64,0)
-    assert.equal(unreachable.status,'blocked'); assert.match(unreachable.reason,/surface aim/)
+    assert.equal(unreachable.status,'blocked'); assert.match(unreachable.reason,/No path to target/)
+    for (const direction of ['takeFromChest', 'putInChest']) {
+      const transfer = await skills[direction](bot,'iron_ingot',1,{chestPosition:{x:0,y:64,z:0},details:true})
+      assert.equal(transfer.status,'blocked')
+      assert.equal(transfer.confirmedQuantity,0)
+      assert.match(transfer.reason,/No path to target/,'transfer preserves the actionable navigation failure')
+    }
     const opens = bot.state.opened.length
     bot.state.route = 'ready'; bot.state.visible = true
     let stopping

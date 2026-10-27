@@ -29,6 +29,7 @@ Runnerはdisposable fixtureを使いMinecraft serverを起動しない。fixture
 - 通常確認では稼働play server `40973`、UI `8098`、tmux、4 bots、Ollamaを操作せず、play起動scriptをtestで実行しない。isolated Minecraft確認はCaseServerのloopback `25569`/`25570`のみ。`25566`は禁止。production/system serviceも変更しない。
 - PlaceStore scopeはroot `settings.js` の `place_state_dir` と `place_world_id` に限る。絶対pathとUUIDを両方設定するか両方null。Protected MindServerのsessionはprivate 0700 dir/0600 file、tokenを保存・複製せず、crash後のfileは再利用しない。PlaceStore lockはwriter不在を確認せず削除しない。
 - sourceの公開・再検証に必要な詳細（SDK、navigation、placement、session、Goals等）はREADMEの該当節とリンク先docsを参照し、ここでは重複させない。
+- ドア・ゲート操作は `tests/interaction_confirmation.test.cjs`、native引数は `tests/native_sdk.test.cjs`、チェスト接近失敗の原因保持は `tests/targeted_sdk.test.cjs` で確認する。局所危険復旧の探索上限は世界全体の到達不能と区別し、移動失敗理由を呼び出し元で失わない。
 
 ## 完了条件
 
