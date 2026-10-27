@@ -283,7 +283,8 @@ async function main() {
     assert.ok(nativeDocs.every(doc=>!doc.includes('(bot,')), 'native examples use the public argument contract')
     const placeNavigationDocs = nativeDocs.filter(doc => ['places.goTo\n','places.goToAlias\n','places.tendFarm\n'].some(prefix => doc.startsWith(prefix)))
     assert.equal(placeNavigationDocs.length,3)
-    assert.ok(placeNavigationDocs.every(doc => doc.includes('Its route preserves existing blocks')))
+    assert.ok(placeNavigationDocs.every(doc => doc.includes('Its ordinary route preserves existing blocks')
+      && doc.includes('survival egress may dig or place confirmed blocks')))
     let scans=0, rpcCalls=0, looks=0
     bot.state.visible=true
     bot.findBlocks = () => { scans++; return [new Vec3(0,64,0)] }

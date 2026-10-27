@@ -166,8 +166,12 @@ async function main() {
   assert.equal(detailedMove.edits.length, 1, 'public projection preserves internal tracking')
   assert.equal(detailedMove.cleanupRequired.length, 1)
   assert.ok(docs.find(doc => doc.startsWith('skills.collectBlock\n')).includes('Its route may dig and leave confirmed'))
-  assert.ok(docs.find(doc => doc.startsWith('skills.breakBlockAt\n')).includes('Its route preserves existing blocks'))
+  assert.ok(docs.find(doc => doc.startsWith('skills.breakBlockAt\n')).includes('Its ordinary route preserves existing blocks'))
   assert.ok(docs.find(doc => doc.startsWith('skills.attackEntity\n')).includes('Its route cannot dig'))
+  for (const name of ['breakBlockAt', 'attackEntity', 'collectBlock', 'goToPosition']) {
+    assert.ok(docs.find(doc => doc.startsWith(`skills.${name}\n`)).includes('survival egress may dig or place confirmed blocks'),
+      `${name} documents the shared emergency exception`)
+  }
   const definitions = new Map(NATIVE_SDK_DEFINITIONS.map(definition => [`${definition.namespace}.${definition.name}`, definition]))
   assert.deepEqual(definitions.get('skills.collectBlock').navigationPolicy, { allowDig: true, scaffold: 'leave', scaffoldBlocks: ['dirt', 'cobblestone'] })
   assert.deepEqual(definitions.get('skills.craftItem').navigationPolicy, { allowDig: false, scaffold: 'forbid', scaffoldBlocks: [] },
@@ -189,7 +193,7 @@ async function main() {
   assert.deepEqual(sdk.places.find({ text: 'chest' }), [{ text: 'chest', limit: 20 }])
   for (const method of ['goTo', 'goToAlias', 'tendFarm']) {
     const doc = docs.find(value => value.startsWith(`places.${method}\n`))
-    assert.ok(doc.includes('Its route preserves existing blocks'), `${method} documents its fixed route policy`)
+    assert.ok(doc.includes('Its ordinary route preserves existing blocks'), `${method} documents its fixed route policy`)
   }
   const placeGo = await sdk.places.goTo({ placeId: 'place-1' })
   assert.deepEqual(placeGo, ['place-1'])
