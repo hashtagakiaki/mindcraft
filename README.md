@@ -22,7 +22,7 @@ Run focused fixtures while iterating and the required suite once for final verif
 
 ## Personal development fork
 
-Native gameplay instructions prioritize speed during authorized work, relying on SDK safety and confirmed action results to reduce repeated checks and observation-only round trips. The final outcome check remains required; the authoritative instructions are in [the bot AGENTS.md](src/process/codex/AGENTS.md).
+botには目的と明示的な制約を渡し、方法・準備・実行・失敗からの回復を自律的に判断させる。共通指示は判断基準とSDKの実行境界に絞り、個別作業の固定手順を増やさない。確認済みの操作結果を活用して余分な往復を減らし、依頼全体の成果は最後に確認する。正本は [bot用AGENTS.md](src/process/codex/AGENTS.md)。
 
 管理UIの状態APIと `!stats` は、HP・空腹度を丸めずに返す。統括役とbotが同じ実測値でしきい値を判定でき、HP 9.5 が管理側だけ10になることを防ぐ。
 
