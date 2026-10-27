@@ -2570,14 +2570,17 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     // the same no-edit movement unless an owned explicit route edit is active.
     movementOverride = navigationMovements(bot, movementOverride);
     if (recoveryRouteCells) movementOverride = navigationRecoveryNoReentryMovements(movementOverride, recoveryRouteCells);
-    const nonDestructiveMovements = movementOverride;
     if (!navigationRecoveryActive.has(bot)) {
         for (const block of ['glass', 'glass_pane']) {
-            nonDestructiveMovements.blocksCantBreak.add(mc.getBlockId(block));
+            movementOverride.blocksCantBreak.add(mc.getBlockId(block));
         }
     }
-    nonDestructiveMovements.placeCost = 2;
-    nonDestructiveMovements.digCost = 10;
+    // Edit penalties apply only while preferring and following a non-destructive
+    // route. Left on the shared movements they push every bare-hand stone break
+    // over pathfinder's per-move cost cap (100), so routes that must dig end noPath.
+    const baseEditCosts = { placeCost: movementOverride.placeCost, digCost: movementOverride.digCost };
+    const restoreEditCosts = () => Object.assign(movementOverride, baseEditCosts);
+    const nonDestructiveMovements = Object.assign(movementOverride, { placeCost: 2, digCost: 10 });
 
     const destructiveMovements = movementOverride;
 
@@ -2591,7 +2594,9 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         }, startedAt: navigationStartedAt });
 
     const pathfind_timeout = 1000;
-    if (await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout).status === 'success') {
+    const nonDestructiveFound = await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout).status === 'success';
+    if (!nonDestructiveFound) restoreEditCosts();
+    if (nonDestructiveFound) {
         final_movements = nonDestructiveMovements;
         log(bot, `Found non-destructive path.`);
     }
@@ -2681,6 +2686,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         return false;
     };
     const navigationWaitStartedAt = new Date().toISOString();
+    let removeDigListener = () => {};
     try {
         bestGoalDistance = goal.heuristic(navigationGoalPosition(bot));
         seenRouteSegments.add(positionKey(bot.entity.position.floored()));
@@ -2690,8 +2696,18 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         setActionPhase(cancellation, 'navigation');
         // Emergency reachPosition already owns and confirms its edits. A second
         // segment would reapply the normal policy and enqueue placement twice.
-        const navigation = navigationRecoveryActive.has(bot)
+        const startNavigation = () => navigationRecoveryActive.has(bot)
             ? bot.pathfinder.goto(goal) : trackNavigationSegment(bot, () => bot.pathfinder.goto(goal));
+        // Pathfinder's think timeout is wall-clock and keeps running while the bot
+        // digs, so slow breaks (bare-hand stone takes ~7.5s) end goto with Timeout
+        // mid-route. After a completed dig or goal/segment progress, continue
+        // toward the goal; the stall check still ends routes without progress.
+        let digCompletedSinceStart = false;
+        let attemptStartedAt = Date.now();
+        const onDigCompleted = () => { digCompletedSinceStart = true; };
+        bot.on?.('diggingCompleted', onDigCompleted);
+        removeDigListener = () => bot.removeListener?.('diggingCompleted', onDigCompleted);
+        let navigation = startNavigation();
         owner?.signal.addEventListener('abort', stopOwnedNavigation, { once: true });
         if (owner?.signal.aborted) stopOwnedNavigation();
         timeoutHandle = setInterval(() => {
@@ -2713,7 +2729,18 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             }
         }, navigationCheckIntervalMs);
         try {
-            await navigation;
+            for (;;) {
+                try {
+                    await navigation;
+                    break;
+                } catch (err) {
+                    const progressed = digCompletedSinceStart || lastProgressAt > attemptStartedAt;
+                    if (err?.name !== 'Timeout' || !progressed || stallError || owner?.signal.aborted || bot.interrupt_code) throw err;
+                    digCompletedSinceStart = false;
+                    attemptStartedAt = Date.now();
+                    navigation = startNavigation();
+                }
+            }
         } catch (err) {
             if (!stallError) {
                 navigationError = true;
@@ -2764,6 +2791,8 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         throw err;
     } finally {
         owner?.signal.removeEventListener('abort', stopOwnedNavigation);
+        removeDigListener();
+        restoreEditCosts();
         if (clearOwnedGoalOnFailure && bot.pathfinder.goal === goal) bot.pathfinder.setGoal(null);
         clearInterval(doorCheckInterval);
         if (timeoutHandle) clearInterval(timeoutHandle);
@@ -3176,6 +3205,14 @@ async function waitForReachPositionChunk(bot, operation, timeoutMs) {
     }
 }
 
+// Pathfinder's searchRadius is a cost cap (start heuristic + radius), not a
+// distance. It approximates a detour bound only for walking costs; dig labor
+// (bare-hand stone costs ~23 per block) makes any digging route exceed it and
+// end noPath, so digging searches are bounded by time and steps only.
+function pathSearchCostCap(movements, radius) {
+    return movements?.canDig ? -1 : radius;
+}
+
 function reachPositionPath(bot, movements, goal, {
     timeout = REACH_POSITION_SEARCH_TIMEOUT_MS,
     tickTimeout = REACH_POSITION_SEARCH_TICK_MS,
@@ -3183,8 +3220,7 @@ function reachPositionPath(bot, movements, goal, {
 } = {}) {
     if (typeof bot.pathfinder.getPathFromTo !== 'function') return { status: 'unavailable', path: [] };
     const generator = bot.pathfinder.getPathFromTo(movements, bot.entity.position, goal, {
-        timeout, tickTimeout,
-        searchRadius: REACH_POSITION_SEARCH_RADIUS,
+        timeout, tickTimeout, searchRadius: pathSearchCostCap(movements, REACH_POSITION_SEARCH_RADIUS),
     });
     let result = { status: 'unavailable', path: [] };
     for (let step = 0; step < steps; step++) {
@@ -3459,7 +3495,7 @@ async function navigationRecovery(bot, suppliedMovements, requestedGoal = null) 
         const generator = bot.pathfinder.getPathFromTo(movements, bot.entity.position, recoveryGoal, {
             timeout: NAVIGATION_RECOVERY_SEARCH_TIMEOUT_MS,
             tickTimeout: NAVIGATION_RECOVERY_SEARCH_TICK_MS,
-            searchRadius: NAVIGATION_RECOVERY_RADIUS,
+            searchRadius: pathSearchCostCap(movements, NAVIGATION_RECOVERY_RADIUS),
         });
         for (let step = 0; step < NAVIGATION_RECOVERY_SEARCH_STEPS; step++) {
             if (step % 8 === 0) {
@@ -4016,7 +4052,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
             lastSearchDiagnostics = { status: pathResult.status ?? 'unknown', pathNodeCount: pathResult.path?.length ?? 0,
                 endpoint: pathResult.path?.length ? { x: pathResult.path.at(-1).x, y: pathResult.path.at(-1).y, z: pathResult.path.at(-1).z } : null,
                 limits: { timeoutMs: REACH_POSITION_SEARCH_TIMEOUT_MS, steps: REACH_POSITION_SEARCH_STEPS,
-                    searchRadius: REACH_POSITION_SEARCH_RADIUS } };
+                    searchRadius: pathSearchCostCap(movement, REACH_POSITION_SEARCH_RADIUS) } };
             recordNavigationDiagnostic(bot, 'navigation_route_search', { routeId, phase: diagnosticPhase, search: lastSearchDiagnostics });
             if (pathResult.status === 'unavailable') { status = 'blocked'; reason = 'Bounded path search is unavailable.'; break; }
             const path = Array.isArray(pathResult.path) ? pathResult.path : [];
@@ -4085,6 +4121,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                     if (digPath.status === 'success' && digPath.path?.some(node => node.toBreak?.length)) {
                         resultCode = 'digging_required';
                         diagnosticPhase = 'search';
+                        lastSearchDiagnostics = reachPositionSearchSummary({ ...searchDiagnostic, targetBlocker: blocker });
                         status = 'blocked';
                         reason = '現在の探索条件では採掘を伴う経路が見つかりました。';
                         break;

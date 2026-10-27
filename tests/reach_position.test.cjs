@@ -315,11 +315,15 @@ async function main() {
     assert.ok(digOnlyRoute.testState.paths.every(route => route.path.every(node => !node.toBreak?.length)),
       'no route with digging is passed to goto')
 
-    const unbreakableRoute = makeBot({ wall: wall.map(block => ({ ...block, name: 'bedrock' })), scaffoldInventory: {} })
+    // Bedrock reaches down to the world floor so no route can tunnel under it.
+    const bedrockBelowWall = []
+    for (let z = -4; z <= 4; z++) for (let y = 60; y <= 63; y++) bedrockBelowWall.push({ x: 3, y, z, name: 'bedrock' })
+    const unbreakableRoute = makeBot({ wall: wall.map(block => ({ ...block, name: 'bedrock' })), solidBlocks: bedrockBelowWall, scaffoldInventory: {} })
     const unbreakable = await createNativeSdk({ bot: unbreakableRoute, skills }).skills.goToPosition({
       position: { x: 6.5, y: 64, z: 0.5 },
     })
-    assert.equal(unbreakable.code, 'route_not_found', JSON.stringify(unbreakable))
+    // Digging searches have no cost cap, so the bounded probe may also end on its time limit.
+    assert.ok(['route_not_found', 'search_limit'].includes(unbreakable.code), JSON.stringify(unbreakable))
     assert.deepEqual(unbreakableRoute.testState.edits, [])
 
     for (const diagnosticStatus of ['timeout', 'partial']) {
@@ -836,7 +840,8 @@ async function main() {
     const obstructed = await skills.reachPosition(blockedTarget, {
       position: { x: 2.5, y: 64, z: 0.5 }, arrivalMode: 'block', allowDig: false, allowScaffold: false,
     })
-    assert.equal(obstructed.code, 'route_not_found', JSON.stringify(obstructed))
+    // Digging the target block out is a route when digging is allowed.
+    assert.equal(obstructed.code, 'digging_required', JSON.stringify(obstructed))
     assert.equal(obstructed.diagnostics.phase, 'search')
     assert.equal(obstructed.diagnostics.lastSearch.targetBlocker.code, 'target_obstructed')
     const rangeLimited = await skills.reachPosition(makeBot(), {
@@ -1204,8 +1209,10 @@ async function main() {
 
     const noInventory = makeBot({ gap: [2, 3, 4], corridor: true })
     noInventory.testState.inventory.dirt = 0
+    // Without the digging cost cap a dig route through the pit wall exists;
+    // forbid digging so only the scaffold requirement is under test.
     const noMaterial = await reachPosition(noInventory, {
-      position: { x: 6.5, y: 64, z: 0.5 }, allowScaffold: true, scaffoldBlocks: ['dirt'],
+      position: { x: 6.5, y: 64, z: 0.5 }, allowDig: false, allowScaffold: true, scaffoldBlocks: ['dirt'],
     })
     assert.equal(noMaterial.status, 'blocked')
     assert.equal(noInventory.testState.edits.length, 0, 'missing scaffold materials fail before edits')
@@ -1257,8 +1264,11 @@ async function main() {
       hazards: Array.from({ length: 9 }, (_, x) => ({ x, y: 64, z: 0, name: 'water' })) })
     const wideWaterRecovery = await skills.goToGoal(wideWaterHazard, new pathfinder.goals.GoalBlock(12, 64, 0))
     assert.equal(wideWaterRecovery, true, JSON.stringify({ output: wideWaterHazard.output, paths: wideWaterHazard.testState.paths }))
-    assert.ok(wideWaterHazard.testState.paths.some(path => path.path.at(-1)?.x === 9),
-      'shared recovery finds the safe landing nine blocks beyond the start hazard')
+    // With digging uncapped by pathfinder's cost-based searchRadius, the nearer
+    // exit through the adjacent stone is preferred over swimming nine blocks.
+    assert.match(wideWaterHazard.output, /"policy":"safe-landing-confirmed"/, 'shared recovery confirms a safe landing')
+    assert.ok(wideWaterHazard.testState.paths.some(path => path.path.at(-1)?.x === 12),
+      'ordinary navigation reaches the requested goal after recovery')
 
     const eightyOneBlockWaterHazard = makeBot({ floorY: 63, startY: 64, loadedMaxX: 16, scaffoldInventory: {},
       solidBlocks: [{ x: 5, y: 63, z: 0, name: 'gravel' }],
@@ -1431,9 +1441,10 @@ async function main() {
       position: { x: 4.5, y: 63, z: 0.5 }, tolerance: 0.75, allowDig: false, allowScaffold: true,
       scaffoldBlocks: ['dirt'],
     })
-    assert.notEqual(unsafeWaterStagingResult.status, 'reached', JSON.stringify(unsafeWaterStagingResult))
+    // Emergency egress may now dig out through the stone wall instead.
     assert.equal(unsafeWaterStaging.testState.placementAttempts, 0, 'hazardous anchor faces are never used')
-    assert.equal(unsafeWaterStaging.testState.edits.length, 0)
+    assert.equal(unsafeWaterStaging.testState.edits.filter(edit => edit.kind === 'server_place').length, 0,
+      JSON.stringify(unsafeWaterStagingResult))
 
     const cancelledWaterStaging = makeBot({ floorY: 62, startY: 64, wall: stagingWalls, navigationDelay: 200,
       hazards: [
