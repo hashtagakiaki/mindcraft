@@ -4,6 +4,7 @@ const assert = require('node:assert/strict')
 const { EventEmitter } = require('node:events')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
+const { withAcceleratedClock } = require('./accelerated_clock.cjs')
 
 const key = position => `${position.x},${position.y},${position.z}`
 
@@ -133,7 +134,7 @@ async function main() {
         }
       }
     })
-    assert.equal(await skills.useToolOnBlock(bot, 'bucket', water), false, `${mode} pickup is not success`)
+    assert.equal(await withAcceleratedClock(() => skills.useToolOnBlock(bot, 'bucket', water)), false, `${mode} pickup is not success`)
     assert.equal(bot.listenerCount('blockUpdate'), 0)
   }
 
@@ -153,7 +154,7 @@ async function main() {
   assert.equal(await skills.placeBlock(placeBot('correct'), 'water', 5, 0, 0), true, 'bucket placeBlock confirms destination fluid')
   for (const mode of ['wrong', 'absent']) {
     const bot = placeBot(mode)
-    assert.equal(await skills.placeBlock(bot, 'water', 5, 0, 0), false, `${mode} destination update is not success`)
+    assert.equal(await withAcceleratedClock(() => skills.placeBlock(bot, 'water', 5, 0, 0)), false, `${mode} destination update is not success`)
     assert.equal(bot.listenerCount('blockUpdate'), 0)
   }
 
@@ -163,7 +164,7 @@ async function main() {
     blockStates: [[waterPos, water]],
     onActivateItem() {}
   })
-  assert.equal(await skills.collectBlock(liquidCollectBot, 'water'), false, 'liquid collection propagates failed bucket outcome')
+  assert.equal(await withAcceleratedClock(() => skills.collectBlock(liquidCollectBot, 'water')), false, 'liquid collection propagates failed bucket outcome')
   assert.equal(liquidCollectBot.listenerCount('blockUpdate'), 0)
 
   const missingDoorBot = makeBot()
@@ -189,7 +190,7 @@ async function main() {
   assert.equal(closedDoor.listenerCount('blockUpdate'), 0)
   const unresponsiveDoor = makeBot({ block: makeBlock('oak_door', doorPos, { open: false }), blockStates: [[doorPos, makeBlock('oak_door', doorPos, { open: false })]] })
   unresponsiveDoor.navigation.block = unresponsiveDoor.blockAt(doorPos)
-  assert.equal(await skills.useDoor(unresponsiveDoor, doorPos), false, 'door without open update does not move forward')
+  assert.equal(await withAcceleratedClock(() => skills.useDoor(unresponsiveDoor, doorPos)), false, 'door without open update does not move forward')
   assert.equal(unresponsiveDoor.controlStates, undefined)
   assert.equal(unresponsiveDoor.listenerCount('blockUpdate'), 0)
   const unreachableDoor = makeBot({ navigationDistance: 10, block: makeBlock('oak_door', doorPos, { open: true }), blockStates: [[doorPos, makeBlock('oak_door', doorPos, { open: true })]] })
@@ -218,7 +219,7 @@ async function main() {
   }
   const unresponsiveGateBlock = makeBlock('oak_fence_gate', doorPos)
   const unresponsiveGate = makeBot({ block: unresponsiveGateBlock, blockStates: [[doorPos, unresponsiveGateBlock]] })
-  assert.equal(await skills.useDoor(unresponsiveGate, doorPos, { open: true }), false, 'gate changes require a server block update')
+  assert.equal(await withAcceleratedClock(() => skills.useDoor(unresponsiveGate, doorPos, { open: true })), false, 'gate changes require a server block update')
   assert.equal(unresponsiveGate.controlStates, undefined)
   assert.equal(unresponsiveGate.listenerCount('blockUpdate'), 0)
 
@@ -316,7 +317,7 @@ async function main() {
     setImmediate(() => defending.emit('blockUpdate', old, placed))
     return placed
   }
-  assert.equal(await navigation.runWithNavigationPolicy(defending, combatPolicy, () => skills.defendSelf(defending)), true)
+  assert.equal(await withAcceleratedClock(() => navigation.runWithNavigationPolicy(defending, combatPolicy, () => skills.defendSelf(defending))), true)
   assert.equal(defending.followupStrikeWeapon, 'iron_sword', 'defendSelf re-equips before the next strike while combat continues')
 
   // A bare-handed defender starts attacking immediately, even if an opponent
@@ -336,7 +337,7 @@ async function main() {
     defender.entity.position.distanceTo = () => distance
     let positioningCalls = 0
     defender.pathfinder.goto = async () => { positioningCalls++; throw new Error('separate combat positioning') }
-    assert.equal(await skills.defendSelf(defender), true)
+    assert.equal(await withAcceleratedClock(() => skills.defendSelf(defender)), true)
     assert.equal(positioningCalls, 0, 'defense must not wait for separate positioning before an attack')
     assert.deepEqual(engaged, opponents.map(enemy => enemy.id), 'finish each target before switching; no loot trip between targets')
     assert.equal(defender.pvpStopCount, 2)
@@ -390,7 +391,7 @@ async function main() {
   crowd.entity.position.distanceTo = position => Math.abs(position.x)
   const crowdDeadline = setTimeout(() => { crowd.interrupt_code = true }, 4500)
   try {
-    assert.equal(await skills.defendSelf(crowd, 8), true)
+    assert.equal(await withAcceleratedClock(() => skills.defendSelf(crowd, 8)), true)
     assert.deepEqual(switches, [31, 32, 31], 'switch to the nearer threat before the first one dies, then finish the engaged target beyond the admission radius')
     assert.ok(crowd.combatGoals.some(goal => goal?.goals?.length === 2), 'retreat keeps distance from both threats')
   } finally { clearTimeout(crowdDeadline) }
@@ -407,7 +408,7 @@ async function main() {
     if (enemy.id === parentSlime.id) childTimer = setTimeout(() => bot.navigation.entities.push(childSlime), 200)
   } })
   try {
-    assert.equal(await skills.defendSelf(split), true)
+    assert.equal(await withAcceleratedClock(() => skills.defendSelf(split)), true)
     assert.deepEqual(splitTargets, [33, 34], 'defense observes delayed death-spawned enemies')
   } finally { clearTimeout(childTimer) }
 

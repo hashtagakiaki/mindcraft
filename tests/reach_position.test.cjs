@@ -8,6 +8,11 @@ const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { createRequire } = require('node:module')
 const { moduleRoot } = require('./dependency_root.cjs')
+const { withAcceleratedClock } = require('./accelerated_clock.cjs')
+
+// Shortens unconfirmed-edit and chunk waits; pathfinder search budgets use
+// performance.now() and stay real, so a modest factor keeps searches intact.
+const withShortWaits = callback => withAcceleratedClock(callback, 10)
 
 const repo = path.resolve(__dirname, '..')
 const deps = moduleRoot()
@@ -820,7 +825,7 @@ async function main() {
     const streamed = await reachPosition(streaming, { position: { x: 24.5, y: 64, z: 0.5 } })
     assert.equal(streamed.status, 'reached', JSON.stringify(streamed))
     const unloaded = makeBot({ loadedMaxX: 16 })
-    const timedOut = await reachPosition(unloaded, { position: { x: 24.5, y: 64, z: 0.5 } })
+    const timedOut = await withShortWaits(() => reachPosition(unloaded, { position: { x: 24.5, y: 64, z: 0.5 } }))
     assert.equal(timedOut.status, 'blocked', JSON.stringify(timedOut))
     assert.ok(timedOut.finalPosition.x > 0.5, 'moves through the loaded segment before refusing the unloaded continuation')
 
@@ -970,9 +975,9 @@ async function main() {
     const noAckPolicyMovements = new pathfinder.Movements(noAckPolicyBot)
     noAckPolicyMovements.allowParkour = false
     noAckPolicyMovements.allowFreeMotion = false
-    await assert.rejects(() => runWithNavigationPolicy(noAckPolicyBot,
+    await assert.rejects(() => withShortWaits(() => runWithNavigationPolicy(noAckPolicyBot,
       { allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt'] },
-      () => skills.goToGoal(noAckPolicyBot, new pathfinder.goals.GoalBlock(6, 64, 0), noAckPolicyMovements)),
+      () => skills.goToGoal(noAckPolicyBot, new pathfinder.goals.GoalBlock(6, 64, 0), noAckPolicyMovements))),
       error => error.name === 'NavigationStallTimeoutError')
     assert.equal(noAckPolicyBot.testState.edits.some(edit => edit.kind === 'server_place'), false)
 
@@ -1004,9 +1009,9 @@ async function main() {
 
     const rejectedPlacement = makeBot({ gap: [2, 3, 4], corridor: true })
     rejectedPlacement.testState.placementMode = 'reject'
-    const rejected = await reachPosition(rejectedPlacement, {
+    const rejected = await withShortWaits(() => reachPosition(rejectedPlacement, {
       position: { x: 6.5, y: 64, z: 0.5 }, allowScaffold: true, scaffoldBlocks: ['dirt'],
-    })
+    }))
     assert.notEqual(rejected.status, 'reached', JSON.stringify(rejected))
     assert.equal(rejected.ok, false)
     assert.equal(rejected.edits.some(edit => edit.kind === 'scaffold_placed'), false, 'optimistic pathfinder state is not counted as a server placement')
@@ -1042,9 +1047,9 @@ async function main() {
 
     const noAckPlacement = makeBot({ gap: [2, 3, 4], corridor: true })
     noAckPlacement.testState.placementMode = 'no-ack'
-    const noAck = await skills.reachPositionWithScaffoldCleanup(noAckPlacement, {
+    const noAck = await withShortWaits(() => skills.reachPositionWithScaffoldCleanup(noAckPlacement, {
       position: { x: 6.5, y: 64, z: 0.5 }, scaffoldBlocks: ['dirt'],
-    })
+    }))
     assert.notEqual(noAck.status, 'reached', JSON.stringify(noAck))
     assert.ok(noAck.cleanupRequired.some(item => item.reason.includes('not server-confirmed')), JSON.stringify(noAck))
     assert.equal(noAck.cleanupRequired.filter(item => item.reason.includes('not server-confirmed')).length, 1)
@@ -1128,12 +1133,14 @@ async function main() {
     const unknownSupport = unknownQueuedPlacement.blockAt(new Vec3(0, 63, 0))
     const unknownTarget = unknownSupport.position.offset(0, 1, 0)
     let afterUnknownRawStarts = 0
-    const unconfirmedFirst = placeAndConfirmNavigationScaffold(unknownQueuedPlacement, unknownTarget, 'dirt', async () => true)
-    const afterUnknown = placeAndConfirmNavigationScaffold(unknownQueuedPlacement, unknownTarget.offset(0, 1, 0), 'dirt', async () => {
-      afterUnknownRawStarts++
-      return true
+    const unknownOutcomes = await withShortWaits(() => {
+      const unconfirmedFirst = placeAndConfirmNavigationScaffold(unknownQueuedPlacement, unknownTarget, 'dirt', async () => true)
+      const afterUnknown = placeAndConfirmNavigationScaffold(unknownQueuedPlacement, unknownTarget.offset(0, 1, 0), 'dirt', async () => {
+        afterUnknownRawStarts++
+        return true
+      })
+      return Promise.allSettled([unconfirmedFirst, afterUnknown])
     })
-    const unknownOutcomes = await Promise.allSettled([unconfirmedFirst, afterUnknown])
     assert.equal(unknownOutcomes[0].status, 'rejected')
     assert.equal(unknownOutcomes[1].status, 'rejected')
     assert.equal(afterUnknownRawStarts, 0, 'an unconfirmed placement invalidates already-queued scaffold attempts')
@@ -1482,10 +1489,10 @@ async function main() {
       { x: 1, y: 64, z: 0, name: 'water' }, { x: 1, y: 63, z: 0, name: 'water' },
     ] })
     rejectedWaterStaging.testState.placementMode = 'reject'
-    const rejectedStagingResult = await reachPosition(rejectedWaterStaging, {
+    const rejectedStagingResult = await withShortWaits(() => reachPosition(rejectedWaterStaging, {
       position: { x: 4.5, y: 63, z: 0.5 }, tolerance: 0.75, allowDig: false, allowScaffold: true,
       scaffoldBlocks: ['dirt'],
-    })
+    }))
     assert.notEqual(rejectedStagingResult.status, 'reached', JSON.stringify(rejectedStagingResult))
     assert.equal(rejectedWaterStaging.testState.placementAttempts, 1, 'an unconfirmed staging placement is never retried')
     assert.equal(rejectedWaterStaging.testState.edits.filter(edit => edit.kind === 'server_place').length, 0)

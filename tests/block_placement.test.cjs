@@ -336,7 +336,7 @@ async function main() {
     assert.equal(bot.getControlState('sneak'), false)
 
     bot = makeBot({ result: { name: 'furnace', properties: { facing: 'south' } } })
-    ownedResult = await owned(bot, () => invoke(bot))
+    ownedResult = await withAcceleratedClock(() => owned(bot, () => invoke(bot)))
     assert.equal(ownedResult.value, false, 'wrong server facing is not success')
     assert.equal(bot.state.pluginCalls, 1, 'wrong placement is not retried')
     assert.match(bot.output, /south/)
@@ -344,7 +344,7 @@ async function main() {
     assert.equal(ownedResult.result.skillResults[0].status, 'returned_false')
     assert.equal(bot.listenerCount('blockUpdate'), 0)
     bot = makeBot({ update: 'unknown' })
-    assert.equal(await invoke(bot), false, 'unloaded result is not confirmed')
+    assert.equal(await withAcceleratedClock(() => invoke(bot)), false, 'unloaded result is not confirmed')
     assert.equal(bot.listenerCount('blockUpdate'), 0)
 
     bot = makeBot({ cheat: true })
@@ -356,13 +356,13 @@ async function main() {
     assert.deepEqual(bot.state.commands, ['/setblock 0 65 0 furnace[facing=north] keep'])
     assert.equal(bot.state.pluginCalls, 0)
     bot = makeBot({ cheat: true, update: 'wrong' })
-    assert.equal(await invoke(bot), false, 'cheat command submission alone is not success')
+    assert.equal(await withAcceleratedClock(() => invoke(bot)), false, 'cheat command submission alone is not success')
     bot = makeBot({ cheat: true })
     assert.equal(await invoke(bot, 'furnace', { facing: 'north' }, true), true, 'dontCheat preserves normal placement')
     assert.equal(bot.state.commands.length, 0)
     assert.equal(bot.state.pluginCalls, 1)
     bot = makeBot({ cheat: true, item: 'oak_door', update: 'partial' })
-    ownedResult = await owned(bot, () => invoke(bot, 'oak_door', { facing: 'north' }))
+    ownedResult = await withAcceleratedClock(() => owned(bot, () => invoke(bot, 'oak_door', { facing: 'north' })))
     assert.equal(ownedResult.value, false, 'partial door placement requires both halves')
     assert.equal(bot.state.commands.length, 2)
     assert.equal(bot.blockAt(new Vec3(0, 65, 0)).name, 'oak_door', 'partial placement is left observable')
@@ -422,7 +422,7 @@ async function main() {
       const { value, result } = await owned(bot, fn)
       return { success: true, message: bot.output, domainReturn: value, ...result }
     } }
-    const commandResult = await executeCommand(agent, '!placeBlockFacing("furnace", 0, 65, 0, "north")')
+    const commandResult = await withAcceleratedClock(() => executeCommand(agent, '!placeBlockFacing("furnace", 0, 65, 0, "north")'))
     assert.match(commandResult, /returned_false|returned false|failed|Could not confirm/i, 'command reports failed placement even when executor settled successfully')
 
     const { Coder } = await load('src/agent/coder.js')

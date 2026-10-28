@@ -302,7 +302,7 @@ async function main() {
   let partialTransferCalls = 0
   const transferPartial = partial.transfer
   partial.transfer = async options => { partialTransferCalls++; return transferPartial(options) }
-  assert.equal(await skills.smeltItem(partial, 'raw_iron', 2), false, 'partial result must not be returned as success')
+  assert.equal(await withAcceleratedClock(() => skills.smeltItem(partial, 'raw_iron', 2)), false, 'partial result must not be returned as success')
   assert.equal(partialTransferCalls, 2, 'partial output must not trigger automatic retry')
   assert.equal(partial._fixture.writesBefore('close_window').length, 1)
   assert.match(partial.output, /Only smelted 1 .*no retry was started/)

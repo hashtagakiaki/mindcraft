@@ -7,6 +7,7 @@ const { mkdtemp, mkdir, readFile, rm, writeFile } = require('node:fs/promises')
 const os = require('node:os')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
+const { withAcceleratedClock } = require('./accelerated_clock.cjs')
 
 const repo = path.resolve(__dirname, '..')
 const node = process.execPath
@@ -645,7 +646,7 @@ async function testFarm(root) {
     }
     globalThis.farmScenario = confirmationScenario
     const confirmationBot = makeBot(confirmationScenario)
-    result = await tendNearbyFarm(confirmationBot, { scope: 'radius', radius: 32, seedReserve: 0 })
+    result = await withAcceleratedClock(() => tendNearbyFarm(confirmationBot, { scope: 'radius', radius: 32, seedReserve: 0 }))
     assert.equal(result.harvested, harvestMode === 'delayed' ? 1 : 0, `${harvestMode} harvest confirmation`)
     if (harvestMode !== 'delayed') {
       assert.equal(result.stored, 0, 'failed harvest leaves pre-existing crop inventory unstored')
@@ -737,7 +738,7 @@ async function testFarm(root) {
   plantingScenario.planted = new Map()
   plantingScenario.noPlant = true
   bot = makeBot(plantingScenario)
-  assert.equal(await tillAndSow(bot, 20, 0, 0, 'wheat'), false, 'planting returns false without a block update')
+  assert.equal(await withAcceleratedClock(() => tillAndSow(bot, 20, 0, 0, 'wheat')), false, 'planting returns false without a block update')
   assert.match(bot.output, /Could not confirm planting wheat_seeds/)
   assert.equal(bot.listenerCount('blockUpdate'), 0, 'plant listener is removed after timeout')
 
@@ -751,7 +752,7 @@ async function testFarm(root) {
     const scenario = { crops: [], farmland: [], items: [], opened: [], deposits: [], closed: 0, activations: [], planted: new Map(), cheat: true, baseBlockName: 'dirt', setblockMode }
     globalThis.farmScenario = scenario
     bot = makeBot(scenario)
-    assert.equal(await tillAndSow(bot, 30, 0, 2, 'wheat'), setblockMode === 'delayed', `${setblockMode} cheat planting update handling`)
+    assert.equal(await withAcceleratedClock(() => tillAndSow(bot, 30, 0, 2, 'wheat')), setblockMode === 'delayed', `${setblockMode} cheat planting update handling`)
     assert.equal(bot.listenerCount('blockUpdate'), 0)
     if (setblockMode === 'absent' || setblockMode === 'wrong') {
       assert.equal(scenario.setblockCommands.filter(command => command.endsWith(' wheat')).length, 0, 'crop placement waits until farmland is confirmed')

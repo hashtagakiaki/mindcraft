@@ -4,6 +4,7 @@ const assert = require('node:assert/strict')
 const { EventEmitter } = require('node:events')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
+const { withAcceleratedClock } = require('./accelerated_clock.cjs')
 
 function createBot(scenario) {
   globalThis.farmScenario = scenario
@@ -75,7 +76,7 @@ async function main() {
       scenario.currentAir = true
     })
     const bot = createBot(scenario)
-    assert.equal(await collectBlock(bot, 'iron_ore'), false)
+    assert.equal(await withAcceleratedClock(() => collectBlock(bot, 'iron_ore')), false)
     assert.equal(bot.listenerCount('itemDrop'), 0)
     assert.equal(bot.listenerCount('playerCollect'), 0)
     assert.equal(bot.listenerCount('blockUpdate'), 0)
@@ -111,7 +112,7 @@ async function main() {
       scenario.currentAir = true
     })
     scenario.items = [{ name: 'raw_iron', type: 10, count: 1 }]
-    assert.equal(await collectBlock(createBot(scenario), 'iron_ore'), false)
+    assert.equal(await withAcceleratedClock(() => collectBlock(createBot(scenario), 'iron_ore')), false)
   }
 
   // Unrelated drops, even with the right item type, are outside the target block radius.
@@ -122,7 +123,7 @@ async function main() {
       bot.emit('playerCollect', bot.entity, entity)
       scenario.currentAir = true
     })
-    assert.equal(await collectBlock(createBot(scenario), 'iron_ore'), false)
+    assert.equal(await withAcceleratedClock(() => collectBlock(createBot(scenario), 'iron_ore')), false)
   }
 
   // Matching nearby drop pickup plus server target-air confirms; either signal alone fails.
@@ -138,7 +139,7 @@ async function main() {
   }
   {
     const scenario = scenarioFor(ore(), async (_block, bot) => spawnAndPickup(bot))
-    assert.equal(await collectBlock(createBot(scenario), 'iron_ore'), false)
+    assert.equal(await withAcceleratedClock(() => collectBlock(createBot(scenario), 'iron_ore')), false)
   }
 
   // Static drops and held silk-touch enchantments select distinct item IDs.
@@ -158,7 +159,7 @@ async function main() {
     })
     const bot = createBot(scenario)
     bot.tool.equipForBlock = async () => { bot.heldItem = { type: 1, enchants: [{ name: 'silk_touch', lvl: 1 }] } }
-    assert.equal(await collectBlock(bot, 'iron_ore'), false)
+    assert.equal(await withAcceleratedClock(() => collectBlock(bot, 'iron_ore')), false)
   }
 
   // Mature wheat can produce wheat even when its guaranteed seed drop is absent.
@@ -176,7 +177,7 @@ async function main() {
       spawnAndPickup(bot, droppedItem(20))
       scenario.currentAir = true
     })
-    assert.equal(await collectBlock(createBot(scenario), 'iron_ore'), false)
+    assert.equal(await withAcceleratedClock(() => collectBlock(createBot(scenario), 'iron_ore')), false)
   }
 
   // Block count and partial-success behavior are preserved for num > 1.
@@ -195,7 +196,7 @@ async function main() {
       }
     }
     const bot = createBot(scenario)
-    assert.equal(await collectBlock(bot, 'iron_ore', 2), true)
+    assert.equal(await withAcceleratedClock(() => collectBlock(bot, 'iron_ore', 2)), true)
     assert.match(bot.output, /Collected 1 iron_ore/)
   }
 
