@@ -1493,6 +1493,34 @@ async function main() {
         'a naturally supported lower landing does not require unavailable scaffold material')
       assert.equal(noMaterialWaterExit.testState.edits.length, 0)
 
+      // Swimming cannot lift the feet above the surface cell, so a bank one
+      // block above the water needs a scaffold, never a float-up route. The
+      // channel behind the bank makes its raised top an egress candidate.
+      const raisedBankWater = [0, 1].flatMap(x => [61, 62, 63].map(y => ({ x, y, z: 0, name: 'water' })))
+        .concat([{ x: 2, y: 61 }, { x: 3, y: 61 }, ...[61, 62, 63, 64].map(y => ({ x: 4, y }))]
+          .map(point => ({ ...point, z: 0, name: 'water' })))
+      const raisedBankSolids = [2, 3].flatMap(x => [62, 63, 64].map(y => ({ x, y, z: 0, name: 'bedrock' })))
+        .concat([61, 62, 63, 64].map(y => ({ x: 5, y, z: 0, name: 'bedrock' })))
+      const raisedBankWalls = [-1, 0, 1, 2, 3, 4, 5].flatMap(x => [61, 62, 63, 64, 65, 66, 67].flatMap(y => [
+        { x, y, z: -1, name: 'bedrock' }, { x, y, z: 1, name: 'bedrock' }]))
+        .concat([61, 62, 63, 64, 65, 66, 67].map(y => ({ x: -1, y, z: 0, name: 'bedrock' })))
+      for (const [name, scaffoldInventory] of [['without scaffold', {}], ['with scaffold', { dirt: 16 }]]) {
+        const raisedBank = makeBot({ floorY: 60, startY: 63, hazards: raisedBankWater, solidBlocks: raisedBankSolids,
+          wall: raisedBankWalls, scaffoldInventory })
+        raisedBank.entity.onGround = false
+        const raisedBankResult = await reachPosition(raisedBank, { position: { x: 3.5, y: 65, z: 0.5 }, allowScaffold: false })
+        assert.equal(raisedBank.testState.paths.flatMap(route => route.path).some(node => node.x <= 1 && node.y >= 65), false,
+          `${name}: no route floats above the surface cell: ${JSON.stringify(raisedBank.testState.paths)}`)
+        if (name === 'without scaffold') {
+          assert.notEqual(raisedBankResult.status, 'reached', JSON.stringify(raisedBankResult))
+          assert.equal(raisedBank.testState.edits.length, 0)
+        } else {
+          assert.equal(raisedBankResult.status, 'reached', JSON.stringify({ result: raisedBankResult, output: raisedBank.output }))
+          assert.deepEqual(raisedBank.testState.edits.filter(edit => edit.kind === 'server_place').map(edit => edit.position),
+            [{ x: 1, y: 63, z: 0 }], 'the raised bank is reached from a scaffold placed in the surface water cell')
+        }
+      }
+
       const rejectedWaterStaging = makeBot({ floorY: 62, startY: 64, wall: stagingWalls, hazards: [
         { x: 0, y: 64, z: 0, name: 'water' }, { x: 0, y: 63, z: 0, name: 'water' },
         { x: 1, y: 64, z: 0, name: 'water' }, { x: 1, y: 63, z: 0, name: 'water' },

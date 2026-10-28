@@ -3550,12 +3550,17 @@ async function navigationRecovery(bot, suppliedMovements, requestedGoal = null) 
         return block;
     };
     const originalGetNeighbors = movementSource.getNeighbors;
+    const placementLiquidNames = new Set([...REACH_POSITION_WATER_NAMES, 'lava', 'flowing_lava']);
     let selectedWaterLanding = null;
     movements.getNeighbors = node => {
         const neighbors = originalGetNeighbors.call(movements, node);
         const fromKey = reachPositionBlockKey(new Vec3(node.x, node.y, node.z));
         const fromInside = routeCells.has(fromKey);
-        const allowed = neighbors.filter(next => fromInside || !routeCells.has(reachPositionBlockKey(new Vec3(next.x, next.y, next.z))));
+        // A block cannot be placed against a liquid face, e.g. a 1x1 tower from
+        // the surface onto the water below.
+        const allowed = neighbors.filter(next => (fromInside || !routeCells.has(reachPositionBlockKey(new Vec3(next.x, next.y, next.z))))
+            && !(next.toPlace ?? []).some(placement => !placement.useOne
+                && placementLiquidNames.has(bot.blockAt(new Vec3(placement.x, placement.y, placement.z))?.name)));
         if (fromInside && ['water', 'lava'].includes(descriptor.kind)) {
             if (descriptor.kind === 'water' && node.remainingBlocks > 0) {
                 for (const candidate of scaffoldCandidates) {
@@ -3587,7 +3592,11 @@ async function navigationRecovery(bot, suppliedMovements, requestedGoal = null) 
                 toBreak.push(block.position.floored());
             }
             const upClear = [upFeet, upHead].every(block => clear(block) || diggable(block) && movements.safeToBreak(block));
-            if (upClear && (clear(upFeet) || diggable(upFeet)) && up.y - start.y <= NAVIGATION_RECOVERY_RADIUS) {
+            // Swimming lifts the feet only while they are in the liquid. A node
+            // already in the air above the surface cannot rise again, or a path
+            // could float up and step onto a bank one block above the surface.
+            const swimming = liquidNames.has(bot.blockAt(new Vec3(node.x, node.y, node.z))?.name);
+            if (swimming && upClear && (clear(upFeet) || diggable(upFeet)) && up.y - start.y <= NAVIGATION_RECOVERY_RADIUS) {
                 allowed.push(new node.constructor(up.x, up.y, up.z, node.remainingBlocks,
                     1 + toBreak.length * movements.digCost, toBreak, []));
             }
