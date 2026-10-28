@@ -78,7 +78,7 @@ async function runFixturesInParallel(fixtures) {
       try {
         const script = typeof fixture === 'string' ? fixture : fixture.script
         const args = typeof fixture === 'string' ? [] : fixture.args
-        await runFixtureAsync(node, path.join(__dirname, script), args)
+        await runFixtureAsync(node, path.join(__dirname, script), args, fixture.label)
       } catch (error) {
         errors.push(error)
       }
@@ -800,12 +800,15 @@ async function main() {
     return
   }
   await runFixturesInParallel([
+    // Longest fixtures start first; reach_position is split so its parts overlap.
+    ...['1', '2', '3'].map(part => ({ script: 'reach_position.test.cjs', args: [part], label: `reach_position.test.cjs part ${part}` })),
+    'agent_process.test.cjs',
+    'agent_shutdown.test.cjs',
     'run_tests_output.test.cjs',
     'surface_navigation.test.cjs',
     'climbable_navigation.test.cjs',
     'enemy_retreat.test.cjs',
     'tree_felling.test.cjs',
-    'reach_position.test.cjs',
     'block_interaction.test.cjs',
     'native_sdk.test.cjs',
     'codex_session.test.cjs',
@@ -837,8 +840,6 @@ async function main() {
     'management_reconnect.test.cjs',
     'management_auth.test.cjs',
     'worker_task_registry.test.cjs',
-    'agent_process.test.cjs',
-    'agent_shutdown.test.cjs',
     'world_observation.test.cjs',
     'shutdown_experiments.cjs',
   ])

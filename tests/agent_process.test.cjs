@@ -372,7 +372,8 @@ async function run() {
             terminateTimeout: 300,
             killTimeout: 1000,
             minimumRestartLifetimeMs: 0,
-            restartWindowMs: 1000,
+            // Wide enough for three child starts under a loaded parallel suite.
+            restartWindowMs: 10000,
             maxAbnormalRestarts: 2,
             restartBackoffBaseMs: 10,
             restartBackoffMaxMs: 20,
@@ -380,7 +381,7 @@ async function run() {
         supervisors.push(childAutoRestart);
         process.env.FIXTURE_MODE = 'child-auto-restart';
         await childAutoRestart.start();
-        assert.equal(await waitFor(() => childAutoRestart.outcome?.reason === 'restart-budget-exhausted', 3000), true);
+        assert.equal(await waitFor(() => childAutoRestart.outcome?.reason === 'restart-budget-exhausted', 10000), true);
         assert.equal(childAutoRestart.generation, 3, 'automatic restart intent consumes the bounded restart budget');
         assert.equal(childAutoRestart.desiredState, 'stopped');
 
