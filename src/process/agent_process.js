@@ -11,6 +11,11 @@ const MINIMUM_RESTART_LIFETIME_MS = 10_000;
 const MAX_ABNORMAL_RESTARTS = 2;
 const RESTART_BACKOFF_BASE_MS = 1000;
 const RESTART_BACKOFF_MAX_MS = 5000;
+// The restart notice becomes the next task's request. Bare "restarted" text led
+// bots to report the restart as a finished goal and drop the interrupted work.
+const RESTART_MESSAGE = 'Agent process restarted (reconnect after a disconnect or crash). '
+    + 'Any task that was running was interrupted. Continue the most recent operator request in your conversation '
+    + 'from the current state; if it was already complete, report that briefly.';
 
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -137,7 +142,7 @@ export class AgentProcess {
                 this.desiredState = 'stopped';
                 return this.outcome;
             }
-            if (!this.#spawnGeneration(true, 'Agent process restarted.', this.count_id || 0)) return this.outcome;
+            if (!this.#spawnGeneration(true, RESTART_MESSAGE, this.count_id || 0)) return this.outcome;
             return { state: 'running', generation: this.generation };
         });
         this.restartPromise = operation.finally(() => {
@@ -483,7 +488,7 @@ export class AgentProcess {
         const explicitChildRestart = childRestartIntent && this.childExitIntent.reason === 'explicit-restart';
         if (explicitChildRestart) {
             this.outcome = { state: 'restarting', reason: 'explicit-restart', restartIntent: true, groupsGone: clean };
-            if (clean) this.#spawnGeneration(true, 'Agent process restarted.', this.count_id || 0);
+            if (clean) this.#spawnGeneration(true, RESTART_MESSAGE, this.count_id || 0);
             else this.desiredState = 'stopped';
             return;
         }
@@ -512,7 +517,7 @@ export class AgentProcess {
         };
         const desiredVersion = this.desiredVersion;
         await delay(backoff);
-        if (this.desiredState === 'running' && this.desiredVersion === desiredVersion && !this.process) this.#spawnGeneration(true, 'Agent process restarted.', this.count_id || 0);
+        if (this.desiredState === 'running' && this.desiredVersion === desiredVersion && !this.process) this.#spawnGeneration(true, RESTART_MESSAGE, this.count_id || 0);
     }
 
     #revokeCredential(generation) {

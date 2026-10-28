@@ -496,12 +496,18 @@ for (let batch = 0; batch < 10; batch++) {
       taskId: 'context-boundary-task', messageId: 'after-boundary', receiverConnectionGeneration: 5,
       connectionGeneration: 5, serverGeneration: 'synthetic-hub-generation', hubGeneration: 'synthetic-hub-generation'
     }).accepted, false, 'context after the completion boundary is explicitly rejected')
-    assert.equal(boundaryRuntime.acceptPeerMessage('PeerReceiver', 'too late peer context', {
+    const latePeer = boundaryRuntime.acceptPeerMessage('PeerReceiver', 'too late peer context', {
       id: 'peer-after-boundary', senderTaskId: 'peer-task', senderActionId: 'peer-action',
       senderConnectionGeneration: 4, senderManagementGeneration: 2, senderAgent: 'PeerReceiver',
       senderSpawnId: 'peer-spawn', receiverConnectionGeneration: 5, hubGeneration: 'synthetic-hub-generation'
-    }, { connectionGeneration: 5 }).accepted, false,
-    'peer context after the shared completion boundary is explicitly rejected')
+    }, { connectionGeneration: 5 })
+    assert.deepEqual([latePeer.accepted, latePeer.queuedForNextTask, latePeer.receiverTaskId], [true, true, null],
+      'peer context for an idle bot is queued for its next task')
+    boundaryTurn = 0
+    boundaryInputs.length = 0
+    boundaryAgent.currentTaskId = 'context-next-task'
+    assert.equal(await boundaryRuntime.run('operator', () => true, 'context-next-task'), true)
+    assert.match(boundaryInputs[0], /too late peer context/, 'the queued peer context reaches the next task')
 
     const nativeSendAgent = makeAgent('NativeSend')
     await until(() => nativeSendAgent.coder.code_template && nativeSendAgent.coder.code_lint_template)
@@ -679,6 +685,16 @@ for (let batch = 0; batch < 10; batch++) {
       finishOwnedWait(wait, { outcome: 'settled' })
     }, { timeout: 0, stallTimeoutMs: 60 })
     assert.equal((await nativeNavigation).success, true, 'a new owned route segment refreshes the native stall timer')
+    // goToGoal reports goal-distance and dig progress from its check interval.
+    const timerNavigation = agent.actions.runAction('navigation-phase-timer-progress', async () => {
+      agent.actions.setPhase('navigation')
+      const wait = beginOwnedWait({ phase: 'navigation', reason: 'goal-or-new-route-segment', timeoutMs: 400 })
+      const timer = setInterval(() => markOwnedWaitProgress(wait), 25)
+      await delay(150)
+      clearInterval(timer)
+      finishOwnedWait(wait, { outcome: 'settled' })
+    }, { timeout: 0, stallTimeoutMs: 60 })
+    assert.equal((await timerNavigation).success, true, 'progress marked from the owned check interval refreshes the stall timer')
     const noRouteProgressStartedAt = Date.now()
     const noRouteProgress = await agent.actions.runAction('navigation-phase-no-progress', async () => {
       agent.actions.setPhase('navigation')

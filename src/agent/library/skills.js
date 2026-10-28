@@ -2704,7 +2704,10 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         // toward the goal; the stall check still ends routes without progress.
         let digCompletedSinceStart = false;
         let attemptStartedAt = Date.now();
-        const onDigCompleted = () => { digCompletedSinceStart = true; };
+        // Bot event listeners run outside the owned async context; the interval
+        // below reports the completed dig as owned-wait progress.
+        let digProgressPending = false;
+        const onDigCompleted = () => { digCompletedSinceStart = true; digProgressPending = true; };
         bot.on?.('diggingCompleted', onDigCompleted);
         removeDigListener = () => bot.removeListener?.('diggingCompleted', onDigCompleted);
         let navigation = startNavigation();
@@ -2717,9 +2720,16 @@ export async function goToGoal(bot, goal, movementOverride=null) {
                 return;
             }
             const currentGoalDistance = goal.heuristic(navigationGoalPosition(bot));
+            if (digProgressPending) {
+                digProgressPending = false;
+                lastProgressAt = Date.now();
+                markOwnedWaitProgress(navigationWait);
+            }
             if (currentGoalDistance <= bestGoalDistance - 0.5) {
                 bestGoalDistance = currentGoalDistance;
                 lastProgressAt = Date.now();
+                // The action stall watchdog only sees owned-wait progress.
+                markOwnedWaitProgress(navigationWait);
             } else if (routeSegmentAdvanced()) {
                 lastProgressAt = Date.now();
             } else if (!stallError && Date.now() - lastProgressAt >= navigationStallTimeoutMs) {
@@ -2741,8 +2751,15 @@ export async function goToGoal(bot, goal, movementOverride=null) {
                     navigation = startNavigation();
                 }
             }
-        } catch (err) {
+        } catch (caught) {
+            let err = caught;
             if (!stallError) {
+                // Stopping the action clears the owned goal, which the goto wrapper
+                // reports as GoalChanged; name the actual stop reason instead.
+                if (err?.name === 'GoalChanged' && owner?.signal.aborted) {
+                    err = Object.assign(new Error(`Navigation stopped because the action was stopped (${owner.signal.reason ?? 'unknown'})`),
+                        { name: 'ActionStopped', cause: caught });
+                }
                 navigationError = true;
                 clearOwnedGoalOnFailure = true;
                 const navigationCode = err.name === 'Timeout' || lastPathUpdate?.status === 'timeout' ? 'search_limit'

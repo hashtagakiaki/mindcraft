@@ -42,6 +42,31 @@ export function validateCodexRuntime(profile) {
     return { model: selected.model, effort: selected.params?.reasoning_effort ?? 'medium', config };
 }
 
+// Kick reasons arrive as chat components; String() reduced them to "[object Object]".
+function lifecycleReason(reason) {
+    if (reason == null) return null;
+    const text = typeof reason === 'string' ? reason : JSON.stringify(reason);
+    return String(text).slice(0, 2000);
+}
+
+// Death and respawn records carry where it happened and, for deaths, what was
+// nearby, so causes can be read without the server log.
+function lifecycleObservation(bot, includeThreats) {
+    const p = bot?.entity?.position;
+    const observation = { position: p ? { x: p.x, y: p.y, z: p.z } : null, dimension: bot?.game?.dimension ?? null,
+        health: Number.isFinite(bot?.health) ? bot.health : null, food: Number.isFinite(bot?.food) ? bot.food : null,
+        isInWater: bot?.entity?.isInWater === true };
+    if (!includeThreats || !p) return observation;
+    observation.lastDamageTaken = Number.isFinite(bot.lastDamageTaken) ? bot.lastDamageTaken : null;
+    observation.lastDamageAgeMs = Number.isFinite(bot.lastDamageTime) && bot.lastDamageTime > 0 ? Date.now() - bot.lastDamageTime : null;
+    observation.nearbyEntities = Object.values(bot.entities ?? {})
+        .filter(entity => entity !== bot.entity && entity?.position && entity.type !== 'object' && entity.position.distanceTo(p) <= 16)
+        .map(entity => ({ name: entity.username ?? entity.name ?? null, type: entity.type ?? null,
+            distance: Math.round(entity.position.distanceTo(p) * 100) / 100 }))
+        .sort((a, b) => a.distance - b.distance).slice(0, 8);
+    return observation;
+}
+
 export function observedState(bot, observationScope = createObservationScope(bot)) {
     const p = bot.entity?.position;
     const items = bot.inventory?.items?.() ?? [];
@@ -165,7 +190,8 @@ export class CodexRuntime {
             for (const event of ['spawn', 'death', 'kicked', 'end']) {
                 const listener = (...args) => {
                     try { this.diagnosticRecorder(`bot_lifecycle_${event}`, {
-                        detail: event === 'kicked' ? String(args[0] ?? '').slice(0, 2000) : null,
+                        detail: event === 'kicked' ? lifecycleReason(args[0]) : null,
+                        ...(event === 'death' || event === 'spawn' ? lifecycleObservation(agent.bot, event === 'death') : {}),
                         connectionGeneration: agent.bot?.getActionCancellationContext?.()?.connectionGeneration ?? null,
                     }); } catch (error) { this.diagnosticsWriteError ||= String(error); }
                 };
@@ -181,6 +207,7 @@ export class CodexRuntime {
             this.startDiagnosticSampling();
         }
         this.nativeInbox = [];
+        this.idleInbox = [];
         this.seenNativeMessageIds = agent._nativePeerMessageIds ||= new Map();
         this.acceptingNativeInbox = false;
     }
@@ -207,13 +234,16 @@ export class CodexRuntime {
         const entities = [];
         if (validPos && typeof bot.entities === 'object') {
             for (const candidate of Object.values(bot.entities)) {
+                if (candidate === entity) continue;
                 if (!candidate?.position || ![candidate.position.x, candidate.position.y, candidate.position.z].every(Number.isFinite)) continue;
                 const dx = position.x - candidate.position.x, dy = position.y - candidate.position.y, dz = position.z - candidate.position.z;
                 const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
                 if (distance > 8 || entities.length >= 16) continue;
                 entities.push({ id: Number.isSafeInteger(candidate.id) ? candidate.id : null,
                     type: typeof candidate.type === 'string' ? candidate.type.slice(0, 40) : null,
-                    name: candidate.type === 'player' ? 'player' : typeof candidate.name === 'string' ? candidate.name.slice(0, 60) : null,
+                    // Teammate bots are named; other players stay anonymous.
+                    name: candidate.type === 'player' ? convoManager.isOtherAgent?.(candidate.username) ? candidate.username : 'player'
+                        : typeof candidate.name === 'string' ? candidate.name.slice(0, 60) : null,
                     distance: Number.isFinite(distance) ? Math.round(distance * 100) / 100 : null,
                     position: { x: candidate.position.x, y: candidate.position.y, z: candidate.position.z } });
             }
@@ -320,10 +350,10 @@ export class CodexRuntime {
                 this.incidentWriter.append('incident_repeated', { fingerprint, count: previous.count + 1,
                     taskId: event.taskId, actionId: event.actionId, callId: event.callId });
             } else {
-                this.incidentWriter.append('incident_started', { triggerType: type, triggerEventId: event.eventId,
+                this.incidentWriter.appendMany([{ type: 'incident_started', detail: { triggerType: type, triggerEventId: event.eventId,
                     taskId: event.taskId, actionId: event.actionId, callId: event.callId,
-                    ringEventCount: this.diagnosticRing.length, ringBytes: this.diagnosticRingBytes });
-                for (const item of this.diagnosticRing) this.incidentWriter.append('incident_ring_event', { event: item.event });
+                    ringEventCount: this.diagnosticRing.length, ringBytes: this.diagnosticRingBytes } },
+                ...this.diagnosticRing.map(item => ({ type: 'incident_ring_event', detail: { event: item.event } }))]);
             }
             this.activeIncidentUntil = now + 30_000;
         } catch (error) {
@@ -341,9 +371,9 @@ export class CodexRuntime {
         const event = this.diagnosticRecorder('diagnostic_capture_requested', { requestId });
         const now = Date.parse(event.at);
         try {
-            this.incidentWriter.append('incident_capture_started', { requestId, triggerEventId: event.eventId,
-                taskId: event.taskId, ringEventCount: this.diagnosticRing.length, ringBytes: this.diagnosticRingBytes });
-            for (const item of this.diagnosticRing) this.incidentWriter.append('incident_ring_event', { event: item.event });
+            this.incidentWriter.appendMany([{ type: 'incident_capture_started', detail: { requestId, triggerEventId: event.eventId,
+                taskId: event.taskId, ringEventCount: this.diagnosticRing.length, ringBytes: this.diagnosticRingBytes } },
+            ...this.diagnosticRing.map(item => ({ type: 'incident_ring_event', detail: { event: item.event } }))]);
             this.activeIncidentUntil = now + 30_000;
             this.diagnosticRecorder('diagnostic_capture_result', { requestId, accepted: true,
                 ringEventCount: this.diagnosticRing.length, ringBytes: this.diagnosticRingBytes });
@@ -403,6 +433,11 @@ export class CodexRuntime {
 
     acceptPeerMessage(sender, message, native, { connectionGeneration } = {}) {
         const scope = this._taskScope;
+        if (!this.active && connectionGeneration === serverProxy.connectionGeneration
+            && native.receiverConnectionGeneration === serverProxy.connectionGeneration
+            && serverProxy.serverGeneration === native.hubGeneration && serverProxy.managementReady) {
+            return this._acceptIdlePeerMessage(sender, message, native);
+        }
         if (!this.active || !this.acceptingNativeInbox || !scope?.isCurrent()
             || connectionGeneration !== scope.connectionGeneration
             || native.receiverConnectionGeneration !== scope.connectionGeneration
@@ -416,6 +451,34 @@ export class CodexRuntime {
             metadata: { senderTaskId: native.senderTaskId, senderActionId: native.senderActionId,
                 senderConnectionGeneration: native.senderConnectionGeneration, senderSpawnId: native.senderSpawnId,
                 hubGeneration: native.hubGeneration } });
+    }
+
+    // Peers often message a bot between tasks. Hold those messages for the next
+    // task on the same connection instead of rejecting them.
+    _acceptIdlePeerMessage(sender, message, native) {
+        if (typeof message !== 'string' || !message.trim() || message.length > 4000) {
+            return { accepted: false, error: 'context message must contain 1-4000 characters' };
+        }
+        const dedupeKey = `peer\u0000${native.senderSpawnId}\u0000${native.senderTaskId}\u0000${native.id}`;
+        const contentHash = createHash('sha256').update(message).digest('hex');
+        const prior = this.seenNativeMessageIds.get(dedupeKey);
+        if (prior !== undefined) {
+            if (prior !== contentHash) return { accepted: false, error: 'message ID was already used with different content' };
+            return { accepted: true, duplicate: true, messageId: native.id, receiverTaskId: null };
+        }
+        if (this.seenNativeMessageIds.size >= MAX_NATIVE_DEDUPE_IDS) {
+            return { accepted: false, error: 'task inbox dedupe capacity reached; new IDs are not accepted' };
+        }
+        if (this.idleInbox.length >= MAX_NATIVE_INBOX_MESSAGES) {
+            return { accepted: false, error: 'idle inbox is full' };
+        }
+        this.seenNativeMessageIds.set(dedupeKey, contentHash);
+        this.idleInbox.push({ source: 'peer', sender, message, messageId: native.id,
+            senderTaskId: native.senderTaskId, senderActionId: native.senderActionId,
+            senderConnectionGeneration: native.senderConnectionGeneration, senderSpawnId: native.senderSpawnId,
+            hubGeneration: native.hubGeneration, receiverConnectionGeneration: serverProxy.connectionGeneration,
+            receivedAt: new Date().toISOString() });
+        return { accepted: true, duplicate: false, messageId: native.id, receiverTaskId: null, queuedForNextTask: true };
     }
 
     acceptOperatorContext(message, envelope) {
@@ -492,6 +555,10 @@ export class CodexRuntime {
         if (this.active) throw new Error('Codex runtime already has an active task');
         this.abort = new AbortController();
         this.nativeInbox.length = 0;
+        // Only messages from the current connection carry over into the task.
+        this.nativeInbox.push(...this.idleInbox.splice(0)
+            .filter(entry => entry.receiverConnectionGeneration === serverProxy.connectionGeneration)
+            .map(entry => ({ ...entry, receiverTaskId: taskId, receivedDuringActionId: null })));
         this.actionId = null;
         this.images = null;
         this.taskId = taskId;

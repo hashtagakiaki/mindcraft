@@ -437,9 +437,12 @@ async function main() {
   await assert.rejects(skills.smeltItem(unknownFurnace, 'raw_iron', 1), /no full inventory snapshot/, 'furnace state without a full snapshot is not successful')
   assert.equal(unknownFurnace._fixture.writesBefore('close_window').length, 1)
   assert.equal(unknownFurnace.inventoryUnconfirmed, true, 'inventory snapshot cannot erase an unknown furnace transaction')
+  // The next action re-snapshots the player inventory instead of staying gated
+  // until reconnect; the furnace is observed again by the next smelt.
   const unknownManager = new ActionManager({ bot: unknownFurnace, self_prompter: { isActive: () => false }, isIdle: () => true })
-  assert.equal((await unknownManager.runAction('blocked-after-unknown-furnace', async () => {}, { timeout: 0 })).reason, 'inventory-unconfirmed')
-  cases.unknownFurnaceSnapshot = { success: false, closedOwnedWindow: true, inventoryUnconfirmed: true, nextActionBlocked: true }
+  assert.equal(await unknownManager._inventoryConfirmed(), true, 'a full player snapshot reopens actions after an unknown furnace transaction')
+  assert.equal(unknownFurnace.inventoryUnconfirmed, false)
+  cases.unknownFurnaceSnapshot = { success: false, closedOwnedWindow: true, inventoryUnconfirmed: true, nextActionReconfirmed: true }
 
   const managerBot = { inventoryUnconfirmed: true, output: '', interrupt_code: false, emit() {} }
   const manager = new ActionManager({ bot: managerBot, self_prompter: { isActive: () => false }, isIdle: () => true })

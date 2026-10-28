@@ -200,8 +200,12 @@ async function testFailedRetreatWaitsForChangedEncounter() {
     await agent.bot.modes.update()
     await updateUntil(() => calls.run.length === 2 && agent.actions.currentAction === null)
     enemy.position = vector(3)
+    for (let i = 0; i < 3; i++) await agent.bot.modes.update()
+    assert.equal(calls.run.length, 2, 'a chasing enemy changing cells does not restart a failed escape')
+    agent.bot.fixtureEnemies = [enemy, { ...enemy, id: 2, position: vector(4) }]
     await agent.bot.modes.update()
     await updateUntil(() => calls.run.length === 3 && agent.actions.currentAction === null)
+    agent.bot.fixtureEnemies = [enemy]
     enemy.blocked = true
     await agent.bot.modes.update()
     assert.equal(calls.run.length, 3, 'wall-separated enemy does not interrupt work')

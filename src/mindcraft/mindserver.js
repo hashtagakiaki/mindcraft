@@ -338,7 +338,7 @@ export function createMindServer(host_public = false, port = 8080) {
                 receiver.emit('chat-message', senderAgent, routed, result => {
                     if (result?.accepted === true && result.messageId === native.id && result.taskId === native.senderTaskId)
                         acknowledge?.({ accepted: true, messageId: native.id, taskId: native.senderTaskId,
-                            receiverTaskId: result.receiverTaskId ?? null });
+                            receiverTaskId: result.receiverTaskId ?? null, ...(result.queuedForNextTask === true ? { queuedForNextTask: true } : {}) });
                     else acknowledge?.({ accepted: false, error: result?.error || 'recipient did not accept inbox message' });
                 });
                 return;

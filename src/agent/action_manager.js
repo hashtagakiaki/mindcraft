@@ -127,7 +127,7 @@ export class ActionManager {
         if (this.shuttingDown) return this._rejectedResult('shutdown');
         if (this.managementPaused) return this._rejectedResult('management-paused');
         if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
-        if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
+        if (!(await this._inventoryConfirmed())) return this._rejectedResult('inventory-unconfirmed');
         if (this.recoveryPaused) return this._rejectedResult('recovery-paused');
         return this._executeResume(actionLabel, actionFn, timeout);
     }
@@ -136,7 +136,7 @@ export class ActionManager {
         if (this.shuttingDown) return this._rejectedResult('shutdown');
         if (this.managementPaused) return this._rejectedResult('management-paused');
         if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
-        if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
+        if (!(await this._inventoryConfirmed())) return this._rejectedResult('inventory-unconfirmed');
         const recoveryAdmissionId = this.agent._recoveryPromptCommand && actionLabel.startsWith('action:')
             ? this.agent._recoveryAdmissionId
             : null;
@@ -227,7 +227,7 @@ export class ActionManager {
         const newResume = actionFn != null;
         if (this.managementPaused) return this._rejectedResult('management-paused');
         if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
-        if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
+        if (!(await this._inventoryConfirmed())) return this._rejectedResult('inventory-unconfirmed');
         if (this.recoveryPaused) return this._rejectedResult('recovery-paused');
         if (this.userStopped) return this._rejectedResult('user-stop');
         if (newResume) {
@@ -256,7 +256,7 @@ export class ActionManager {
             if (this.managementPaused) return this._rejectedResult('management-paused');
             if (this.shuttingDown) return this._rejectedResult('shutdown');
             if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
-            if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
+            if (!(await this._inventoryConfirmed())) return this._rejectedResult('inventory-unconfirmed');
             if (this.recoveryPaused && !this.isRecoveryAdmission(actionLabel, recoveryAdmissionId)) return this._rejectedResult('recovery-paused');
             if (this.userStopped || intentEpoch !== this.intentEpoch) return this._rejectedResult(this.userStopped ? 'user-stop' : 'superseded');
             if (this.currentAction) {
@@ -266,7 +266,7 @@ export class ActionManager {
             if (this.managementPaused) return this._rejectedResult('management-paused');
             if (this.shuttingDown) return this._rejectedResult('shutdown');
             if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
-            if (this.agent.bot?.inventoryUnconfirmed) return this._rejectedResult('inventory-unconfirmed');
+            if (!(await this._inventoryConfirmed())) return this._rejectedResult('inventory-unconfirmed');
             if (this.recoveryPaused && !this.isRecoveryAdmission(actionLabel, recoveryAdmissionId)) return this._rejectedResult('recovery-paused');
             if (this.userStopped || intentEpoch !== this.intentEpoch) return this._rejectedResult(this.userStopped ? 'user-stop' : 'superseded');
 
@@ -460,6 +460,28 @@ export class ActionManager {
             this.agent.history.add('system', `Code execution timed out after ${timeoutMins} minutes. Attempting cooperative stop.`);
             await this.stop('timeout');
         }, timeoutMins * 60 * 1000);
+    }
+
+    // Interrupted container work (death, a stolen furnace window) leaves the
+    // inventory unconfirmed. Re-snapshot it here instead of rejecting every
+    // later action until reconnect; a failed snapshot keeps the gate closed.
+    async _inventoryConfirmed() {
+        const bot = this.agent.bot;
+        if (!bot?.inventoryUnconfirmed) return true;
+        this.inventoryReconfirmation ||= (async () => {
+            try {
+                if (bot.currentWindow && bot.currentWindow !== bot.inventory && typeof bot.closeWindow === 'function') bot.closeWindow(bot.currentWindow);
+                // Loaded on demand: most ActionManager users never need inventory sync.
+                const { default: craftingSync } = await import('./library/crafting_sync.js');
+                await craftingSync.snapshotInventory(bot);
+            } catch (error) {
+                console.warn(`Inventory reconfirmation failed: ${error?.message ?? error}`);
+            } finally {
+                this.inventoryReconfirmation = null;
+            }
+        })();
+        await this.inventoryReconfirmation;
+        return !bot.inventoryUnconfirmed;
     }
 
     _rejectedResult(reason, detail = null) {

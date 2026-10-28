@@ -9,14 +9,20 @@ const meleeMobs = new Set(['zombie', 'husk', 'zombie_villager', 'drowned', 'spid
 // ranged mobs that are merely visible would otherwise cancel every action.
 const CREEPER_RETREAT_DISTANCE = 7;
 const RANGED_RETREAT_DAMAGE_MS = 3000;
+// Melee mobs are imminent at the same range self_defense engages them.
+const MELEE_RETREAT_DISTANCE = 8;
 const RANGED_RETREAT_HEALTH = 10;
 const failedRetreats = new WeakMap();
 const terrainRevisions = new WeakMap();
 
+// A failed retreat is retried after the bot moves, the terrain changes, it takes
+// new damage, or a different set of enemies appears. Enemy positions and
+// regenerating health are excluded: they change every tick, which turned one
+// failed retreat into a retry loop.
 function encounterKey(bot, enemies) {
     const cell = p => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`;
-    return `${cell(bot.entity.position)}:${terrainRevisions.get(bot) ?? 0}:${bot.lastDamageTime}:${bot.health}:${bot.food}:` +
-        enemies.map(enemy => `${enemy.id}@${cell(enemy.position)}`).sort().join(';');
+    return `${cell(bot.entity.position)}:${terrainRevisions.get(bot) ?? 0}:${bot.lastDamageTime}:` +
+        enemies.map(enemy => enemy.id).sort().join(';');
 }
 
 function imminentThreats(bot, enemies) {
@@ -24,7 +30,7 @@ function imminentThreats(bot, enemies) {
     return enemies.filter(enemy => {
         if (enemy.name === 'creeper') return bot.entity.position.distanceTo(enemy.position) <= CREEPER_RETREAT_DISTANCE;
         if (world.isRangedThreat(enemy)) return recentlyDamaged || bot.health < RANGED_RETREAT_HEALTH;
-        return true;
+        return bot.entity.position.distanceTo(enemy.position) <= MELEE_RETREAT_DISTANCE;
     });
 }
 
@@ -42,7 +48,7 @@ function modeObservation(bot) {
         health: Number.isFinite(bot?.health) ? bot.health : null,
         food: Number.isFinite(bot?.food) ? bot.food : null,
         isInWater: bot?.entity?.isInWater === true,
-        lastDamageAgeMs: Number.isFinite(bot?.lastDamageTime) ? Math.max(0, Date.now() - bot.lastDamageTime) : null,
+        lastDamageAgeMs: Number.isFinite(bot?.lastDamageTime) && bot.lastDamageTime > 0 ? Math.max(0, Date.now() - bot.lastDamageTime) : null,
         lastDamageTaken: Number.isFinite(bot?.lastDamageTaken) ? bot.lastDamageTaken : null,
     };
 }
@@ -144,7 +150,7 @@ const modes_list = [
     },
     {
         name: 'cowardice',
-        description: 'Run away from dangerous encounters (creepers within 7 blocks; visible ranged mobs only after recent damage or below 10 health); let self-defense handle unarmed ground melee enemies when healthy and able to sprint. Interrupts all actions.',
+        description: 'Run away from dangerous encounters (creepers within 7 blocks; melee mobs within 8 blocks; visible ranged mobs only after recent damage or below 10 health); let self-defense handle unarmed ground melee enemies when healthy and able to sprint. Interrupts all actions.',
         interrupts: ['all'],
         on: true,
         active: false,
@@ -277,6 +283,7 @@ const modes_list = [
         on: true,
         active: false,
         distance: 0.5,
+        moveDistance: 2,
         update: async function (agent) {
             const player = world.getNearestEntityWhere(agent.bot, entity => entity.type === 'player', this.distance);
             if (player) {
@@ -285,7 +292,10 @@ const modes_list = [
                     const wait_time = Math.random() * 1000;
                     await new Promise(resolve => setTimeout(resolve, wait_time));
                     if (player.position.distanceTo(agent.bot.entity.position) < this.distance) {
-                        await skills.moveAwayFromEntity(agent.bot, player, this.distance);
+                        // Pathfinder goals compare block nodes. A sub-block range is
+                        // already satisfied when stacked bots stand on a chest or
+                        // slab, so move a full node clear of the other player.
+                        await skills.moveAwayFromEntity(agent.bot, player, this.moveDistance);
                     }
                 }, -1, modeDecision(this, agent.bot, 'nearby_player_elbow_room', { target: player,
                     threshold: this.distance }));

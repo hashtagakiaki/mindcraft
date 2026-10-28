@@ -205,7 +205,8 @@ class ConversationManager {
                     return;
                 }
                 finish(null, { accepted: true, messageId, senderTaskId: scope.taskId,
-                    receiverTaskId: result.receiverTaskId ?? null, acceptance: 'receiver-inbox' });
+                    receiverTaskId: result.receiverTaskId ?? null,
+                    acceptance: result.queuedForNextTask === true ? 'receiver-next-task' : 'receiver-inbox' });
             });
             if (!sent) finish(new Error('Management connection is unavailable'));
         });

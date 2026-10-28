@@ -339,8 +339,15 @@ export class DiagnosticWriter {
     }
 
     append(type, detail = {}, { critical = false } = {}) {
+        return this.appendMany([{ type, detail, critical }])[0];
+    }
+
+    // Writes several events under one lock and quota pass. Incident ring dumps
+    // hold ~1k events; appending them one by one blocked the bot event loop
+    // long enough for the server to time the connection out.
+    appendMany(items) {
         if (this.closed) throw new Error('diagnostics writer is closed');
-        if (typeof type !== 'string' || !type || type.length > 100) throw new TypeError('diagnostic event type is required');
+        if (!Array.isArray(items) || !items.length) throw new TypeError('diagnostic events are required');
         const now = this.clock();
         let versionRole = null;
         let activationEpoch = this.identity.activationEpoch ?? null;
@@ -359,23 +366,28 @@ export class DiagnosticWriter {
                 versionRole = 'previous'; activationEpoch = state.activationEpoch;
             } else versionRole = 'unclassified';
         }
-        const event = redact({ schemaVersion: 1, eventId: `${this.processRunId}:${this.pool}:${++this.sequence}`,
-            processRunId: this.processRunId, bot: this.identity.bot ?? null, sourceSha: this.identity.sourceSha ?? null,
-            versionId: this.identity.versionId ?? null, versionRole, activationEpoch,
-            bundleId: this.identity.bundleId ?? null, worldId: this.identity.worldId ?? null,
-            taskId: detail.taskId ?? null, actionId: detail.actionId ?? null, callId: detail.callId ?? null,
-            parentCallId: detail.parentCallId ?? null, at: new Date(now).toISOString(),
-            monotonicMs: Number((process.hrtime.bigint() - PROCESS_MONOTONIC_ORIGIN) / 1_000_000n),
-            sequence: this.sequence, type, critical: critical || undefined, detail });
-        let line = JSON.stringify(event) + '\n';
-        if (Buffer.byteLength(line) > MAX_EVENT_BYTES) {
-            const bytes = Buffer.byteLength(line);
-            event.detail = { truncated: true, originalBytes: bytes,
-                sha256: createHash('sha256').update(line).digest('hex'), type: event.type,
-                taskId: event.taskId, actionId: event.actionId, callId: event.callId };
-            line = JSON.stringify(event) + '\n';
-        }
-        const bytes = Buffer.byteLength(line);
+        const prepared = items.map(({ type, detail = {}, critical = false }) => {
+            if (typeof type !== 'string' || !type || type.length > 100) throw new TypeError('diagnostic event type is required');
+            const event = redact({ schemaVersion: 1, eventId: `${this.processRunId}:${this.pool}:${++this.sequence}`,
+                processRunId: this.processRunId, bot: this.identity.bot ?? null, sourceSha: this.identity.sourceSha ?? null,
+                versionId: this.identity.versionId ?? null, versionRole, activationEpoch,
+                bundleId: this.identity.bundleId ?? null, worldId: this.identity.worldId ?? null,
+                taskId: detail.taskId ?? null, actionId: detail.actionId ?? null, callId: detail.callId ?? null,
+                parentCallId: detail.parentCallId ?? null, at: new Date(now).toISOString(),
+                monotonicMs: Number((process.hrtime.bigint() - PROCESS_MONOTONIC_ORIGIN) / 1_000_000n),
+                sequence: this.sequence, type, critical: critical || undefined, detail });
+            let line = JSON.stringify(event) + '\n';
+            if (Buffer.byteLength(line) > MAX_EVENT_BYTES) {
+                const bytes = Buffer.byteLength(line);
+                event.detail = { truncated: true, originalBytes: bytes,
+                    sha256: createHash('sha256').update(line).digest('hex'), type: event.type,
+                    taskId: event.taskId, actionId: event.actionId, callId: event.callId };
+                line = JSON.stringify(event) + '\n';
+            }
+            return { event, line };
+        });
+        const lines = prepared.map(item => item.line).join('');
+        const bytes = Buffer.byteLength(lines);
         const release = lock(this.ownerRoot);
         try {
             reconcileStaleWriters(this.ownerRoot, this.pool, now);
@@ -439,12 +451,12 @@ export class DiagnosticWriter {
                 this._closeSegment(now);
                 this._newSegment(now);
             }
-            writeSync(this.current.fd, line);
+            writeSync(this.current.fd, lines);
             this.current.meta.bytes += bytes;
             this.current.meta.lastWriteAt = new Date(now).toISOString();
             this.current.meta.reservedBytes = this.segmentBytes + RESERVATION_OVERHEAD_BYTES;
             writeManifest(this.current.manifest, this.current.meta);
-            return event;
+            return prepared.map(item => item.event);
         } finally { release(); }
     }
 

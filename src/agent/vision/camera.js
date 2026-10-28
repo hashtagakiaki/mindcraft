@@ -49,6 +49,23 @@ export class Camera extends EventEmitter {
         const botPos = this.bot.entity.position;
         const center = new Vec3(botPos.x, botPos.y+this.bot.entity.height, botPos.z);
         this.viewer.setVersion(this.bot.version);
+        // prismarine-viewer throws while building meshes for some 1.21 entity
+        // models (a bone whose parent is missing). The throw escapes into the
+        // bot's entity packet handler; skip drawing those entities instead.
+        const updateEntity = this.viewer.updateEntity;
+        if (typeof updateEntity === 'function') {
+            const unrenderable = new Set();
+            this.viewer.updateEntity = function (entity) {
+                try { return updateEntity.call(this, entity); }
+                catch (error) {
+                    const name = entity?.name ?? 'unknown';
+                    if (!unrenderable.has(name)) {
+                        unrenderable.add(name);
+                        console.warn(`Camera cannot render entity ${name}; it is omitted from captures: ${error?.message ?? error}`);
+                    }
+                }
+            };
+        }
         // Load world
         const worldView = (this._dependencies.createWorldView || ((world, distance, point) => new WorldView(world, distance, point)))(this.bot.world, this.viewDistance, center);
         this.viewer.listen(worldView);
