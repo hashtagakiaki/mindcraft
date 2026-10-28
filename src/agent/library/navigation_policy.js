@@ -48,6 +48,49 @@ export function withNavigationScaffoldTickGate(bot, registerPathfinder) {
     finally { if (bot.on === gatedOn) bot.on = originalOn; }
 }
 
+export async function navigateWithEditErrors(bot, goal, body) {
+    const originals = new Map();
+    const wrappers = new Map();
+    let failure = null;
+    let active = true;
+    const failed = error => {
+        if (!active) return;
+        failure ??= error;
+        // Pathfinder swallows equip errors and can retain its equip lock and
+        // building state. Changing this call's goal settles goto and clears
+        // those states, while the original edit error remains the result.
+        if (bot.pathfinder.goal === goal) bot.pathfinder.setGoal(null);
+    };
+    for (const name of ['equip', 'dig', 'placeBlock']) {
+        const original = bot[name];
+        if (typeof original !== 'function') continue;
+        const wrapper = function (...args) {
+            try {
+                const result = original.apply(this, args);
+                return result?.then ? result.catch(error => { failed(error); throw error; }) : result;
+            } catch (error) {
+                failed(error);
+                throw error;
+            }
+        };
+        originals.set(name, original);
+        wrappers.set(name, wrapper);
+        bot[name] = wrapper;
+    }
+    try {
+        const result = await body();
+        if (failure) throw failure;
+        return result;
+    } catch (error) {
+        throw failure ?? error;
+    } finally {
+        active = false;
+        for (const [name, original] of originals) {
+            if (bot[name] === wrappers.get(name)) bot[name] = original;
+        }
+    }
+}
+
 export function registerNavigationCleanup(cleanup) {
     const previous = cleanupOwnedScaffolds;
     cleanupOwnedScaffolds = cleanup;
@@ -69,7 +112,7 @@ export function registerNavigationScaffoldSettledCallback(bot, callback) {
 }
 
 
-export async function placeAndConfirmNavigationScaffold(bot, position, blockName, action) {
+export async function placeAndConfirmNavigationScaffold(bot, position, blockName, action, prepare = null) {
     const key = `${position.x},${position.y},${position.z}`;
     let pending = pendingScaffoldPlacements.get(bot);
     if (!pending) {
@@ -102,6 +145,14 @@ export async function placeAndConfirmNavigationScaffold(bot, position, blockName
         // this bot, not just attempts targeting the same coordinate.
         const previousConfirmed = await previousPlacement;
         if (!previousConfirmed) throw placementNotAttempted('Navigation stopped after an unconfirmed scaffold placement.');
+        if (navigationCancelled(bot)) throw placementNotAttempted('Action cancelled before the next navigation edit.');
+        // Turning can take longer than a jump. Finish it before checking body
+        // clearance so the placement does not wait for aim while falling back
+        // into the target block.
+        if (prepare) {
+            try { await prepare(); }
+            catch (error) { error.navigationPlacementAttempted = false; throw error; }
+        }
         if (navigationCancelled(bot)) throw placementNotAttempted('Action cancelled before the next navigation edit.');
         await waitForScaffoldClearance(bot, position);
         if (navigationCancelled(bot)) throw placementNotAttempted('Action cancelled before the next navigation edit.');
@@ -334,7 +385,8 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
                         if (error.navigationPlacementAttempted !== false) error.navigationPlacementAttempted = false;
                         throw error;
                     }
-                });
+                }, () => bot.lookAt(reference.position.offset(
+                    0.5 + face.x * 0.5, 0.5 + face.y * 0.5, 0.5 + face.z * 0.5)));
         } catch (error) {
             if (error.navigationPlacementAttempted !== false && !context.unconfirmedScaffolds.some(entry => ['x', 'y', 'z'].every(axis => entry[axis] === target[axis]))) {
                 context.unconfirmedScaffolds.push({ ...point(target), block: blockName,

@@ -9,7 +9,7 @@ import craftingSync from "./crafting_sync.js";
 import { placeBlockOriented } from './block_placement.js';
 import { resolveBlockInteraction, makeBlockInteractionGoal, interactionFaceVector, interactionEye } from './block_interaction.js';
 import { trackSkill, reportSkillOutcome, skillFailure, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, operationCallContext, withSkillPhase, registerOwnedPromise, withNativeNavigationEditScope, nativeNavigationEditScopeActive } from './operation_context.js';
-import { awaitNavigationPlacementSettled, beginNavigationEdit, navigationPolicy, navigationScaffoldsPlaced, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, placeAndConfirmNavigationScaffold, recordNavigationArrival, registerNavigationCleanup, registerNavigationScaffoldSettledCallback, trackNavigationSegment } from './navigation_policy.js';
+import { awaitNavigationPlacementSettled, beginNavigationEdit, navigateWithEditErrors, navigationPolicy, navigationScaffoldsPlaced, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, placeAndConfirmNavigationScaffold, recordNavigationArrival, registerNavigationCleanup, registerNavigationScaffoldSettledCallback, trackNavigationSegment } from './navigation_policy.js';
 
 const require = createRequire(import.meta.url);
 
@@ -2783,8 +2783,9 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         setActionPhase(cancellation, 'navigation');
         // Emergency reachPosition already owns and confirms its edits. A second
         // segment would reapply the normal policy and enqueue placement twice.
+        const navigate = () => navigateWithEditErrors(bot, goal, () => bot.pathfinder.goto(goal));
         const startNavigation = () => navigationRecoveryActive.has(bot)
-            ? bot.pathfinder.goto(goal) : trackNavigationSegment(bot, () => bot.pathfinder.goto(goal));
+            ? navigate() : trackNavigationSegment(bot, navigate);
         // Pathfinder's think timeout is wall-clock and keeps running while the bot
         // digs, so slow breaks (bare-hand stone takes ~7.5s) end goto with Timeout
         // mid-route. After a completed dig or goal/segment progress, continue
@@ -3989,7 +3990,8 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                         if (error.navigationPlacementAttempted !== false) error.navigationPlacementAttempted = false;
                         throw error;
                     }
-                });
+                }, () => bot.lookAt(reference.position.offset(
+                    0.5 + face.x * 0.5, 0.5 + face.y * 0.5, 0.5 + face.z * 0.5)));
         } catch (error) {
             const position = { x: targetPosition.x, y: targetPosition.y, z: targetPosition.z };
             if (error.navigationPlacementAttempted !== false && !unconfirmedScaffolds.some(entry => entry.position.x === position.x && entry.position.y === position.y && entry.position.z === position.z)) {

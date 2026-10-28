@@ -77,6 +77,7 @@ function makeBot({ gap = [], wall = [], hazards = [], unknown = [], solidBlocks 
   const states = new Map()
   const inventory = { ...scaffoldInventory }
   const edits = []
+  const placementPreparation = []
   let loadedThroughX = loadedMaxX
   let placementMode = 'accept'
   let placementDelay = 0
@@ -85,6 +86,7 @@ function makeBot({ gap = [], wall = [], hazards = [], unknown = [], solidBlocks 
   let pathAdvancedWhilePlacementPending = false
   const paths = []
   bot.testState = { edits, inventory, paths, equippedForBlocks: [], setBlock(position, name) { states.set(key(position), { name }) }, get placementMode() { return placementMode }, set placementMode(value) { placementMode = value }, set placementDelay(value) { placementDelay = value }, get placementAttempts() { return placementAttempts }, get pendingPlacementActions() { return pendingPlacementActions }, get pathAdvancedWhilePlacementPending() { return pathAdvancedWhilePlacementPending } }
+  bot.testState.placementPreparation = placementPreparation
   bot.registry = registry
   bot.version = '1.21.1'
   bot.output = ''
@@ -138,6 +140,7 @@ function makeBot({ gap = [], wall = [], hazards = [], unknown = [], solidBlocks 
   bot.tool = { equipForBlock: async block => { bot.testState.equippedForBlocks.push(block.name) } }
   bot.heldItem = null
   bot.equip = async item => { bot.heldItem = item }
+  bot.lookAt = async point => { placementPreparation.push({ kind: 'aim', point: { ...point } }) }
   const controls = new Map()
   bot.setControlState = (name, value) => {
     controls.set(name, value)
@@ -159,6 +162,8 @@ function makeBot({ gap = [], wall = [], hazards = [], unknown = [], solidBlocks 
     return true
   }
   bot.placeBlock = async (support, face) => {
+    placementPreparation.push({ kind: 'place', point: { ...support.position.offset(
+      0.5 + face.x * 0.5, 0.5 + face.y * 0.5, 0.5 + face.z * 0.5) } })
     const p = support.position.plus(face).floored()
     placementAttempts++
     if (placementDelay) await delay(placementDelay)
@@ -572,6 +577,10 @@ async function main() {
     assert.ok(nativeLeave.testState.edits.some(edit => edit.kind === 'server_place'), 'native reachPosition leaves confirmed scaffolds in place')
     assert.equal(nativeLeave.testState.edits.some(edit => edit.kind === 'server_dig'), false, 'native reachPosition does no route cleanup')
     assert.ok(nativeLeave.testState.inventory.dirt < 16, 'left scaffolds remain in the world and consume only the blocks actually placed')
+    assert.deepEqual(nativeLeave.testState.placementPreparation,
+      nativeLeave.testState.placementPreparation.filter(event => event.kind === 'place')
+        .flatMap(event => [{ kind: 'aim', point: event.point }, event]),
+      'reachPosition prepares each exact support face before placing')
 
     const noScaffoldMaterials = makeBot()
     noScaffoldMaterials.testState.inventory.dirt = 0
@@ -927,6 +936,10 @@ async function main() {
     assert.equal(outerScaffoldResult, true, 'navigation scope preserves its existing boolean result')
     assert.ok(outerScaffoldBot.testState.edits.some(edit => edit.kind === 'server_place'))
     assert.ok(outerScaffoldBot.testState.edits.some(edit => edit.kind === 'server_dig'))
+    assert.deepEqual(outerScaffoldBot.testState.placementPreparation, [
+      { kind: 'aim', point: { x: 1.5, y: 64, z: 0.5 } },
+      { kind: 'place', point: { x: 1.5, y: 64, z: 0.5 } },
+    ], 'the ordinary navigation wrapper prepares the same support face as reachPosition')
 
     const earlyNoPathBot = makeBot()
     earlyNoPathBot.testState.placementDelay = 80
@@ -1063,7 +1076,9 @@ async function main() {
     const clearancePlacement = makeBot()
     const clearanceSupport = clearancePlacement.blockAt(new Vec3(0, 63, 0))
     const clearanceTarget = clearanceSupport.position.offset(0, 1, 0)
+    clearancePlacement.entity.position.y = clearanceTarget.y + 1.2
     clearancePlacement.heldItem = clearancePlacement.inventory.items().find(item => item.name === 'dirt')
+    const preparationOrder = []
     let pathfinderJumpResets = 0
     clearancePlacement.on('physicsTick', () => {
       pathfinderJumpResets++
@@ -1071,14 +1086,22 @@ async function main() {
     })
     const resetJumpTimer = setTimeout(() => clearancePlacement.emit('physicsTick'), 10)
     const clearedPlacement = await placeAndConfirmNavigationScaffold(clearancePlacement, clearanceTarget, 'dirt', async () => {
+      preparationOrder.push('action')
       assert.ok(clearancePlacement.entity.position.y >= clearanceTarget.y + 1.1,
         'a tower placement waits until the player clears the target block top')
       assert.equal(clearancePlacement.getControlState('jump'), false, 'the helper restores the prior jump state after clearance')
       return clearancePlacement.placeBlock(clearanceSupport, new Vec3(0, 1, 0))
+    }, async () => {
+      preparationOrder.push('prepare-start')
+      await delay(20)
+      // Turning outlasts the first jump; clearance must be measured again.
+      clearancePlacement.entity.position.y = clearanceTarget.y
+      preparationOrder.push('prepare-end')
     })
     clearTimeout(resetJumpTimer)
     assert.equal(pathfinderJumpResets, 1, 'the fixture simulates pathfinder clearing jump on physicsTick')
     assert.equal(clearedPlacement.block.name, 'dirt')
+    assert.deepEqual(preparationOrder, ['prepare-start', 'prepare-end', 'action'])
 
     const cancelledQueuedPlacement = makeBot()
     cancelledQueuedPlacement.entity.position = new Vec3(1.5, 64, 0.5)
@@ -1157,6 +1180,32 @@ async function main() {
     releaseRouteEdit()
     pendingRouteEditBot.emit('physicsTick')
     assert.equal(pendingRoutePathfinderTicks, 1, 'pathfinder resumes after the owned route edit settles')
+
+    // Use the real plugin: its equip rejection handler otherwise keeps the
+    // equip lock and placing=true forever, without rejecting goto.
+    const failedEquipBot = makeBot()
+    failedEquipBot.entity.position.y = 64.2
+    failedEquipBot.clearControlStates = () => {
+      for (const control of ['jump', 'sneak', 'forward']) failedEquipBot.setControlState(control, false)
+    }
+    const equipFailure = new Error('Navigation stopped after an unconfirmed scaffold placement.')
+    let rejectedEquipCalls = 0
+    const rejectedEquip = failedEquipBot.equip = async () => { rejectedEquipCalls++; throw equipFailure }
+    withNavigationScaffoldTickGate(failedEquipBot, () => pathfinder.pathfinder(failedEquipBot))
+    failedEquipBot.pathfinder.getPathTo = () => ({ status: 'success', path: [{
+      x: 0, y: 66, z: 0, toBreak: [],
+      toPlace: [{ x: 0, y: 63, z: 0, dx: 0, dy: 1, dz: 0, jump: true }],
+    }] })
+    const equipFailureGoal = new pathfinder.goals.GoalBlock(0, 66, 0)
+    const failedEquipNavigation = assert.rejects(skills.goToGoal(failedEquipBot, equipFailureGoal), error => error === equipFailure)
+    await delay(5)
+    failedEquipBot.emit('physicsTick')
+    await failedEquipNavigation
+    assert.equal(rejectedEquipCalls, 1)
+    assert.equal(failedEquipBot.pathfinder.goal, null, 'the failed navigation releases only its owned goal')
+    assert.equal(failedEquipBot.pathfinder.isBuilding(), false, 'equip failure clears the plugin building state immediately')
+    assert.equal(failedEquipBot.getControlState('jump'), false, 'equip failure releases held jump')
+    assert.equal(failedEquipBot.equip, rejectedEquip, 'navigation restores the original edit methods')
 
     const routeDigGateBot = makeBot()
     let routeDigGateTicks = 0
