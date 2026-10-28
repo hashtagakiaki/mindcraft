@@ -801,6 +801,7 @@ async function main() {
   await runFixturesInParallel([
     'run_tests_output.test.cjs',
     'surface_navigation.test.cjs',
+    'climbable_navigation.test.cjs',
     'enemy_retreat.test.cjs',
     'tree_felling.test.cjs',
     'reach_position.test.cjs',

@@ -8,6 +8,7 @@ import { plugin as collectblock } from 'mineflayer-collectblock';
 import { plugin as autoEat } from 'mineflayer-auto-eat';
 import plugin from 'mineflayer-armor-manager';
 import { miningSyncPlugin } from '../agent/library/mining_sync.js';
+import { climbableNavigationPlugin } from '../agent/library/climbable_navigation.js';
 import { withNavigationScaffoldTickGate } from '../agent/library/navigation_policy.js';
 import { createMinecraftConnectionProtocolOptions } from './minecraft_protocol_overrides.js';
 import { capturePartialReadErrors } from './partial_read_capture.js';
@@ -125,6 +126,7 @@ export function initBot(username) {
 
     bot.loadPlugin((pluginBot, pluginOptions) =>
         withNavigationScaffoldTickGate(pluginBot, () => pathfinder(pluginBot, pluginOptions)));
+    bot.loadPlugin(climbableNavigationPlugin);
     bot.loadPlugin(pvp);
     bot.loadPlugin(collectblock);
     bot.loadPlugin(autoEat);
