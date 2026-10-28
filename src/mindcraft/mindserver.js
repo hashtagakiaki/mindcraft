@@ -683,7 +683,7 @@ function settingsFingerprint(value) {
     return createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
 }
 
-function agentsStatusUpdate(socket) {
+export function agentsStatusUpdate(socket) {
     let agents = [];
     for (let agentName in agent_connections) {
         const conn = agent_connections[agentName];

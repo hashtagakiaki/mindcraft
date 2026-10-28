@@ -1,4 +1,4 @@
-import { createMindServer, registerAgent, unregisterAgent, numStateListeners, issueBotCredential, revokeBotCredential } from './mindserver.js';
+import { createMindServer, registerAgent, unregisterAgent, agentsStatusUpdate, numStateListeners, issueBotCredential, revokeBotCredential } from './mindserver.js';
 import { AgentProcess } from '../process/agent_process.js';
 import { getServer } from './mcserver.js';
 import { getBotViewerPort } from '../utils/viewer_ports.js';
@@ -237,6 +237,7 @@ async function createReservedAgent(settings, agent_name, creationToken, startSto
         agent_processes[settings.profile.name] = agentProcess;
         if (startStopped) {
             agentProcess.initialStartOptions = { load_memory, init_message, agentIndex };
+            agentsStatusUpdate();
             return { success: true, error: null };
         }
         const started = await agentProcess.start(load_memory, init_message, agentIndex);
