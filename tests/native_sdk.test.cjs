@@ -35,7 +35,7 @@ async function main() {
   const execution = getNativeSdkExecutionMetadata()
   assert.deepEqual(docs.map(doc => doc.split('\n')[0]), methodNames)
   assert.ok(docs.every(doc => !/Signature:.*\(bot[,)]/.test(doc)))
-  assert.equal(methodNames.length, 79)
+  assert.equal(methodNames.length, 80)
   for (const retired of ['skills.log', 'world.isEntityType', 'world.getNearestBlock', 'world.getNearestBlocksWhere']) {
     assert.ok(!methodNames.includes(retired), `${retired} is not model-facing`)
     assert.ok(getRetiredNativeSdkReplacement(retired), `${retired} names its replacement`)
@@ -147,6 +147,8 @@ async function main() {
   invalid(sdk.skills.placeBlock, [{ blockType: 'stone', position: input.position, dontCheat: true }], 'dontCheat')
   assert.deepEqual(await sdk.skills.goToNearestBlock({ blockType: 'chest' }), [botA, 'chest', 2, 64])
   invalid(sdk.skills.goToNearestBlock, [{ blockType: 'chest', navigation: { allowDig: true } }], 'navigation')
+  assert.deepEqual(await sdk.skills.exploreUntilBlock({ blockTypes: ['bell'] }), [botA, { blockTypes: ['bell'], searchRadius: 64, stepDistance: 32, timeoutMs: 300000 }])
+  invalid(sdk.skills.exploreUntilBlock, [{}], 'blockTypes')
   invalid(sdk.skills.followPlayer, [{ playerName: 'Steve', preserveEnvironment: false }], 'preserveEnvironment')
   assert.deepEqual(sdk.skills.goToPosition({ position: input.position }), [botA, {
     position: input.position, arrivalMode: 'block', allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt', 'cobblestone'],

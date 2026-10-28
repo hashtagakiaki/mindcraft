@@ -178,6 +178,7 @@ export function inspectBlockAt(bot, x, y, z) {
       distance: interaction.distance ?? null, reason: interaction.reason ?? null } };
 }
 export function getNearestBlocksWhere(bot, predicate) { return (bot.navigation.blocks || []).filter(predicate); }
+export function getNearestBlocks(bot, types) { return (bot.navigation.blocks || []).filter(block => types.includes(block.name)); }
 export function getNearestEntityWhere(bot, predicate) { return (bot.navigation.entities || []).find(predicate) || null; }
 export function isEntityType(name) { return name === 'cow'; }
 export function shouldPlaceTorch() { return false; }
@@ -194,6 +195,10 @@ class GoalNear {
   constructor(x, y, z, range) { this.x = Math.floor(x); this.y = Math.floor(y); this.z = Math.floor(z); this.rangeSq = range * range; }
   heuristic(node) { const dx = this.x - node.x; const dy = this.y - node.y; const dz = this.z - node.z; return Math.hypot(dx, dz) + Math.abs(dy); }
 }
+class GoalNearXZ {
+  constructor(x, z, range) { this.x = Math.floor(x); this.z = Math.floor(z); this.rangeSq = range * range; }
+  heuristic(node) { return Math.hypot(this.x - node.x, this.z - node.z); }
+}
 class GoalFollow {
   constructor(entity, range) { this.entity = entity; this.x = Math.floor(entity.position.x); this.y = Math.floor(entity.position.y); this.z = Math.floor(entity.position.z); this.rangeSq = range * range; }
   heuristic(node) { const dx = this.x - node.x; const dy = this.y - node.y; const dz = this.z - node.z; return Math.hypot(dx, dz) + Math.abs(dy); }
@@ -207,7 +212,7 @@ class GoalCompositeAll {
   heuristic(node) { return Math.max(...this.goals.map(goal => goal.heuristic(node))); }
 }
 class GoalLookAtBlock { constructor(position, world, options) { this.position = position; this.world = world; this.options = options; } heuristic(node) { return Math.hypot(this.position.x - node.x, this.position.z - node.z) + Math.abs(this.position.y - node.y); } }
-export default { goals: { GoalNear, GoalFollow, GoalInvert, GoalCompositeAll, GoalLookAtBlock }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } } };
+export default { goals: { GoalNear, GoalNearXZ, GoalFollow, GoalInvert, GoalCompositeAll, GoalLookAtBlock }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } } };
 `)
 }
 
@@ -344,6 +349,32 @@ async function testNavigation(root) {
   bot = makeBot()
   assert.equal(await skills.goToNearestBlock(bot, 'chest'), true)
   assert.equal(await skills.goToNearestEntity(bot, 'cow'), true)
+  const movablePosition = (x, z) => ({ x, y: 0, z, clone() { return movablePosition(this.x, this.z) },
+    floored() { return { x: Math.floor(this.x), y: 0, z: Math.floor(this.z) } }, offset() { return this }, distanceTo: () => 0 })
+  bot = makeBot()
+  bot.navigation.blocks = []
+  bot.entity.position = movablePosition(0, 0)
+  bot.pathfinder.goto = async goal => {
+    bot.entity.position = movablePosition(goal.x, goal.z)
+    if (++bot.exploreSteps === 2) bot.navigation.blocks = [{ name: 'bell', position: { x: 90, y: 70, z: 5 } }]
+  }
+  bot.exploreSteps = 0
+  const explored = await skills.exploreUntilBlock(bot, { blockTypes: ['bell'] })
+  assert.equal(explored.ok, true)
+  assert.equal(explored.status, 'found')
+  assert.deepEqual(explored.block, { name: 'bell', position: { x: 90, y: 70, z: 5 } })
+  assert.equal(explored.steps, 2, 'exploration stops at the first observation of a listed block')
+  bot = makeBot()
+  bot.navigation.blocks = []
+  bot.entity.position = movablePosition(0, 0)
+  const stuck = await skills.exploreUntilBlock(bot, { blockTypes: ['bell'] })
+  assert.equal(stuck.ok, false)
+  assert.equal(stuck.status, 'blocked', 'consecutive steps without movement end exploration')
+  assert.equal(stuck.steps, 6)
+  bot.pathfinder.goto = () => delay(5)
+  const timedOut = await skills.exploreUntilBlock(bot, { blockTypes: ['bell'], timeoutMs: 1 })
+  assert.equal(timedOut.status, 'not_found')
+  assert.equal(timedOut.code, 'timeout')
   bot = makeBot()
   const actionPhases = []
   const cancellation = { signal: new AbortController().signal, setPhase(phase) { actionPhases.push(phase) } }

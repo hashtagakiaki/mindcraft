@@ -4602,6 +4602,57 @@ export async function goToNearestEntity(bot, entityType, min_distance=2, range=6
     return await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z, min_distance);
 }
 
+export async function exploreUntilBlock(bot, options = {}) {
+    /**
+     * Wander outward until one of the given block types is loaded within searchRadius, e.g. bell or hay_block to find a village. 構造物探しの探索移動。
+     * @param {MinecraftBot} bot - Pass bot first.
+     * @param {object} options - Named options.
+     * @param {string[]} options.blockTypes - Block names to look for; any one ends the search.
+     * @param {number} options.searchRadius - Observation radius checked before each step, default 64.
+     * @param {number} options.stepDistance - Horizontal distance of each wander step, default 32.
+     * @param {number} options.timeoutMs - Search time budget, default 300000.
+     * @returns {Promise<object>} found returns {ok:true,status:'found',block:{name,position},steps,travelled,elapsedMs}; otherwise ok:false with status not_found (timeout), blocked (repeated route failures) or cancelled. It does not approach the found block.
+     * @example
+     * const result = await skills.exploreUntilBlock(bot, { blockTypes: ['bell', 'hay_block'] });
+     **/
+    const { blockTypes, searchRadius = 64, stepDistance = 32, timeoutMs = 300000 } = options ?? {};
+    if (!Array.isArray(blockTypes) || blockTypes.length === 0) throw new TypeError('skills.exploreUntilBlock(bot, options): blockTypes must be a nonempty array of block names.');
+    const unknown = blockTypes.filter(name => !Number.isInteger(mc.getBlockId(name)));
+    if (unknown.length) throw new TypeError(`skills.exploreUntilBlock(bot, options): unknown block types ${unknown.join(', ')}.`);
+    const context = getActionContext(bot);
+    const startedAt = Date.now();
+    const start = bot.entity.position.clone();
+    let heading = Math.random() * 2 * Math.PI;
+    let steps = 0;
+    let failures = 0;
+    let lastFailure = null;
+    const summary = () => ({ steps, travelled: Math.round(Math.hypot(bot.entity.position.x - start.x, bot.entity.position.z - start.z)),
+        elapsedMs: Date.now() - startedAt });
+    const finish = result => { log(bot, JSON.stringify(result)); return result; };
+    while (true) {
+        const block = world.getNearestBlocks(bot, blockTypes, searchRadius, 1)[0];
+        if (block) return finish({ ok: true, status: 'found', block: { name: block.name, position: { x: block.position.x, y: block.position.y, z: block.position.z } }, ...summary() });
+        if (isActionCancelled(bot, context)) return finish({ ok: false, status: 'cancelled', code: 'cancelled', reason: 'Exploration cancelled.', ...summary() });
+        if (Date.now() - startedAt >= timeoutMs) return finish({ ok: false, status: 'not_found', code: 'timeout',
+            reason: `No ${blockTypes.join('/')} found within ${timeoutMs}ms of exploration.`, ...summary() });
+        // Keep a mostly straight heading so the search spreads outward; turn further after each failed step.
+        heading += failures === 0 ? (Math.random() - 0.5) * Math.PI / 3 : (failures % 2 ? 1 : -1) * failures * Math.PI / 3;
+        const pos = bot.entity.position;
+        const goal = new pf.goals.GoalNearXZ(pos.x + Math.cos(heading) * stepDistance, pos.z + Math.sin(heading) * stepDistance, 4);
+        const before = pos.clone();
+        try {
+            await goToGoal(bot, goal);
+        } catch (err) {
+            lastFailure = { code: err?.navigation?.code ?? 'route_failed', reason: String(err?.message ?? err) };
+        }
+        steps++;
+        const moved = Math.hypot(bot.entity.position.x - before.x, bot.entity.position.z - before.z);
+        if (moved >= stepDistance / 4) failures = 0;
+        else if (++failures >= 6) return finish({ ok: false, status: 'blocked', code: lastFailure?.code ?? 'no_progress',
+            reason: `Exploration made no progress in ${failures} directions${lastFailure ? `: ${lastFailure.reason}` : '.'}`, ...summary() });
+    }
+}
+
 export async function goToPlayer(bot, username, distance=3) {
     /**
      * Navigate to the given player.
