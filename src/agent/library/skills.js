@@ -4602,6 +4602,24 @@ export async function goToNearestEntity(bot, entityType, min_distance=2, range=6
     return await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z, min_distance);
 }
 
+const EXPLORE_STEP_TIMEOUT_MS = 20000;
+const EXPLORE_TURNS = [0, 1, -1, 2, -2, 3, -3].map(turn => turn * Math.PI / 4);
+const EXPLORE_SURFACE_SCAN = 48;
+
+// Feet position on the topmost ground of a loaded column; trees are not ground. Water columns
+// return null so wandering turns toward land: open-water recovery cannot find a landing.
+function exploreSurfaceTarget(bot, x, z, nearY) {
+    const column = new Vec3(Math.floor(x), 0, Math.floor(z));
+    for (let y = Math.floor(nearY) + EXPLORE_SURFACE_SCAN; y >= Math.floor(nearY) - EXPLORE_SURFACE_SCAN; y--) {
+        const block = bot.blockAt(column.offset(0, y, 0));
+        if (!block) continue;
+        if (block.name === 'air' || block.name === 'cave_air' || block.name.endsWith('_leaves') || block.name.endsWith('_log')) continue;
+        if (block.name === 'water' || block.name === 'lava') return null;
+        if (block.boundingBox === 'block') return { x: column.x, y: y + 1, z: column.z };
+    }
+    return null;
+}
+
 export async function exploreUntilBlock(bot, options = {}) {
     /**
      * Wander outward until one of the given block types is loaded within searchRadius, e.g. bell or hay_block to find a village. 構造物探しの探索移動。
@@ -4611,7 +4629,7 @@ export async function exploreUntilBlock(bot, options = {}) {
      * @param {number} options.searchRadius - Observation radius checked before each step, default 64.
      * @param {number} options.stepDistance - Horizontal distance of each wander step, default 32.
      * @param {number} options.timeoutMs - Search time budget, default 300000.
-     * @returns {Promise<object>} found returns {ok:true,status:'found',block:{name,position},steps,travelled,elapsedMs}; otherwise ok:false with status not_found (timeout), blocked (repeated route failures) or cancelled. It does not approach the found block.
+     * @returns {Promise<object>} found returns {ok:true,status:'found',block:{name,position},steps,travelled,elapsedMs}; otherwise ok:false with status not_found (timeout), blocked (no progress in any of seven directions) or cancelled. It does not approach the found block.
      * @example
      * const result = await skills.exploreUntilBlock(bot, { blockTypes: ['bell', 'hay_block'] });
      **/
@@ -4635,21 +4653,32 @@ export async function exploreUntilBlock(bot, options = {}) {
         if (isActionCancelled(bot, context)) return finish({ ok: false, status: 'cancelled', code: 'cancelled', reason: 'Exploration cancelled.', ...summary() });
         if (Date.now() - startedAt >= timeoutMs) return finish({ ok: false, status: 'not_found', code: 'timeout',
             reason: `No ${blockTypes.join('/')} found within ${timeoutMs}ms of exploration.`, ...summary() });
-        // Keep a mostly straight heading so the search spreads outward; turn further after each failed step.
-        heading += failures === 0 ? (Math.random() - 0.5) * Math.PI / 3 : (failures % 2 ? 1 : -1) * failures * Math.PI / 3;
-        const pos = bot.entity.position;
-        const goal = new pf.goals.GoalNearXZ(pos.x + Math.cos(heading) * stepDistance, pos.z + Math.sin(heading) * stepDistance, 4);
-        const before = pos.clone();
+        // Head away from the start so the search keeps reaching new chunks; after a failed step try
+        // the next offset from that outward direction instead of reversing the whole walk.
+        const before = bot.entity.position.clone();
+        const away = Math.hypot(before.x - start.x, before.z - start.z) >= stepDistance
+            ? Math.atan2(before.z - start.z, before.x - start.x) : heading;
+        let target = null;
+        for (; failures < EXPLORE_TURNS.length && !target; failures += target ? 0 : 1) {
+            const angle = away + EXPLORE_TURNS[failures] + (failures === 0 ? (Math.random() - 0.5) * Math.PI / 3 : 0);
+            target = exploreSurfaceTarget(bot, before.x + Math.cos(angle) * stepDistance, before.z + Math.sin(angle) * stepDistance, before.y);
+            if (!target) lastFailure = { code: 'no_ground', reason: 'No loaded dry ground in the remaining wander directions.' };
+        }
+        if (!target) return finish({ ok: false, status: 'blocked', code: lastFailure?.code ?? 'no_progress',
+            reason: `Exploration found no way forward in ${EXPLORE_TURNS.length} directions${lastFailure ? `: ${lastFailure.reason}` : '.'}`, ...summary() });
+        steps++;
+        // An XZ-only goal lets the route follow caves downward, so aim at the column's surface instead.
+        const stepTimer = setTimeout(() => bot.pathfinder.stop(), EXPLORE_STEP_TIMEOUT_MS);
         try {
-            await goToGoal(bot, goal);
+            await goToGoal(bot, new pf.goals.GoalNear(target.x, target.y, target.z, 3));
         } catch (err) {
             lastFailure = { code: err?.navigation?.code ?? 'route_failed', reason: String(err?.message ?? err) };
-        }
-        steps++;
+        } finally { clearTimeout(stepTimer); }
         const moved = Math.hypot(bot.entity.position.x - before.x, bot.entity.position.z - before.z);
-        if (moved >= stepDistance / 4) failures = 0;
-        else if (++failures >= 6) return finish({ ok: false, status: 'blocked', code: lastFailure?.code ?? 'no_progress',
-            reason: `Exploration made no progress in ${failures} directions${lastFailure ? `: ${lastFailure.reason}` : '.'}`, ...summary() });
+        if (moved >= stepDistance / 4) {
+            heading = Math.atan2(bot.entity.position.z - before.z, bot.entity.position.x - before.x);
+            failures = 0;
+        } else failures++;
     }
 }
 

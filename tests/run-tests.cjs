@@ -351,11 +351,14 @@ async function testNavigation(root) {
   assert.equal(await skills.goToNearestEntity(bot, 'cow'), true)
   const movablePosition = (x, z) => ({ x, y: 0, z, clone() { return movablePosition(this.x, this.z) },
     floored() { return { x: Math.floor(this.x), y: 0, z: Math.floor(this.z) } }, offset() { return this }, distanceTo: () => 0 })
+  const groundAt = position => position.y <= 0 ? { name: 'grass_block', boundingBox: 'block' } : { name: 'air', boundingBox: 'empty' }
   bot = makeBot()
   bot.navigation.blocks = []
   bot.entity.position = movablePosition(0, 0)
+  bot.blockAt = groundAt
   bot.pathfinder.goto = async goal => {
     bot.entity.position = movablePosition(goal.x, goal.z)
+    bot.exploreGoalY = goal.y
     if (++bot.exploreSteps === 2) bot.navigation.blocks = [{ name: 'bell', position: { x: 90, y: 70, z: 5 } }]
   }
   bot.exploreSteps = 0
@@ -364,13 +367,15 @@ async function testNavigation(root) {
   assert.equal(explored.status, 'found')
   assert.deepEqual(explored.block, { name: 'bell', position: { x: 90, y: 70, z: 5 } })
   assert.equal(explored.steps, 2, 'exploration stops at the first observation of a listed block')
+  assert.equal(bot.exploreGoalY, 1, 'each wander step aims at the loaded column surface, not an XZ-only goal')
   bot = makeBot()
   bot.navigation.blocks = []
   bot.entity.position = movablePosition(0, 0)
+  bot.blockAt = groundAt
   const stuck = await skills.exploreUntilBlock(bot, { blockTypes: ['bell'] })
   assert.equal(stuck.ok, false)
   assert.equal(stuck.status, 'blocked', 'consecutive steps without movement end exploration')
-  assert.equal(stuck.steps, 6)
+  assert.equal(stuck.steps, 7, 'each of the seven headings is tried once')
   bot.pathfinder.goto = () => delay(5)
   const timedOut = await skills.exploreUntilBlock(bot, { blockTypes: ['bell'], timeoutMs: 1 })
   assert.equal(timedOut.status, 'not_found')

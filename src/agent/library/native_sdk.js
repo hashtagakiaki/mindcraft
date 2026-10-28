@@ -29,7 +29,7 @@ const navigationPolicies = Object.freeze({
     'skills.collectBlock': EDIT_ROUTE, 'skills.pickupNearbyItems': PRESERVE_ROUTE,
     'skills.breakBlockAt': PRESERVE_ROUTE, 'skills.approachBlock': PRESERVE_ROUTE, 'skills.inspectChest': PRESERVE_ROUTE,
     'skills.putInChest': PRESERVE_ROUTE, 'skills.takeFromChest': PRESERVE_ROUTE,
-    'skills.giveToPlayer': PRESERVE_ROUTE, 'skills.receiveFromPlayer': PRESERVE_ROUTE, 'skills.goToNearestBlock': PRESERVE_ROUTE, 'skills.goToNearestEntity': PRESERVE_ROUTE, 'skills.exploreUntilBlock': EDIT_ROUTE,
+    'skills.giveToPlayer': PRESERVE_ROUTE, 'skills.receiveFromPlayer': PRESERVE_ROUTE, 'skills.goToNearestBlock': PRESERVE_ROUTE, 'skills.goToNearestEntity': PRESERVE_ROUTE, 'skills.exploreUntilBlock': PRESERVE_ROUTE,
     'skills.goToPlayer': PRESERVE_ROUTE, 'skills.followPlayer': PRESERVE_ROUTE,
     'skills.moveAway': COMBAT_ROUTE, 'skills.moveAwayFromEntity': COMBAT_ROUTE, 'skills.avoidEnemies': COMBAT_ROUTE,
     'skills.goToBed': PRESERVE_ROUTE, 'skills.useDoor': PRESERVE_ROUTE, 'skills.tillAndSow': PRESERVE_ROUTE,
@@ -133,7 +133,7 @@ s('exploreUntilBlock', {
     searchRadius: radius(64, { positive: true, description: 'Loaded-block observation radius checked before each step.' }),
     stepDistance: positiveInt({ default: 32, description: 'Horizontal blocks per wander step.' }),
     timeoutMs: positiveInt({ default: 300000, description: 'Search time budget; the host action timeout still applies.' }),
-}, 'Wander outward on a mostly straight, slowly turning heading until a listed block is loaded within searchRadius, turning away after failed steps. It does not approach the block. Returns {ok:true,status:"found",block:{name,position},steps,travelled,elapsedMs}; otherwise ok:false with status not_found (code timeout), blocked (six consecutive steps without progress) or cancelled, plus the same counters. Use found block.position with goToPosition or reachPosition to go there.', a => [{ blockTypes: a.blockTypes, searchRadius: a.searchRadius, stepDistance: a.stepDistance, timeoutMs: a.timeoutMs }]);
+}, 'Wander away from the start over loaded dry ground in stepDistance surface steps until a listed block is loaded within searchRadius. Water, lava and unreachable directions make it try other headings; it does not approach the block. Returns {ok:true,status:"found",block:{name,position},steps,travelled,elapsedMs}; otherwise ok:false with status not_found (code timeout), blocked (no progress in seven directions) or cancelled, plus the same counters. Use found block.position with goToPosition or reachPosition to go there.', a => [{ blockTypes: a.blockTypes, searchRadius: a.searchRadius, stepDistance: a.stepDistance, timeoutMs: a.timeoutMs }]);
 s('goToPlayer', { playerName: text(), minDistance: distance({ default: 3 }) }, 'Navigate near a visible player.', a => [a.playerName, a.minDistance]);
 s('followPlayer', { playerName: text(), minDistance: distance({ default: 4 }) }, 'Follow a player until interrupted.', a => [a.playerName, a.minDistance]);
 s('moveAway', { distance: distance() }, 'Move distance blocks away from current position.', a => [a.distance]);
