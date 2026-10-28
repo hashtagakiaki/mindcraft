@@ -58,7 +58,9 @@ export function getFullState(agent, management = {}) {
         },
         action: {
             current: agent.isIdle() ? 'Idle' : agent.actions.currentActionLabel,
-            isIdle: agent.isIdle()
+            isIdle: agent.isIdle(),
+            // A native task between SDK operations is waiting on model inference.
+            phase: agent.actions.executing ? 'acting' : agent.codexRuntime?.active ? 'thinking' : 'idle'
         },
         taskAdmission: agent.getWorkerTaskAdmission?.() ?? null,
         surroundings: {

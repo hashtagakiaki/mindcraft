@@ -225,7 +225,7 @@ An eval-owned isolated CaseServer smoke on 2026-10-02, using source pin `d549e73
 
 移動中断は所有するpathfinder goalを直ちに解除し、実際の`goto`終了と子操作のsettleを待ってから後続actionへ移る。次の経路地点まで待つsoft stopで、移動不能時の停止待ちを継続しない。停止watchdog自体は維持し、発火時の`action_stop_watchdog`と`agent_shutdown_started`で理由・task/action・割込を追跡できる。
 
-管理状態の`taskAdmission`はworker受付可能性、拒否理由、worker/runtime/intentのtask IDと現在actionを返す。`action.isIdle`はゲーム操作の状態であり、推論や受付処理の終了を意味しない。task-startの拒否理由は`outcome.admission`にも保存し、task-readで照会できる。受付不明・未settleの任務を重複実行しない契約は維持する。
+管理状態の`taskAdmission`はworker受付可能性、拒否理由、worker/runtime/intentのtask IDと現在actionを返す。`action.isIdle`はゲーム操作の状態であり、推論や受付処理の終了を意味しない。`action.phase`は`acting`（SDK actionを実行中）、`thinking`（native task中でSDK actionの間、つまり推論待ち）、`idle`（どちらでもない）を返し、管理UIのaction欄はこれで表示を分ける。task-startの拒否理由は`outcome.admission`にも保存し、task-readで照会できる。受付不明・未settleの任務を重複実行しない契約は維持する。
 
 native操作結果の`operationsWithoutProgress`は確認済みの変更や移動進捗がない連続操作数を返し、3回以降はモデルへ進捗の見直しを促す。観測による新情報の取得を認め、追加の回数制限・強制終了・任務差替えは行わない。container開封失敗は元の例外に対象、操作面、上部ブロック、sneak/手持ち等の観測を添える。操作面への到達や起動要求の成功は開封・精錬の成功とは区別する。
 

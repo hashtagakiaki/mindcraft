@@ -66,6 +66,9 @@
         .status-icon.online {
             color: #4CAF50;
         }
+        .action-phase.acting { color: #4CAF50; }
+        .action-phase.thinking { color: #f0ad4e; }
+        .action-phase.idle { color: #888; }
         .status-icon.offline {
             color: #f44336;
         }
@@ -685,7 +688,10 @@
                         armorEl.textContent = `armor: ${armor.length ? armor.join(', ') : 'none'}`;
                     }
                     if (actionEl && st.action) {
-                        actionEl.textContent = `${st.action.current || 'Idle'}`;
+                        const phase = st.action.phase || 'idle';
+                        actionEl.textContent = phase === 'acting' ? `acting: ${st.action.current || 'unknown'}`
+                            : phase === 'thinking' ? 'thinking...' : 'idle';
+                        actionEl.className = `cell action-phase ${phase}`;
                     }
                     if (invGrid && st.inventory?.counts) {
                         const counts = st.inventory.counts;

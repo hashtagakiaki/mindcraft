@@ -82,6 +82,13 @@ export function getAllBiomes() { return [{ name: 'plains' }]; }
     assert.equal(state.gameplay.health < 10, bot.health < 10, 'a threshold decision must not change at the management boundary')
     assert.equal(state.gameplay.hunger, bot.food)
     assert.equal(state.action.isIdle, true)
+    assert.equal(state.action.phase, 'idle')
+    const thinking = getFullState({ name: 'FixtureBot', bot, isIdle: () => false, actions: { executing: false },
+      codexRuntime: { active: true } })
+    assert.equal(thinking.action.phase, 'thinking', 'an active native task without an SDK action is inference, not idle')
+    const acting = getFullState({ name: 'FixtureBot', bot, isIdle: () => false, actions: { executing: true, currentActionLabel: 'action:codex-code' },
+      codexRuntime: { active: true } })
+    assert.equal(acting.action.phase, 'acting')
     assert.deepEqual(state.taskAdmission, admission, 'Idle action does not imply worker admission')
     console.log('world observation fixtures passed')
   } finally {
