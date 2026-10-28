@@ -645,7 +645,7 @@
                     const gp = st.gameplay || {};
                     if (healthEl && typeof gp.health === 'number') {
                         const hMax = typeof gp.healthMax === 'number' ? gp.healthMax : 20;
-                        healthEl.textContent = `health: ${gp.health}/${hMax}`;
+                        healthEl.textContent = `health: ${Number(gp.health.toFixed(1))}/${hMax}`;
                     }
                     const posEl = document.getElementById(`pos-${name}`);
                     const hunEl = document.getElementById(`hunger-${name}`);
