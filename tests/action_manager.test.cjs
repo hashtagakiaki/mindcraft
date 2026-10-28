@@ -244,6 +244,48 @@ async function main() {
     assert.deepEqual(blockedInventoryActions, [], 'human intent cannot clear the uncertain-inventory action gate')
     agent.bot.inventoryUnconfirmed = false // only a successful full snapshot may clear this in production
     assert.equal((await manager.runAction('unblocked-after-snapshot', async () => {}, { timeout: 0 })).success, true)
+
+    // A running reflex is not superseded by a code action: the code waits for
+    // it to settle. Another mode still supersedes it, and a user stop still
+    // stops it and rejects the waiting code.
+    manager.beginUserIntent()
+    manager.recent_action_counter = 0
+    manager.last_action_time = 0
+    agent.requestInterrupt = () => { agent.bot.interrupt_code = true }
+    const order = []
+    const retreatGate = deferred()
+    const retreat = manager.runAction('mode:cowardice', async () => {
+      await retreatGate.promise
+      order.push('retreat-finished')
+    }, { timeout: 0, reflex: true })
+    await until(() => manager.currentActionLabel === 'mode:cowardice')
+    const retreatContext = manager.getCancellationContext()
+    const code = manager.runAction('action:codex-code', async () => { order.push('code') }, { timeout: 0 })
+    for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve))
+    assert.equal(retreatContext.signal.aborted, false, 'code does not cancel a running reflex')
+    assert.deepEqual(order, [])
+    retreatGate.resolve()
+    assert.equal((await retreat).success, true)
+    assert.equal((await code).success, true)
+    assert.deepEqual(order, ['retreat-finished', 'code'])
+
+    const fight = manager.runAction('mode:self_defense', async () => {
+      await new Promise(resolve => { manager.getCancellationContext().signal.addEventListener('abort', resolve) })
+    }, { timeout: 0, reflex: true })
+    await until(() => manager.currentActionLabel === 'mode:self_defense')
+    const escape = manager.runAction('mode:self_preservation', async () => {}, { timeout: 0, reflex: true })
+    assert.equal((await fight).reason, 'superseded', 'a higher-priority mode still supersedes a reflex')
+    assert.equal((await escape).success, true)
+
+    const stuckRetreat = manager.runAction('mode:cowardice', async () => {
+      await new Promise(resolve => { manager.getCancellationContext().signal.addEventListener('abort', resolve) })
+    }, { timeout: 0, reflex: true })
+    await until(() => manager.currentActionLabel === 'mode:cowardice')
+    const queuedCode = manager.runAction('action:codex-code', async () => { order.push('stale-code') }, { timeout: 0 })
+    await manager.stop('user')
+    assert.equal((await stuckRetreat).reason, 'user')
+    assert.equal((await queuedCode).reason, 'user-stop')
+    assert.equal(order.includes('stale-code'), false)
     console.log('action manager tests passed')
   } finally {
     await rm(root, { recursive: true, force: true })

@@ -372,7 +372,7 @@ async function execute(mode, agent, func, timeout=-1, decision = {}) {
             const context = agent.actions.getCancellationContext();
             if (context) agent.actions.setPhase(`recovering:${mode.name}`, context.actionId);
             await func();
-        }, { timeout, interruptionContext });
+        }, { timeout, interruptionContext, reflex: mode.interrupts.includes('all') });
         console.log(`Mode ${mode.name} finished executing, code_return: ${code_return.message}`);
     } finally {
         mode.active = false;

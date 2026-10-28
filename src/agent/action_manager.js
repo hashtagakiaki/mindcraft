@@ -132,7 +132,7 @@ export class ActionManager {
         return this._executeResume(actionLabel, actionFn, timeout);
     }
 
-    async runAction(actionLabel, actionFn, { timeout, resume = false, stallTimeoutMs = 0, outputLimit = MAX_OUTPUT_LENGTH, taskId = null, interruptionContext = null } = {}) {
+    async runAction(actionLabel, actionFn, { timeout, resume = false, stallTimeoutMs = 0, outputLimit = MAX_OUTPUT_LENGTH, taskId = null, interruptionContext = null, reflex = false } = {}) {
         if (this.shuttingDown) return this._rejectedResult('shutdown');
         if (this.managementPaused) return this._rejectedResult('management-paused');
         if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
@@ -144,7 +144,7 @@ export class ActionManager {
         if (resume) return this._executeResume(actionLabel, actionFn, timeout);
         const epoch = this.intentEpoch;
         if (this.userStopped) return this._rejectedResult('user-stop');
-        return this._executeAction(actionLabel, actionFn, timeout, epoch, recoveryAdmissionId, { stallTimeoutMs, outputLimit, taskId, interruptionContext });
+        return this._executeAction(actionLabel, actionFn, timeout, epoch, recoveryAdmissionId, { stallTimeoutMs, outputLimit, taskId, interruptionContext, reflex });
     }
 
     isRecoveryAdmission(actionLabel, recoveryAdmissionId) {
@@ -244,9 +244,18 @@ export class ActionManager {
 
     async _executeAction(actionLabel, actionFn, timeout = 10, intentEpoch = this.intentEpoch, recoveryAdmissionId = null, options = {}) {
         let releaseTransition;
-        const previousTransition = this.transition;
-        this.transition = new Promise(resolve => { releaseTransition = resolve; });
-        await previousTransition;
+        // A non-mode action waits for a running reflex (an interrupting danger
+        // mode) to settle instead of superseding it. Superseding immediately
+        // cancelled retreats and fights mid-encounter. Stops and new operator
+        // intents still go through stop() and the epoch checks below.
+        for (;;) {
+            await this._awaitReflex(actionLabel);
+            const previousTransition = this.transition;
+            this.transition = new Promise(resolve => { releaseTransition = resolve; });
+            await previousTransition;
+            if (!this._reflexHolds(actionLabel)) break;
+            releaseTransition();
+        }
 
         let action;
         let timeoutHandle;
@@ -307,6 +316,7 @@ export class ActionManager {
                 stopPromise: null,
                 recoveryAdmissionId,
                 interruptionContext: options.interruptionContext ?? null,
+                reflex: options.reflex === true,
                 progressBefore: captureObservedProgress(this.agent.bot),
             };
             this.currentAction = action;
@@ -421,6 +431,23 @@ export class ActionManager {
             this.notifyRecoverySettled(action, result);
             if (!this.agent.bot.interrupt_code && !this.userStopped) this.agent.bot.emit('idle');
             return result;
+        }
+    }
+
+    _reflexHolds(actionLabel) {
+        const action = this.currentAction;
+        return !!action?.reflex && !action.reason && !String(actionLabel).startsWith('mode:');
+    }
+
+    async _awaitReflex(actionLabel) {
+        let recorded = false;
+        while (this._reflexHolds(actionLabel)) {
+            const action = this.currentAction;
+            if (!recorded) {
+                recorded = true;
+                try { this.agent.bot?._mindcraftDiagnosticRecord?.('action_waiting_for_reflex', { actionLabel, reflexActionId: action.id, reflexActionLabel: action.label }); } catch {}
+            }
+            await action.settled.promise;
         }
     }
 

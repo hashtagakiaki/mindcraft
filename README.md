@@ -231,6 +231,8 @@ native操作結果の`operationsWithoutProgress`は確認済みの変更や移�
 
 `avoidEnemies` は対象全体から離れる一つの目標を使い、敵の位置がマスをまたいだときに更新する。最寄りの敵だけを交互に避けたり、退避中に敵を追って攻撃したりしない。経路探索の失敗、5秒間距離を稼げない状態、または30秒の上限で `false` を返し、取消を含め終了時には移動目標とlistenerを解除する。自動退避が失敗した場合は、その場の位置、近傍地形、最終被弾時刻、または退避対象の敵の顔ぶれが変わるまで同じ退避や自己防衛で作業を再中断しない。追ってくる敵は毎tick位置が変わり、自然回復でHPも変わるため、これらを条件に含めると失敗した退避の再試行が繰り返された（2026-10-28のplayで約400回）。ただし退避に失敗した後でも、敵が3ブロック以内に来たら `self_defense` が反撃する。逃げられない状態で殴られ続けないためである。[退避fixture](tests/enemy_retreat.test.cjs) は実際のpathfinderによる壁・足場・高低差・複数敵の経路と、射線・進捗停止・取消を確認する。自動modeの再試行条件は [recovery fixture](tests/recovery_replanning.test.cjs) で確認する。
 
+全actionを中断する危険対応mode（`self_preservation`、`cowardice`、`self_defense`）の実行中に、Codexのコードやコマンドなどmode以外のactionが届いても、その反射行動は上書きされない。届いたactionは反射行動の終了を待ってから開始し、待機開始時に `action_waiting_for_reflex` を記録する。2026-10-28のplayでは、退避・反撃・瀕死退避の計152件が、Codexの次のコードに上書きされて途中で止まっていた。mode同士の優先順位、`stop()` による停止、operatorの新しい指示によるepochの更新は従来どおり反射行動より優先する。[action manager fixture](tests/action_manager.test.cjs) で確認する。
+
 2026-10-22の隔離vanilla 1.21.1 / Normalで、素手・防具なし・自然回復なしの単独戦と複数戦を確認した。旧処理ではゾンビ2体で死亡したが、新処理では2体・3体やクモとの混在を討伐できた。条件別の勝敗・残HPと限界は[戦闘検証記録](docs/melee-combat-20261022.md)を参照。個別の少数試行であり、全地形・全敵編成の勝率を保証する結果ではない。
 
 The `unstuck` mode has been removed. Staying at the same position no longer interrupts an action or starts an automatic escape movement. Mode listings and default profiles omit it; existing saved `unstuck` settings are ignored. Navigation progress checks and action deadlines still apply.
