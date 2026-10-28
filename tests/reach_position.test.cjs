@@ -352,7 +352,8 @@ async function main() {
     const stuckBot = makeBot()
     pathfinder.pathfinder(stuckBot)
     const controller = new AbortController()
-    const stuckOwner = { bot: stuckBot, signal: controller.signal, nativeNavigationNoEdits: true,
+    const stuckEvents = []
+    const stuckOwner = { taskId: 'stuck-task', actionId: 42, taskRecord: (type, detail) => stuckEvents.push({ type, ...detail }), bot: stuckBot, signal: controller.signal, nativeNavigationNoEdits: true,
       root: { id: null, activeChild: null, closed: false, phase: 'main' }, pending: new Set(),
       accepting: true, calls: [], facts: [], uncertain: [], diagnostics: [], sequence: 0, waitSequence: 0 }
     const { runOwnedOperation: runStuckOperation } = await import(pathToFileURL(path.join(root, 'src/agent/library/operation_context.js')))
@@ -360,6 +361,9 @@ async function main() {
       new pathfinder.goals.GoalBlock(6, 64, 0)))
     await new Promise(resolve => setImmediate(resolve))
     assert.ok(stuckBot.pathfinder.goal, 'the real route is active without physics progress')
+    const plannedStep = { x: 1, y: 65, z: 0, toBreak: [], toPlace: [{ x: 0, y: 63, z: 0, dx: 0, dy: 1, dz: 0, jump: true }] }
+    stuckBot.emit('path_update', { status: 'success', path: [plannedStep] })
+    plannedStep.toPlace.shift()
     controller.abort('superseded')
     const drained = await Promise.race([
       stuckNavigation.then(() => 'arrived', () => 'cancelled'),
@@ -372,6 +376,11 @@ async function main() {
     assert.equal(stuckBot.listenerCount('path_stop'), 0)
     assert.equal(stuckBot.listenerCount('goal_updated'), 0)
     assert.equal(stuckOwner.pending.size, 0)
+    const stoppedStep = stuckEvents.find(event => event.type === 'navigation_step' && event.reason === 'stop_requested')
+    assert.equal(stoppedStep.taskId, 'stuck-task')
+    assert.equal(stoppedStep.actionId, 42)
+    assert.equal(stoppedStep.lastPlan.toPlace[0].jump, true, 'consumed placement remains visible at cancellation')
+    assert.equal(stuckBot.listenerCount('physicsTick'), 1, 'diagnostic listener is removed')
     pathfinder.pathfinder(processedPathBot)
     const processedPathMovements = new pathfinder.Movements(processedPathBot)
     const processedPathGoal = new pathfinder.goals.GoalBlock(-3, 64, -2)

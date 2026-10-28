@@ -22,6 +22,81 @@ function recordNavigationDiagnostic(bot, type, detail) {
     return bot?._mindcraftDiagnosticRecord?.(type, event) ?? false;
 }
 
+// Observe the pathfinder's mutable path without changing its execution.
+function observeNavigation(bot, record, routeId) {
+    let path = [];
+    let lastPlan = null;
+    let lastSignature = null;
+    const point = p => p && ['x', 'y', 'z'].every(k => Number.isFinite(p[k]))
+        ? { x: p.x, y: p.y, z: p.z } : null;
+    const edit = e => ({ ...point(e), dx: e.dx ?? null, dy: e.dy ?? null, dz: e.dz ?? null,
+        jump: e.jump === true, useOne: e.useOne === true });
+    const plan = n => n ? { position: point(n), toBreak: (n.toBreak ?? []).map(edit),
+        toPlace: (n.toPlace ?? []).map(edit) } : null;
+    const block = p => {
+        if (!p) return null;
+        const b = bot.blockAt?.(new Vec3(p.x, p.y, p.z));
+        return { position: point(p), name: b?.name ?? null };
+    };
+    const snapshot = reason => {
+        const entity = bot.entity;
+        const next = plan(path[0]);
+        const pos = entity?.position;
+        const floor = point(pos?.floored?.());
+        const feet = floor ? new Vec3(floor.x, floor.y, floor.z) : null;
+        const controls = Object.fromEntries(['forward', 'jump', 'sneak'].map(k => [k, bot.getControlState?.(k) ?? null]));
+        record('navigation_step', { routeId, reason, next, lastPlan, position: point(pos), velocity: point(entity?.velocity),
+            onGround: entity?.onGround ?? null, controls, mining: bot.pathfinder.isMining?.() ?? null,
+            building: bot.pathfinder.isBuilding?.() ?? null,
+            blocks: feet ? [block(feet.offset(0, -1, 0)), block(feet), block(feet.offset(0, 1, 0)),
+                block(feet.offset(0, 2, 0))] : [], nextBlock: next?.position ? block(next.position) : null });
+    };
+    const onPath = result => {
+        path = Array.isArray(result?.path) ? result.path : [];
+        lastPlan = plan(path[0]);
+        lastSignature = null;
+        snapshot('path_update');
+    };
+    const onTick = () => {
+        const next = plan(path[0]);
+        const building = bot.pathfinder.isBuilding?.() ?? null;
+        const mining = bot.pathfinder.isMining?.() ?? null;
+        const jump = bot.getControlState?.('jump') ?? null;
+        const signature = JSON.stringify([next, building, mining, jump]);
+        if (signature === lastSignature) return;
+        if (next && (next.toBreak.length || next.toPlace.length)) lastPlan = next;
+        lastSignature = signature;
+        snapshot('step_changed');
+    };
+    const onReset = reason => { snapshot(`path_reset:${reason ?? 'unknown'}`); path = []; lastSignature = null; };
+    const originalPlace = bot.placeBlock;
+    const place = function (reference, face, ...args) {
+        const detail = { routeId, reference: point(reference?.position), referenceBlock: reference?.name ?? null,
+            face: point(face), heldItem: bot.heldItem?.name ?? null, lastPlan };
+        record('navigation_placement_started', detail);
+        let result;
+        try { result = originalPlace.call(this, reference, face, ...args); }
+        catch (error) { record('navigation_placement_result', { ...detail, status: 'error', error: String(error) }); throw error; }
+        Promise.resolve(result).then(
+            () => record('navigation_placement_result', { ...detail, status: 'resolved' }),
+            error => record('navigation_placement_result', { ...detail, status: 'error', error: String(error) }));
+        return result;
+    };
+    bot.on?.('path_update', onPath);
+    bot.on?.('path_reset', onReset);
+    bot.on?.('physicsTick', onTick);
+    if (typeof originalPlace === 'function') bot.placeBlock = place;
+    return {
+        snapshot,
+        close() {
+            bot.removeListener?.('path_update', onPath);
+            bot.removeListener?.('path_reset', onReset);
+            bot.removeListener?.('physicsTick', onTick);
+            if (bot.placeBlock === place) bot.placeBlock = originalPlace;
+        },
+    };
+}
+
 const blockPlaceDelay = settings.block_place_delay == null ? 0 : settings.block_place_delay;
 const useDelay = blockPlaceDelay > 0;
 const COLLECT_DROP_RADIUS = 0.5;
@@ -2616,7 +2691,9 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     const cancellation = owner?.cancellation;
     // stop() waits for the next path node. A bot stuck before that node must
     // cancel the owned goal instead, which also settles the real goto promise.
+    let navigationObserver;
     const stopOwnedNavigation = () => {
+        navigationObserver?.snapshot('stop_requested');
         if (bot.pathfinder.goal === goal) bot.pathfinder.setGoal(null);
     };
     const previousActionPhase = cancellation?.phase ?? 'running';
@@ -2670,9 +2747,9 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             }
         }
     };
-    const onPathReset = () => {
+    const onPathReset = reason => {
         recordNavigationDiagnostic(bot, 'navigation_path_reset', { routeId: navigationRouteId,
-            reason: 'pathfinder_path_reset', previousNodeCount: activeRouteNodes.length });
+            reason: reason ?? 'unknown', previousNodeCount: activeRouteNodes.length });
         activeRouteNodes = [];
     };
     const routeSegmentAdvanced = () => {
@@ -2695,6 +2772,14 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         lastProgressAt = Date.now();
         bot.on?.('path_update', onPathUpdate);
         bot.on?.('path_reset', onPathReset);
+        const call = operationCallContext();
+        const record = (type, detail) => {
+            const event = { taskId: owner?.taskId ?? null, actionId: owner?.actionId ?? null,
+                callId: call?.id ?? null, parentCallId: call?.parentCallId ?? null, ...detail };
+            if (owner?.taskRecord) return owner.taskRecord(type, event);
+            return bot._mindcraftDiagnosticRecord?.(type, event);
+        };
+        navigationObserver = observeNavigation(bot, record, navigationRouteId);
         setActionPhase(cancellation, 'navigation');
         // Emergency reachPosition already owns and confirms its edits. A second
         // segment would reapply the normal policy and enqueue placement twice.
@@ -2811,6 +2896,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     } finally {
         owner?.signal.removeEventListener('abort', stopOwnedNavigation);
         removeDigListener();
+        navigationObserver?.close();
         restoreEditCosts();
         if (clearOwnedGoalOnFailure && bot.pathfinder.goal === goal) bot.pathfinder.setGoal(null);
         clearInterval(doorCheckInterval);
