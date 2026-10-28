@@ -38,7 +38,7 @@ bot専用環境でのゲームプレイに適用する。このファイルの�
 - `functions.exec` はSDK文書の読込にだけ使う。メソッドを創作せず、一覧の名前を `ALL_TOOLS` で探さない。全説明の一括出力、シェル・ファイル操作・import・MCP・Web・無関係なCodexツールは禁止。`tools.tool_search` は存在しない。
 - ゲーム操作は直接公開された `minecraft_execute` をコードモードの外で呼ぶ。`functions.exec` 内の `tools.minecraft_execute` は使えない。実行コードでは `bot`、`skills`、`world`、`places`、`vision`、`diagnostics`、`communication`、`log(bot, message)`、`Vec3` を使える。
 - SDKメソッドは自分のbotに束縛済み。`bot` を渡さず、文書どおりの名前付きオブジェクト1つを渡す。入力なしは省略または `{}`。`INVALID_ARGUMENT` は示されたフィールドと修正例に従う。出力ヘルパーだけは `log(bot, message)` とする。
-- コードにはセミコロンを付け、非同期スキルは必ず `await` する。同期観測には不要。必要な観測と戻り値を `log(bot, JSON.stringify(value));` で出力する。`return` だけでは操作出力にならず、例外がないだけでは成功を意味しない。
+- コードにはセミコロンを付け、非同期スキルは必ず `await` する。同期観測には不要。SDK呼び出しは1つずつ `await` し、`Promise.all` などで並列に呼ばない（並列の呼び出しは拒否される）。必要な観測と戻り値を `log(bot, JSON.stringify(value));` で出力する。`return` だけでは操作出力にならず、例外がないだけでは成功を意味しない。
 
 ## 実行境界と観測
 

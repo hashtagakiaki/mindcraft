@@ -611,7 +611,7 @@ async function runAgentShutdownFixtures(root) {
     const { agent } = makeMinimalAgent(Agent, async () => ({ stopped: false }), async () => ({ saved: true }))
     const { EventEmitter } = require('node:events')
     agent.bot = new EventEmitter()
-    agent.bot.autoEat = {}
+    agent.bot.autoEat = { options: {} }
     agent.bot.modes = { flushBehaviorLog() { return '' } }
     agent.bot.output = ''
     agent.self_prompter = { isActive: () => false }

@@ -1569,15 +1569,20 @@ async function main() {
     assert.equal(multiCellLavaResult.status, 'reached', JSON.stringify({ result: multiCellLavaResult, output: multiCellLavaStart.output }))
     assert.match(multiCellLavaStart.output, /"hazardBlocks":2/)
 
+    // A fall is waited out, not routed: no recovery egress starts mid-air.
     const fallingStart = makeBot({ floorY: 62, startY: 66, corridor: true })
     fallingStart.entity.onGround = false
     fallingStart.entity.velocity.y = -0.2
+    setTimeout(() => {
+      fallingStart.entity.position = new Vec3(0.5, 63, 0.5)
+      fallingStart.entity.velocity.y = -0.0784
+      fallingStart.entity.onGround = true
+    }, 120)
     const fallingResult = await reachPosition(fallingStart, {
       position: { x: 4.5, y: 63, z: 0.5 }, allowScaffold: false,
     })
     assert.equal(fallingResult.status, 'reached', JSON.stringify({ result: fallingResult, output: fallingStart.output }))
-    assert.match(fallingStart.output, /"kind":"falling"/)
-    assert.match(fallingStart.output, /"policy":"safe-landing-confirmed"/)
+    assert.doesNotMatch(fallingStart.output, /navigation-recovery/)
 
     const lava = makeBot({ corridor: true, hazards: [{ x: 2, y: 64, z: 0, name: 'lava' }] })
     const lavaBlocked = await reachPosition(lava, { position: { x: 6.5, y: 64, z: 0.5 }, allowDig: true, safeWater: true })

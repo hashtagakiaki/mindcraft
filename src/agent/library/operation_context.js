@@ -184,7 +184,10 @@ export function trackSkill(name, body) {
             parentCallId: parent.id, skill: name, phase: store.phase ?? parent.phase,
             startedAt: new Date().toISOString(), closed: false, accepting: true, activeChild: null };
         operation.taskRecord?.('sdk_call_started', { taskId: operation.taskId, actionId: operation.actionId,
-            callId: call.id, parentCallId: call.parentCallId ?? null, method: name, args });
+            callId: call.id, parentCallId: call.parentCallId ?? null, method: name,
+            // Legacy skills take the bot first; serializing it made each event
+            // ~440KB and the store then dropped the whole detail, method included.
+            args: args.map(arg => arg === operation.bot ? '[bot]' : arg) });
         const reject = reason => {
             const rejected = { ...call, status: 'rejected', reason, endedAt: new Date().toISOString() };
             if (operation.closed || parent.closed) operation.diagnostics.push({ kind: 'late_sdk_call', call: rejected });

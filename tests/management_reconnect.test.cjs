@@ -176,7 +176,7 @@ export async function executeCommand(agent, message) {
       fixtureStats: 0, worldMutations: 0, killed: 0, restored: 0, paused: 0,
       bot: Object.assign(new EventEmitter(), {
         output: '', interrupt_code: false, inventoryUnconfirmed: false,
-        autoEat: {},
+        autoEat: { options: {} },
         entity: { position: { x: 0, y: 64, z: 0 } },
         inventory: { items: () => [] },
         modes: { flushBehaviorLog() { return '' }, async update() { agent.modeTicks++ } }

@@ -63,6 +63,7 @@ const NAVIGATION_RECOVERY_RADIUS = 32;
 const NAVIGATION_RECOVERY_MAX_HAZARD_BLOCKS = 2048;
 const NAVIGATION_RECOVERY_MAX_CANDIDATES = 4096;
 const NAVIGATION_RECOVERY_MAX_DURATION_MS = 30_000;
+const NAVIGATION_LANDING_WAIT_MS = 5_000;
 const NAVIGATION_RECOVERY_SEARCH_TIMEOUT_MS = 6_000;
 const NAVIGATION_RECOVERY_SEARCH_TICK_MS = 50;
 const NAVIGATION_RECOVERY_SEARCH_STEPS = 2048;
@@ -1303,18 +1304,18 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                 }
             }
             else {
-                const collectionMovements = bot.collectBlock.movements;
-                if (collectionMovements) bot.collectBlock.movements = navigationMovements(bot, movements);
-                try {
-                    await trackNavigationSegment(bot, async () => {
-                        if (block.name.endsWith('_ore')) {
-                            await goToGoal(bot, new pf.goals.GoalNear(
-                                block.position.x, block.position.y, block.position.z, 2), movements);
-                        }
-                        await bot.collectBlock.collect(block);
-                    }, { workTarget: block.position });
-                }
-                finally { if (collectionMovements) bot.collectBlock.movements = collectionMovements; }
+                // mineflayer-collectblock's collect() waits for its drop entity
+                // without a deadline or cancellation; a missed entityGone hung
+                // the action until the stop watchdog restarted the bot.
+                await trackNavigationSegment(bot, async () => {
+                    await goToGoal(bot, block.name.endsWith('_ore')
+                        ? new pf.goals.GoalNear(block.position.x, block.position.y, block.position.z, 2)
+                        : new pf.goals.GoalLookAtBlock(block.position, bot.world), movements);
+                    // Navigation scaffolding can change the held item.
+                    await bot.tool.equipForBlock(block);
+                    await bot.dig(block);
+                }, { workTarget: block.position });
+                await pickupNearbyItems(bot);
                 success = true;
             }
             if (success && !isLiquid) {
@@ -2489,6 +2490,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     if (typeof movementOverride !== 'object') movementOverride = null;
     let recoveryRouteCells = null;
     if (!navigationRecoveryActive.has(bot)) {
+        await awaitNavigationLanding(bot);
         const startDescriptor = navigationRecoveryDescriptor(bot);
         const releaseRecoverySwim = startDescriptor?.submerged ? holdNavigationRecoverySwim(bot) : () => {};
         let recovery;
@@ -3271,7 +3273,6 @@ function reachPositionStartHazard(bot) {
         if (!block) continue;
         if (REACH_POSITION_EXIT_HAZARDS.has(block.name)) return block.name;
     }
-    if (bot.entity.onGround !== true && Number.isFinite(bot.entity.velocity?.y) && bot.entity.velocity.y < -0.08) return 'falling';
     return null;
 }
 
@@ -3307,10 +3308,30 @@ function navigationRecoveryDescriptor(bot) {
     }
     const unsupported = observed.find(block => REACH_POSITION_EXIT_HAZARDS.has(block.name));
     if (unsupported) return { kind: `unsupported:${unsupported.name}`, names: new Set([unsupported.name]), seeds: [unsupported.position.floored()] };
-    if (bot.entity.onGround !== true && Number.isFinite(bot.entity.velocity?.y) && bot.entity.velocity.y < -0.08) {
-        return { kind: 'falling', names: new Set(), seeds: [] };
-    }
     return null;
+}
+
+function navigationFalling(bot) {
+    return bot.entity.onGround !== true && Number.isFinite(bot.entity.velocity?.y) && bot.entity.velocity.y < -0.08;
+}
+
+// A fall cannot be steered. Treating each airborne tick (a step down, combat
+// knockback) as a hazard started an egress route mid-air that failed about 100
+// times in the 2026-10-28 play. Wait for the landing instead; the landed state
+// (ground, water or lava) is then classified like any other start.
+async function awaitNavigationLanding(bot) {
+    if (!navigationFalling(bot)) return;
+    const deadline = Date.now() + NAVIGATION_LANDING_WAIT_MS;
+    while (navigationFalling(bot)) {
+        if (operationContext()?.signal?.aborted || bot.interrupt_code) {
+            throw Object.assign(new Error('Waiting for a landing was cancelled.'), { name: 'ReachCancelledError' });
+        }
+        if (Date.now() >= deadline) {
+            throw Object.assign(new Error(`The bot was still falling after ${NAVIGATION_LANDING_WAIT_MS}ms.`),
+                { name: 'NavigationLandingTimeoutError', navigation: { code: 'unsafe_state', phase: 'landing' } });
+        }
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
 }
 
 async function navigationRecovery(bot, suppliedMovements, requestedGoal = null) {
@@ -3351,7 +3372,7 @@ async function navigationRecovery(bot, suppliedMovements, requestedGoal = null) 
             queue.push(position.offset(dx, dy, dz));
         }
     }
-    if (!blocks.size && descriptor.kind !== 'falling') return { kind: descriptor.kind, goal: null, movements: null, candidates: [], searchStatus: 'noPath' };
+    if (!blocks.size) return { kind: descriptor.kind, goal: null, movements: null, candidates: [], searchStatus: 'noPath' };
 
     const routeCells = new Map();
     const candidateKeys = new Set();
@@ -3366,14 +3387,6 @@ async function navigationRecovery(bot, suppliedMovements, requestedGoal = null) 
             routeCells.set(reachPositionBlockKey(routePosition), routePosition);
             for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
                 candidateKeys.add(reachPositionBlockKey(routePosition.offset(dx, dy, dz)));
-            }
-        }
-    }
-    if (descriptor.kind === 'falling') {
-        const minY = Number.isFinite(bot.game?.minY) ? bot.game.minY : start.y - 16;
-        for (let y = start.y - 1; y >= Math.max(minY, start.y - 16); y--) {
-            for (let dx = -2; dx <= 2; dx++) for (let dz = -2; dz <= 2; dz++) {
-                candidateKeys.add(`${start.x + dx},${y},${start.z + dz}`);
             }
         }
     }
@@ -3752,6 +3765,13 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
     };
     const target = new Vec3(position.x, position.y, position.z);
     if (!['distance', 'block'].includes(arrivalMode)) return early('Arrival mode is invalid.');
+    try { await awaitNavigationLanding(bot); }
+    catch (error) {
+        if (error.name === 'ReachCancelledError') return reachPositionResult('cancelled', snapshotPosition(),
+            'Action was cancelled; no further edits were started.', edits, cleanupRequired, false, 'cancelled',
+            { phase: 'landing', observedAt: new Date().toISOString() });
+        return early(error.message, 'unsafe_state');
+    }
     const initialHazard = reachPositionStartHazard(bot);
     const emergencyEgress = !!initialHazard || options.emergencyEgress === true;
     const emergencyWaterBlocks = new Set(options.emergencyWaterBlocks ?? []);

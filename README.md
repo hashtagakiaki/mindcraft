@@ -233,6 +233,10 @@ native操作結果の`operationsWithoutProgress`は確認済みの変更や移�
 
 全actionを中断する危険対応mode（`self_preservation`、`cowardice`、`self_defense`）の実行中に、Codexのコードやコマンドなどmode以外のactionが届いても、その反射行動は上書きされない。届いたactionは反射行動の終了を待ってから開始し、待機開始時に `action_waiting_for_reflex` を記録する。2026-10-28のplayでは、退避・反撃・瀕死退避の計152件が、Codexの次のコードに上書きされて途中で止まっていた。mode同士の優先順位、`stop()` による停止、operatorの新しい指示によるepochの更新は従来どおり反射行動より優先する。[action manager fixture](tests/action_manager.test.cjs) で確認する。
 
+`collectBlock` は通常ブロックでも mineflayer-collectblock の `collect()` を使わず、移動（鉱石は `GoalNear` 2、その他は `GoalLookAtBlock`）、道具の装備、`bot.dig`、`pickupNearbyItems` を順に実行する。プラグインの `collect()` はドロップの消失を期限も取消もなく待つため、2026-10-28のplayでは土の採取が2回止まり、停止watchdogによるbot再起動に至った。
+
+auto-eatの設定（`foodPoints` 優先、空腹度14以下で開始、除外食料）はプラグインの既定値に上書きして足す。以前はoptionsをオブジェクトごと置き換えていたため `eatingTimeout` などが消え、食事が完了前に打ち切られていた。
+
 2026-10-22の隔離vanilla 1.21.1 / Normalで、素手・防具なし・自然回復なしの単独戦と複数戦を確認した。旧処理ではゾンビ2体で死亡したが、新処理では2体・3体やクモとの混在を討伐できた。条件別の勝敗・残HPと限界は[戦闘検証記録](docs/melee-combat-20261022.md)を参照。個別の少数試行であり、全地形・全敵編成の勝率を保証する結果ではない。
 
 The `unstuck` mode has been removed. Staying at the same position no longer interrupts an action or starts an automatic escape movement. Mode listings and default profiles omit it; existing saved `unstuck` settings are ignored. Navigation progress checks and action deadlines still apply.
@@ -529,7 +533,7 @@ Native生成コードでは、SDK操作を短い有限ループで呼び出せ�
 
 採掘なしの座標移動が`noPath`で終わった場合、安全な現在位置から採掘だけを許可して最大250msの追加探索を行います。採掘を伴う候補が見つかれば`ok:false, code:digging_required`を返します。この探索は移動・採掘・設置を実行せず、他の経路制約を維持します。追加探索でも候補がなければ`route_not_found`、期限や探索回数の上限なら`search_limit`です。候補発見は実際の通行成功や、採掘が唯一の方法であることを保証しません。
 
-nativeの座標移動は最大512ブロック・32経路区間・180秒の範囲で再探索します。通常移動にはSDKの固定route policyを適用しますが、開始時に水・溶岩・接触危険・落下を観測した場合は、まず生存を優先して共通の脱出処理を行います。脱出中は通常の地形保全方針にかかわらず採掘し、所持するdirt/cobblestoneで足場を設置できます。設置・破壊はサーバーで確認し、予定編集後も残る足場と足元・頭の空間を調べます。安全な乾地への接地を確認した後、元の危険領域へ再進入させず通常移動へ戻ります。nativeの`goToPosition`も脱出用足場の撤去を要求しません。通常経路の一時足場とlegacyの明示的なcleanup指定は従来どおりです。
+nativeの座標移動は最大512ブロック・32経路区間・180秒の範囲で再探索します。通常移動にはSDKの固定route policyを適用しますが、開始時に水・溶岩・接触危険を観測した場合は、まず生存を優先して共通の脱出処理を行います。落下中に始まった移動は、脱出経路を探さずに着地を待ち（最大5秒、取消可能）、着地した状態で同じ判定を行います。空中の一瞬（段差の下り・戦闘中のノックバック）を危険として扱うと空中で脱出経路の移動が始まり、2026-10-28のplayで約100件が失敗していたためです。脱出中は通常の地形保全方針にかかわらず採掘し、所持するdirt/cobblestoneで足場を設置できます。設置・破壊はサーバーで確認し、予定編集後も残る足場と足元・頭の空間を調べます。安全な乾地への接地を確認した後、元の危険領域へ再進入させず通常移動へ戻ります。nativeの`goToPosition`も脱出用足場の撤去を要求しません。通常経路の一時足場とlegacyの明示的なcleanup指定は従来どおりです。
 
 採掘を許可した経路探索（`reachPosition`、`goToSurface`、危険脱出、`digging_required`の追加探索）には、pathfinderの`searchRadius`を使いません。これは距離ではなく「開始時の推定距離+半径」のコスト上限で、素手の石1個（約23）のような掘削コストを含む経路はすぐ超えて`noPath`になるためです。採掘なしの探索は従来どおり64を使います。非破壊経路を優先する探索の高い掘削・設置コストはその探索と実行中だけに適用し、終了時に元へ戻します。pathfinderの探索期限は掘削中も経過するため、掘削完了または目標・経路区間への前進後のTimeoutでは同じ目標で移動を続け、進捗のない経路は既存の停滞検知で止めます。2026-10-27の[隔離確認](../mindcraft-tools/results/surface-egress-20261027/README.md)では、石中y50から地表y99へ、旧版は素手で即`noPath`、石のツルハシでもツルハシが壊れたy93で`noPath`でした。修正後はツルハシ（途中から素手）で195秒で地表に到達しました。素手の`reachPosition`は180秒の予算内にy57まで進み、`stalled`を返します。素手で深い位置から脱出するのは遅く、1回の呼び出しで完了するとは限りません。
 

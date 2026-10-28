@@ -689,12 +689,14 @@ export class Agent {
             respondFunc(username, message);
         });
 
-        // Set up auto-eat
-        this.bot.autoEat.options = {
+        // Set up auto-eat. Merge into the plugin defaults: replacing the object
+        // dropped eatingTimeout, so each eat returned at once and the next
+        // health event restarted it before the 1.6s use finished.
+        Object.assign(this.bot.autoEat.options, {
             priority: 'foodPoints',
             startAt: 14,
             bannedFood: ["rotten_flesh", "spider_eye", "poisonous_potato", "pufferfish", "chicken"]
-        };
+        });
 
         if (save_data?.self_prompt) {
             if (init_message) {

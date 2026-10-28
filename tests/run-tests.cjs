@@ -146,6 +146,8 @@ export default function Vec3(x, y, z) {
   await write(root, 'node_modules/mineflayer-pathfinder/index.js', `export default {
     goals: { GoalNear: class { constructor(x,y,z,range) { Object.assign(this,{x,y,z,range}) }
       heuristic(p) { return Math.max(Math.abs(p.x-this.x),Math.abs(p.y-this.y),Math.abs(p.z-this.z))-this.range }
+    }, GoalLookAtBlock: class { constructor(position, world) { Object.assign(this,{position,world}) }
+      heuristic(p) { return Math.max(Math.abs(p.x-this.position.x),Math.abs(p.y-this.position.y),Math.abs(p.z-this.position.z)) }
     } }, Movements: class { constructor() { this.blocksCantBreak=new Set() }
       safeToBreak() { return true }
     }

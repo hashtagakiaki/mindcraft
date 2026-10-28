@@ -20,13 +20,13 @@ function createBot(scenario) {
   bot.inventory = { items: () => scenario.items ?? [], slots: scenario.items ?? [] }
   bot.modes = { isOn: () => true }
   bot.tool = { async equipForBlock() { bot.heldItem = scenario.heldItem ?? { type: 1, enchants: [] } } }
-  bot.collectBlock = {
-    async collect(block) {
-      await scenario.collect(block, bot)
-      scenario.collectBlocks.shift()
-    }
+  // collectBlock digs directly; the plugin's unbounded collect() is not used.
+  bot.collectBlock = { async collect() { throw new Error('plugin collect must not be used') } }
+  bot.dig = async block => {
+    if (scenario.dig) return scenario.dig(block, bot)
+    await scenario.collect(block, bot)
+    scenario.collectBlocks.shift()
   }
-  bot.dig = async block => scenario.dig?.(block, bot)
   bot.nearestEntity = () => null
   bot.blockAt = () => scenario.currentAir
     ? { name: 'air', type: 0 }
