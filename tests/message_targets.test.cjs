@@ -145,17 +145,15 @@ async function main() {
 
   const html = await fs.readFile(path.join(repo, 'src/mindcraft/public/index.html'), 'utf8')
   for (const match of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) new vm.Script(match[1])
-  // Exercise actual card selection and per-card sending with disposable DOM/socket doubles.
+  // Exercise recipient selection and chat sending with disposable DOM/socket doubles.
   class Element extends EventEmitter {
     constructor() { super(); this.value = ''; this.disabled = false; this.dataset = {}; this.classes = new Set(); this.classList = { toggle: (name, enabled) => enabled ? this.classes.add(name) : this.classes.delete(name) } }
     addEventListener(event, listener) { this.on(event, listener) }
-    setAttribute(name, value) { this[name] = value }
     click() { this.emit('click') }
   }
-  const elements = Object.fromEntries(['selectionModeBtn', 'selectAllBotsBtn', 'selectionSummary', 'groupResult', ...agents.flatMap(agent => [`agent-${agent.name}`, `messageInput-${agent.name}`, `sendBtn-${agent.name}`])].map(id => [id, new Element()]))
+  const elements = Object.fromEntries(['recipientSummary', 'groupResult', 'chatInput', 'chatSendBtn', ...agents.map(agent => `agent-${agent.name}`)].map(id => [id, new Element()]))
   const agentsDiv = new Element()
-  const document = new Element()
-  document.getElementById = id => elements[id]
+  const document = { getElementById: id => elements[id] }
   const uiSocket = new EventEmitter()
   uiSocket.connected = true
   let uiDelivery
@@ -164,59 +162,59 @@ async function main() {
     uiDelivery = { targets: Array.isArray(targets) ? Array.from(targets) : targets, data }
     callback(failSend ? { success: false, error: 'Unavailable recipient' } : { success: true, recipients: Array.isArray(targets) ? Array.from(targets) : [targets] })
   })
-  const ui = vm.createContext({ socket: uiSocket, currentAgents: agents, agentsDiv, document })
-  const uiStart = html.indexOf('        function sendMessage(n, m,')
-  const uiEnd = html.indexOf('        function toggleDetails', uiStart)
+  const chatRecords = []
+  const ui = vm.createContext({ socket: uiSocket, currentAgents: agents, agentsDiv, document, appendChatRecord: record => chatRecords.push(record) })
+  const uiStart = html.indexOf('        // Individual control buttons')
+  const uiEnd = html.indexOf("        const recipientMenu = document.getElementById('recipientMenu');", uiStart)
+  assert.ok(uiStart > 0 && uiEnd > uiStart, 'UI selection section is present')
   vm.runInContext(html.slice(uiStart, uiEnd), ui)
-  const input = elements['messageInput-Bot2']
-  input.value = 'build together'
+  const input = elements.chatInput
+  const sendBtn = elements.chatSendBtn
+  const typeText = text => { input.value = text; input.emit('input') }
   const clickCard = (name, interactive = false) => agentsDiv.emit('click', { target: { closest: selector => selector === '.agent' ? { dataset: { agentName: name } } : interactive ? {} : null } })
-  elements.selectionModeBtn.click()
-  clickCard('Bot2'); clickCard('Bot3'); clickCard('Bot4')
+  typeText('build together')
+  assert.equal(sendBtn.disabled, true, 'no recipients means nothing to send')
+  vm.runInContext("toggleRecipient('Bot2'); toggleRecipient('Bot3'); toggleRecipient('Bot4')", ui)
   assert.equal(elements['agent-Bot2'].classes.has('selected'), true)
   assert.equal(elements['agent-Bot3'].classes.has('selected'), true)
-  assert.equal(elements['agent-Bot4'].classes.has('selected'), false)
+  assert.equal(elements['agent-Bot4'].classes.has('selected'), false, 'offline bots cannot be selected')
   clickCard('Bot2', true)
-  assert.equal(elements['agent-Bot2'].classes.has('selected'), true, 'editing and controls do not deselect cards')
-  assert.equal(elements['sendBtn-Bot2'].disabled, false)
-  vm.runInContext("sendMessage('Bot2', document.getElementById('messageInput-Bot2').value, true)", ui)
+  assert.equal(elements['agent-Bot2'].classes.has('selected'), true, 'controls inside a card do not toggle recipients')
+  assert.equal(sendBtn.disabled, false)
+  assert.equal(sendBtn.textContent, 'Send to 2 bots')
+  sendBtn.click()
   assert.deepEqual(uiDelivery.targets, ['Bot2', 'Bot3'])
   assert.equal(uiDelivery.data.from, 'ADMIN', 'legacy UI messages identify the configured operator')
   assert.equal(input.value, '')
   assert.match(elements.groupResult.textContent, /Bot2, Bot3/)
-  elements['messageInput-Bot3'].value = 'from another selected card'
-  vm.runInContext("sendMessage('Bot3', document.getElementById('messageInput-Bot3').value, true)", ui)
-  assert.deepEqual(uiDelivery.targets, ['Bot2', 'Bot3'], 'any selected card input sends to the whole group')
+  assert.deepEqual(chatRecords.map(record => ({ kind: record.kind, recipients: record.recipients, message: record.message })),
+    [{ kind: 'operator', recipients: ['Bot2', 'Bot3'], message: 'build together' }], 'sent messages appear in the chat')
   vm.runInContext("sendMessage('Bot2', '!stop')", ui)
   assert.equal(uiDelivery.targets, 'Bot2', 'individual control buttons retain their scope')
   clickCard('Bot2')
-  input.value = 'retained instruction'
-  vm.runInContext("onMsgInputChange('Bot2')", ui)
-  assert.equal(elements['sendBtn-Bot2'].disabled, true, 'unselected input cannot send to selected bots')
-  elements.selectAllBotsBtn.click()
-  assert.equal(elements['sendBtn-Bot2'].disabled, false)
+  assert.equal(elements['agent-Bot2'].classes.has('selected'), false, 'clicking a card toggles it as a recipient')
+  typeText('retained instruction')
+  let prevented = false
+  input.emit('keydown', { key: 'Enter', shiftKey: false, isComposing: false, preventDefault: () => { prevented = true } })
+  assert.equal(prevented, true)
+  assert.deepEqual(uiDelivery.targets, ['Bot3'], 'Enter sends to the current selection')
+  typeText('retained instruction')
+  vm.runInContext('selectAllRecipients()', ui)
+  assert.equal(elements['agent-Bot2'].classes.has('selected'), true)
   failSend = true
-  vm.runInContext("sendMessage('Bot2', document.getElementById('messageInput-Bot2').value, true)", ui)
+  sendBtn.click()
   assert.equal(input.value, 'retained instruction', 'errors keep the draft')
+  assert.equal(chatRecords.length, 2, 'failed sends are not added to the chat')
   failSend = false
   vm.runInContext("currentAgents = currentAgents.filter(agent => agent.name !== 'Bot3'); updateSelectionUI()", ui)
-  vm.runInContext("sendMessage('Bot2', '!stats', true)", ui)
+  sendBtn.click()
   assert.deepEqual(uiDelivery.targets, ['Bot2'], 'removed recipients leave the selection')
-  elements.selectionModeBtn.click()
-  assert.equal(elements['agent-Bot2'].classes.has('selected'), false)
-  vm.runInContext("sendMessage('Bot2', 'single', true)", ui)
-  assert.equal(uiDelivery.targets, 'Bot2', 'leaving selection mode restores individual sending')
-  const ctrl = editable => ({ key: 'Control', repeat: false, target: { closest: () => editable ? {} : null } })
-  document.emit('keydown', ctrl(true))
-  assert.equal(elements.selectionModeBtn['aria-pressed'], 'false', 'Ctrl editing shortcuts keep normal mode')
-  document.emit('keydown', ctrl(false))
-  assert.equal(elements.selectionModeBtn['aria-pressed'], 'true', 'Ctrl enters selection mode')
-  clickCard('Bot2')
-  document.emit('keyup', ctrl(false))
-  assert.equal(elements['agent-Bot2'].classes.has('selected'), true, 'releasing Ctrl retains the selection')
+  vm.runInContext('clearRecipients()', ui)
+  typeText('@Bot2 addressed')
+  assert.equal(sendBtn.disabled, false, 'an explicit address prefix can send without a selection')
   uiSocket.connected = false
   uiSocket.emit('disconnect')
-  assert.equal(elements['sendBtn-Bot2'].disabled, true)
+  assert.equal(sendBtn.disabled, true)
   console.log('group addressing, hub delivery, Minecraft routing, command context and UI selection tests passed')
 }
 main().catch(error => { console.error(error); process.exitCode = 1 })

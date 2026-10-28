@@ -4,50 +4,38 @@
     <title>Mindcraft</title>
     <script src="/socket.io/socket.io.js"></script>
     <style>
+        * { box-sizing: border-box; }
+        html, body { height: 100%; }
         body {
             font-family: Arial, sans-serif;
-            margin: 20px;
+            margin: 0;
             background: #1a1a1a;
             color: #e0e0e0;
-        }
-        #agents {
-            background: #2d2d2d;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-        }
-        h1 {
-            color: #ffffff;
-        }
-        .agent {
-            margin: 10px 0;
-            padding: 10px;
-            background: #363636;
-            border-radius: 4px;
             display: flex;
             flex-direction: column;
-            align-items: stretch;
+            overflow: hidden;
         }
-        .restart-btn, .start-btn, .stop-btn {
+        button { font: inherit; }
+        .restart-btn, .start-btn, .stop-btn, .neutral-btn {
             color: white;
             border: none;
             padding: 5px 10px;
             border-radius: 4px;
             cursor: pointer;
-            margin-left: 5px;
         }
-        .restart-btn {
-            background: #4CAF50;
-        }
-        .start-btn {
-            background: #2196F3;
-        }
-        .stop-btn {
-            background: #f44336;
-        }
+        .restart-btn { background: #4CAF50; }
+        .start-btn { background: #2196F3; }
+        .stop-btn { background: #f44336; }
+        .neutral-btn { background: #505050; }
         .restart-btn:hover { background: #45a049; }
         .start-btn:hover { background: #1976D2; }
         .stop-btn:hover { background: #d32f2f; }
+        .neutral-btn:hover { background: #5a5a5a; }
+        .start-btn:disabled, .neutral-btn:disabled {
+            background: #383838;
+            color: #666;
+            cursor: not-allowed;
+        }
         .gear-btn {
             background: #505050;
             color: #fff;
@@ -55,29 +43,224 @@
             border-radius: 4px;
             padding: 2px 6px;
             cursor: pointer;
-            margin-left: 6px;
-            font-size: 0.9em;
+            font-size: 0.85em;
         }
         .gear-btn:hover { background: #5a5a5a; }
-        .status-icon {
-            font-size: 12px;
-            margin-right: 8px;
-        }
-        .status-icon.online {
-            color: #4CAF50;
-        }
+        .status-icon { font-size: 12px; margin-right: 6px; }
+        .status-icon.online { color: #4CAF50; }
+        .status-icon.offline { color: #f44336; }
         .action-phase.acting { color: #4CAF50; }
         .action-phase.thinking { color: #f0ad4e; }
         .action-phase.idle { color: #888; }
-        .status-icon.offline {
-            color: #f44336;
+        .status-badge {
+            font-size: 0.75em;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: #3a3a3a;
+            color: #cccccc;
+            text-transform: lowercase;
         }
-        #settingsForm {
+        .status-badge.online { color: #4CAF50; }
+        .status-badge.offline { color: #f44336; }
+
+        /* Header */
+        .app-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 16px;
+            background: #232323;
+            border-bottom: 1px solid #333;
+            flex: 0 0 auto;
+        }
+        .app-header h1 { margin: 0; font-size: 1.3em; color: #fff; }
+        .header-spacer { flex: 1; }
+        .token-btn {
+            background: #505050;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            padding: 4px 8px;
+            cursor: pointer;
+        }
+
+        /* Main layout: chat + status */
+        .app-main {
+            flex: 1 1 auto;
+            min-height: 0;
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-            gap: 8px;
-            margin-top: 10px;
+            grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
         }
+        .chat-pane {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            border-right: 1px solid #333;
+        }
+        #bot-output-log {
+            flex: 1 1 auto;
+            overflow-y: auto;
+            padding: 16px 20px;
+        }
+        .chat-note { color: #888; font-size: 0.8em; text-align: center; margin-bottom: 12px; }
+        .bot-output-entry {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            margin: 0 0 14px;
+        }
+        .bot-output-entry.operator { align-items: flex-end; }
+        .bot-output-meta { color: #999; font-size: 0.8em; margin: 0 6px 4px; }
+        .bot-output-meta .chat-author { font-weight: bold; }
+        .bot-output-content {
+            max-width: min(760px, 85%);
+            padding: 9px 13px;
+            border-radius: 14px;
+            border-top-left-radius: 4px;
+            background: #2d2d2d;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            line-height: 1.45;
+        }
+        .bot-output-entry.operator .bot-output-content {
+            background: #1f4f7a;
+            border-top-left-radius: 14px;
+            border-top-right-radius: 4px;
+        }
+        .composer {
+            flex: 0 0 auto;
+            padding: 10px 16px 14px;
+            background: #232323;
+            border-top: 1px solid #333;
+        }
+        .composer-meta {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 0.85em;
+            margin-bottom: 6px;
+            min-height: 1.4em;
+        }
+        #recipientSummary { color: #9fd49f; cursor: context-menu; }
+        #recipientSummary.empty { color: #f0ad4e; }
+        #groupResult { color: #999; margin-left: auto; text-align: right; }
+        .composer-row { display: flex; gap: 8px; align-items: flex-end; }
+        #chatInput {
+            flex: 1 1 auto;
+            resize: none;
+            min-height: 42px;
+            max-height: 200px;
+            background: #2d2d2d;
+            border: 1px solid #555;
+            color: #e0e0e0;
+            border-radius: 10px;
+            padding: 10px 12px;
+            font: inherit;
+            line-height: 1.4;
+        }
+        #chatInput:focus { outline: none; border-color: #2196F3; }
+        #chatSendBtn { height: 42px; padding: 0 16px; border-radius: 10px; white-space: nowrap; }
+
+        /* Recipient context menu */
+        .context-menu {
+            position: fixed;
+            z-index: 2000;
+            min-width: 220px;
+            max-height: 70vh;
+            overflow-y: auto;
+            background: #2b2b2b;
+            border: 1px solid #4a4a4a;
+            border-radius: 8px;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.5);
+            padding: 4px;
+        }
+        .context-menu[hidden] { display: none; }
+        .menu-title { color: #999; font-size: 0.8em; padding: 6px 10px 4px; }
+        .menu-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+            background: none;
+            border: none;
+            color: #e0e0e0;
+            padding: 6px 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            text-align: left;
+        }
+        .menu-item:hover:not(:disabled) { background: #3a3a3a; }
+        .menu-item:disabled { color: #666; cursor: not-allowed; }
+        .menu-check { width: 1em; text-align: center; color: #66bb6a; }
+        .menu-separator { height: 1px; background: #444; margin: 4px 2px; }
+
+        /* Status pane */
+        .status-pane {
+            overflow-y: auto;
+            padding: 12px;
+            min-height: 0;
+        }
+        #agents { display: flex; flex-direction: column; gap: 10px; }
+        .agent {
+            padding: 10px;
+            background: #2d2d2d;
+            border-radius: 8px;
+            border: 2px solid transparent;
+            cursor: pointer;
+        }
+        .agent.selected { border-color: #66bb6a; }
+        .agent-header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+        .agent-name { font-weight: bold; }
+        .agent-header .spacer { flex: 1; }
+        .recipient-tag { display: none; font-size: 0.75em; color: #66bb6a; }
+        .agent.selected .recipient-tag { display: inline; }
+        .agent-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 4px;
+            font-size: 0.85em;
+        }
+        .agent-grid .cell {
+            background: #363636;
+            padding: 4px 7px;
+            border-radius: 4px;
+            overflow-wrap: anywhere;
+        }
+        .agent-grid .cell.wide { grid-column: 1 / -1; }
+        .agent-view-container {
+            grid-column: 1 / -1;
+            aspect-ratio: 4/3;
+            overflow: hidden;
+            border-radius: 4px;
+        }
+        .agent-viewer { width: 100%; height: 100%; border: none; display: block; }
+        .agent-inventory {
+            margin-top: 6px;
+            background: #262626;
+            border-radius: 6px;
+            padding: 6px;
+        }
+        .inventory-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 4px;
+        }
+        .agent-controls {
+            margin-top: 8px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+        }
+        .agent-controls button { font-size: 0.8em; padding: 4px 8px; }
+        .no-agents { color: #888; padding: 10px; }
+
+        @media (max-width: 900px) {
+            body { overflow: auto; }
+            .app-main { grid-template-columns: 1fr; grid-template-rows: 70vh auto; }
+            .chat-pane { border-right: none; border-bottom: 1px solid #333; }
+        }
+
+        /* Settings forms */
         .setting-wrapper {
             display: flex;
             align-items: center;
@@ -86,7 +269,6 @@
             padding: 6px 8px;
             border-radius: 4px;
             width: 100%;
-            box-sizing: border-box;
             min-width: 0;
         }
         .setting-wrapper label {
@@ -107,163 +289,7 @@
             max-width: 100%;
             min-width: 0;
         }
-        .setting-wrapper input[type="checkbox"] {
-            transform: scale(1.2);
-        }
-        .agent-view-container {
-            width: 100%;
-            height: 100%;
-            aspect-ratio: 4/3;
-            overflow: hidden;
-        }
-        .agent-viewer {
-            width: 100%;
-            height: 100%;
-            border: none;
-            display: block;
-        }
-        #bot-output-log {
-            margin: 16px 0;
-            padding: 12px 16px;
-            background: #2d2d2d;
-            border-radius: 8px;
-            max-height: 320px;
-            overflow-y: auto;
-        }
-        #bot-output-log h2 { margin: 0 0 10px; font-size: 1.1em; }
-        .bot-output-entry { padding: 8px 0; border-top: 1px solid #444; }
-        .bot-output-meta { color: #aaa; font-size: 0.85em; margin-bottom: 4px; }
-        .bot-output-content { white-space: pre-wrap; overflow-wrap: anywhere; }
-        .start-btn:disabled {
-            opacity: 0.4;
-            cursor: not-allowed;
-        }
-        .agent-view-container {
-            margin-top: 6px;
-            display: flex;
-            justify-content: flex-start;
-        }
-        .agent-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-            gap: 8px;
-            width: 100%;
-            align-items: start;
-        }
-        .agent-grid .cell {
-            background: #3a3a3a;
-            padding: 6px 8px;
-            border-radius: 4px;
-        }
-        .agent-grid .cell.title {
-            background: transparent;
-            padding: 0;
-        }
-        .agent-inventory {
-            margin-top: 8px;
-            background: #2f2f2f;
-            border-radius: 6px;
-            padding: 8px;
-        }
-        .agent-inventory h3 { margin: 0 0 6px 0; font-size: 1em; }
-        .inventory-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-            gap: 6px;
-        }
-        .agent-details-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 6px;
-            width: 100%;
-        }
-        .controls-row {
-            margin-top: 8px;
-            display: grid;
-            grid-template-columns: auto minmax(100px, 1fr) repeat(5, auto);
-            gap: 8px;
-            align-items: center;
-        }
-        .msg-input {
-            width: calc(100% - 8px);
-            background: #262626;
-            border: 1px solid #555;
-            color: #e0e0e0;
-            border-radius: 4px;
-            padding: 4px 6px;
-        }
-        .neutral-btn {
-            color: white;
-            border: none;
-            padding: 5px 10px;
-            border-radius: 4px;
-            cursor: pointer;
-            margin-left: 5px;
-            background: #505050;
-        }
-        .neutral-btn:hover { background: #5a5a5a; }
-        .neutral-btn:disabled {
-            background: #383838;
-            color: #666;
-            cursor: not-allowed;
-        }
-        .msg-input:disabled {
-            background: #1a1a1a;
-            color: #666;
-            cursor: not-allowed;
-        }
-        .page-footer {
-            position: fixed;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            background: #2d2d2d;
-            padding: 16px;
-            display: flex;
-            gap: 12px;
-            justify-content: space-between;
-            box-shadow: 0 -2px 10px rgba(0,0,0,0.2);
-        }
-        body {
-            padding-bottom: 80px;  /* Make room for footer */
-        }
-        .agent-stats-row {
-            display: grid;
-            grid-template-columns: repeat(5, 1fr);
-            gap: 8px;
-            margin: 6px 0;
-            font-size: 0.9em;
-            color: #cccccc;
-            width: 100%;
-            box-sizing: border-box;
-        }
-        .agent-stats-row .stat {
-            background: #3a3a3a;
-            padding: 6px 8px;
-            border-radius: 4px;
-        }
-        .status-badge {
-            font-size: 0.75em;
-            margin-left: 8px;
-            padding: 2px 6px;
-            border-radius: 4px;
-            background: #3a3a3a;
-            color: #cccccc;
-            text-transform: lowercase;
-        }
-        .status-badge.online { color: #4CAF50; }
-        .status-badge.offline { color: #f44336; }
-        .title-row {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        .title-left {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .title-spacer { flex: 1; }
+        .setting-wrapper input[type="checkbox"] { transform: scale(1.2); }
         /* Modal styles */
         .modal-backdrop {
             position: fixed;
@@ -299,11 +325,7 @@
             padding: 4px 8px;
             cursor: pointer;
         }
-        .modal-body {
-            flex: 1 1 auto;
-            overflow: auto;
-            padding: 12px 16px;
-        }
+        .modal-body { flex: 1 1 auto; overflow: auto; padding: 12px 16px; }
         .modal-footer {
             display: flex;
             align-items: center;
@@ -312,49 +334,42 @@
             border-top: 1px solid #3a3a3a;
         }
         .footer-left { color: #cccccc; font-style: italic; }
-        .agent.selectable { cursor: pointer; }
-        .agent.selected { outline: 3px solid #66bb6a; outline-offset: -3px; }
-        .token-btn {
-            background: #505050;
-            color: #fff;
-            border: none;
-            border-radius: 4px;
-            padding: 5px 8px;
-            cursor: pointer;
-        }
     </style>
 </head>
 <body>
-    <div class="title-row">
-        <div class="title-left">
-            <h1 style="margin: 0;">Mindcraft</h1>
-            <span id="msStatus" class="status-badge offline">mindserver offline</span>
-            <button id="forgetManagementTokenBtn" class="token-btn" type="button" hidden>Forget saved token</button>
-        </div>
-        <div class="title-spacer"></div>
-    </div>
-    <div style="margin:16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
-        <button id="selectionModeBtn" class="neutral-btn" aria-pressed="false" title="Enter selection mode with Ctrl">Select bots</button>
-        <button id="selectAllBotsBtn" class="neutral-btn" hidden>Select all connected</button>
-        <span id="selectionSummary" role="status"></span>
-        <span id="groupResult" role="status"></span>
-    </div>
-    <section id="bot-output-log" aria-label="Bot output log">
-        <h2>Bot output log</h2>
-        <div class="bot-output-meta">Loaded from server history · newest 200 entries</div>
-        <div id="bot-output-entries" aria-live="polite"><div class="bot-output-meta">No bot output yet.</div></div>
-    </section>
-    <div id="agents"></div>
+    <header class="app-header">
+        <h1>Mindcraft</h1>
+        <span id="msStatus" class="status-badge offline">mindserver offline</span>
+        <button id="forgetManagementTokenBtn" class="token-btn" type="button" hidden>Forget saved token</button>
+        <div class="header-spacer"></div>
+        <button id="openCreateAgentBtn" class="start-btn">New Agent</button>
+        <button class="stop-btn" onclick="disconnectAllAgents()">Disconnect All Agents</button>
+        <button class="stop-btn" onclick="confirmShutdown()">Full Shutdown</button>
+    </header>
 
-    <div class="page-footer">
-        <div>
-            <button id="openCreateAgentBtn" class="start-btn">New Agent</button>
-        </div>
-        <div style="display:flex; gap:12px;">
-            <button class="stop-btn" onclick="disconnectAllAgents()">Disconnect All Agents</button>
-            <button class="stop-btn" onclick="confirmShutdown()">Full Shutdown</button>
-        </div>
-    </div>
+    <main class="app-main">
+        <section class="chat-pane" id="chatPane" aria-label="Chat">
+            <div id="bot-output-log" aria-label="Bot output log">
+                <div class="chat-note">Bot replies are loaded from server history (newest 200). Right-click to choose recipients.</div>
+                <div id="bot-output-entries" aria-live="polite"></div>
+            </div>
+            <div class="composer">
+                <div class="composer-meta">
+                    <span id="recipientSummary" class="empty" role="status" title="Right-click to choose recipients">No recipients — right-click to choose</span>
+                    <span id="groupResult" role="status"></span>
+                </div>
+                <div class="composer-row">
+                    <textarea id="chatInput" rows="1" placeholder="Message the selected bots (Enter to send, Shift+Enter for a new line)"></textarea>
+                    <button id="chatSendBtn" class="start-btn" disabled>Send</button>
+                </div>
+            </div>
+        </section>
+        <aside class="status-pane" aria-label="Bot status">
+            <div id="agents"></div>
+        </aside>
+    </main>
+
+    <div id="recipientMenu" class="context-menu" role="menu" hidden></div>
 
     <!-- Modal -->
     <div id="createAgentModal" class="modal-backdrop">
@@ -433,31 +448,56 @@
             try { window.localStorage.removeItem(managementTokenKey); } catch {}
             updateForgetTokenButton();
         });
+        const chatLog = document.getElementById('bot-output-log');
+        function botColor(name) {
+            let hash = 0;
+            for (const ch of name) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+            return `hsl(${hash % 360}, 60%, 68%)`;
+        }
         function renderBotOutput(record) {
             const entry = document.createElement('article');
-            entry.className = 'bot-output-entry';
+            const operator = record.kind === 'operator';
+            entry.className = `bot-output-entry${operator ? ' operator' : ''}`;
             const meta = document.createElement('div');
             meta.className = 'bot-output-meta';
-            meta.textContent = `${new Date(record.at).toLocaleString()} · ${record.agentName}`;
+            const author = document.createElement('span');
+            author.className = 'chat-author';
+            author.textContent = operator ? `You → ${record.recipients.join(', ')}` : record.agentName;
+            if (!operator) author.style.color = botColor(record.agentName);
+            meta.append(author, ` · ${new Date(record.at).toLocaleString()}`);
             const content = document.createElement('div');
             content.className = 'bot-output-content';
             content.textContent = record.message;
             entry.append(meta, content);
             botOutputEntries.append(entry);
         }
+        function isChatAtBottom() {
+            return chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 40;
+        }
         function renderBotOutputLog() {
             botOutputEntries.replaceChildren();
             if (!botOutputLog.length) {
                 const empty = document.createElement('div');
-                empty.className = 'bot-output-meta';
+                empty.className = 'chat-note';
                 empty.textContent = 'No bot output yet.';
                 botOutputEntries.append(empty);
                 return;
             }
             for (const record of botOutputLog) renderBotOutput(record);
-            const log = document.getElementById('bot-output-log');
-            log.scrollTop = log.scrollHeight;
+            chatLog.scrollTop = chatLog.scrollHeight;
         }
+        function appendChatRecord(record) {
+            const stick = isChatAtBottom() || record.kind === 'operator';
+            if (botOutputLog.length === 0) botOutputEntries.replaceChildren();
+            botOutputLog.push(record);
+            renderBotOutput(record);
+            while (botOutputLog.length > MAX_BOT_OUTPUT_ENTRIES) {
+                botOutputLog.shift();
+                botOutputEntries.firstElementChild?.remove();
+            }
+            if (stick) chatLog.scrollTop = chatLog.scrollHeight;
+        }
+        renderBotOutputLog();
         function updateStatus(connected) {
             if (!statusEl) return;
             if (connected) {
@@ -620,14 +660,7 @@
         document.getElementById('closeCreateAgentBtn').addEventListener('click', hideCreateAgentModal);
 
         socket.on('bot-output', (agentName, message) => {
-            const record = { at: new Date().toISOString(), agentName: String(agentName), message: String(message), live: true };
-            botOutputLog.push(record);
-            renderBotOutput(record);
-            while (botOutputLog.length > MAX_BOT_OUTPUT_ENTRIES) {
-                botOutputLog.shift();
-                botOutputEntries.firstElementChild?.remove();
-            }
-            document.getElementById('bot-output-log').scrollTop = document.getElementById('bot-output-log').scrollHeight;
+            appendChatRecord({ at: new Date().toISOString(), agentName: String(agentName), message: String(message), live: true });
         });
 
         // Subscribe to aggregated state updates (re-sent on each connect)
@@ -691,7 +724,7 @@
                         const phase = st.action.phase || 'idle';
                         actionEl.textContent = phase === 'acting' ? `acting: ${st.action.current || 'unknown'}`
                             : phase === 'thinking' ? 'thinking...' : 'idle';
-                        actionEl.className = `cell action-phase ${phase}`;
+                        actionEl.className = `cell wide action-phase ${phase}`;
                     }
                     if (invGrid && st.inventory?.counts) {
                         const counts = st.inventory.counts;
@@ -831,7 +864,7 @@
 
             const agentState = currentAgents.find(a => a.name === name);
             const shouldShow = agentState?.in_game && settings?.render_bot_view === true;
-            viewerContainer.parentElement.style.display = shouldShow ? '' : 'none';
+            viewerContainer.style.display = shouldShow ? '' : 'none';
         }
 
         discardBtn.addEventListener('click', () => {
@@ -861,36 +894,33 @@
             const invOpen = inventoryOpen[agent.name] === true;
             const invStyle = invOpen ? '' : 'display:none;';
             return `
-                    <div class="agent${selectionMode && agent.in_game && agent.socket_connected ? ' selectable' : ''}${selectedBots.has(agent.name) ? ' selected' : ''}" id="agent-${agent.name}" data-agent-name="${agent.name}">
+                    <div class="agent${selectedBots.has(agent.name) ? ' selected' : ''}" id="agent-${agent.name}" data-agent-name="${agent.name}" title="Click to toggle as a chat recipient">
+                        <div class="agent-header">
+                            <span class="status-icon ${agent.in_game ? 'online' : 'offline'}">●</span>
+                            <span class="agent-name">${agent.name}</span>
+                            ${agent.socket_connected && !agent.in_game ? '<span style="color:#f0ad4e;font-size:0.8em;">joining...</span>' : ''}
+                            <span class="recipient-tag">✓ recipient</span>
+                            <span class="spacer"></span>
+                            <button class="gear-btn" title="Inventory" onclick="toggleDetails('${agent.name}')">Inventory</button>
+                            <button class="gear-btn" title="Settings" onclick="openAgentSettings('${agent.name}')">⚙</button>
+                        </div>
                         <div class="agent-grid">
-                            <div class="cell title" style="grid-column: 1 / -1; display:flex; align-items:center; justify-content:space-between;">
-                                <span><span class="status-icon ${agent.in_game ? 'online' : 'offline'}">●</span>${agent.name}${agent.socket_connected && !agent.in_game ? '<span style="margin-left:6px;color:#f0ad4e;">joining...</span>' : ''}
-                                    <button class="gear-btn" title="Settings" onclick="openAgentSettings('${agent.name}')">⚙</button>
-                                    <button class="gear-btn" title="Inventory" onclick="toggleDetails('${agent.name}')">Inventory</button>
-                                </span>
-                            </div>
-                            ${showViewer ? `<div class="cell" style="grid-row: span 3; padding:0;">${viewerHTML}</div>` : ''}
-                            <div class="cell" id="action-${agent.name}">action: -</div>
-                            <div class="cell" id="mode-${agent.name}">gamemode: -</div>
-                            <div class="cell" id="freshness-${agent.name}">state: unknown</div>
+                            ${viewerHTML}
+                            <div class="cell wide" id="action-${agent.name}">action: -</div>
                             <div class="cell" id="health-${agent.name}">health: -</div>
                             <div class="cell" id="hunger-${agent.name}">hunger: -</div>
-                            <div class="cell" id="pos-${agent.name}">pos: -</div>
+                            <div class="cell wide" id="pos-${agent.name}">pos: -</div>
                             <div class="cell" id="biome-${agent.name}">biome: -</div>
-                            <div class="cell" id="items-${agent.name}">inventory slots: -</div>
+                            <div class="cell" id="mode-${agent.name}">gamemode: -</div>
                             <div class="cell" id="equipped-${agent.name}">equipped: -</div>
-                            <div class="agent-inventory" id="inventorySection-${agent.name}" style="${invStyle} grid-column: 1 / -1;">
-                                <h3>Inventory</h3>
-                                <div class="cell" id="armor-${agent.name}" style="margin-bottom: 8px;">armor: -</div>
-                                <div class="inventory-grid" id="inventory-${agent.name}"></div>
-                            </div>
+                            <div class="cell" id="items-${agent.name}">inventory slots: -</div>
+                            <div class="cell wide" id="freshness-${agent.name}">state: unknown</div>
                         </div>
-                        <div class="controls-row">
-                            <button class="start-btn" id="sendBtn-${agent.name}" disabled onclick="sendMessage('${agent.name}', document.getElementById('messageInput-${agent.name}').value, true)">Send</button>
-                            <input class="msg-input" type="text" id="messageInput-${agent.name}" placeholder="Enter message..." 
-                                oninput="onMsgInputChange('${agent.name}')"
-                                onkeydown="if(event.key === 'Enter') document.getElementById('sendBtn-${agent.name}').click()"
-                                ${!agent.in_game ? 'disabled' : ''}>
+                        <div class="agent-inventory" id="inventorySection-${agent.name}" style="${invStyle}">
+                            <div class="cell" id="armor-${agent.name}" style="margin-bottom: 6px;">armor: -</div>
+                            <div class="inventory-grid agent-grid" id="inventory-${agent.name}"></div>
+                        </div>
+                        <div class="agent-controls">
                             <button class="neutral-btn" onclick="sendMessage('${agent.name}', '!stop')" ${!agent.in_game ? 'disabled' : ''}>Stop Action</button>
                             <button class="neutral-btn" onclick="sendMessage('${agent.name}', '!stay(-1)')" ${!agent.in_game ? 'disabled' : ''}>Stay Still</button>
                             <button class="neutral-btn" onclick="restartAgent('${agent.name}')" ${!agent.in_game ? 'disabled' : ''}>Restart</button>
@@ -898,55 +928,6 @@
                             <button class="stop-btn" onclick="destroyAgent('${agent.name}')">Remove</button>
                         </div>
                     </div>`;
-        }
-
-        async function renderAgents(agents) {
-            if (!agents.length) {
-                agentsDiv.innerHTML = '<div class="agent">No agents connected</div>';
-                return;
-            }
-
-            // If agentsDiv is empty, do a full render
-            if (!agentsDiv.children.length) {
-                agentsDiv.innerHTML = agents.map(agent => renderAgentCard(agent)).join('');
-                // Update all viewers after initial render
-                setTimeout(() => {
-                    agents.forEach(a => {
-                        if (a.in_game) updateAgentViewer(a.name);
-                    });
-                }, 0);
-                return;
-            }
-
-            // Compare with current agents to find changes
-            const prevAgents = currentAgents.reduce((acc, a) => ({ ...acc, [a.name]: a }), {});
-            const changedAgents = agents.filter(a => {
-                const prev = prevAgents[a.name];
-                return !prev || prev.in_game !== a.in_game || prev.viewerPort !== a.viewerPort || prev.socket_connected !== a.socket_connected;
-            });
-
-            // Update only changed agents
-            changedAgents.forEach(agent => {
-                const el = document.getElementById(`agent-${agent.name}`);
-                if (el) {
-                    // Update existing card
-                    el.outerHTML = renderAgentCard(agent);
-                    if (agent.in_game) updateAgentViewer(agent.name);
-                } else {
-                    // Add new card
-                    agentsDiv.insertAdjacentHTML('beforeend', renderAgentCard(agent));
-                    if (agent.in_game) updateAgentViewer(agent.name);
-                }
-            });
-
-            // Remove cards for agents that no longer exist
-            Array.from(agentsDiv.children).forEach(el => {
-                const name = el.id.replace('agent-', '');
-                if (!agents.find(a => a.name === name)) {
-                    el.remove();
-                    delete inventoryOpen[name];
-                }
-            });
         }
 
         socket.on('agents-status', async (agents) => {
@@ -971,6 +952,11 @@
             // Update current agents list
             currentAgents = agents;
             updateSelectionUI();
+            if (!recipientMenu.hidden) buildRecipientMenu();
+            if (!agents.length) {
+                agentsDiv.innerHTML = '<div class="no-agents">No agents connected</div>';
+                return;
+            }
 
             // If agentsDiv is empty, do a full render
             if (!agentsDiv.children.length) {
@@ -1043,77 +1029,134 @@
                 socket.emit('shutdown', result => { if (!result?.success) window.alert(result?.error || 'Shutdown request was not accepted'); });
             }
         }
-        function sendMessage(n, m, useSelection = false) {
+        // Individual control buttons (Stop/Stay) keep a single-bot scope.
+        function sendMessage(n, m) {
             if (!m || !m.trim() || !socket.connected) return;
-            if (useSelection && selectionMode && !selectedBots.has(n) && !m.trimStart().startsWith('@')) return;
-            const targets = useSelection && selectionMode ? [...selectedBots] : n;
-            socket.emit('send-message', targets, { from: 'ADMIN', message: m }, result => {
+            socket.emit('send-message', n, { from: 'ADMIN', message: m }, result => {
                 document.getElementById('groupResult').textContent = result.success ? `Sent to: ${result.recipients.join(', ')}` : result.error;
-                if (!result.success) return;
-                const input = document.getElementById(`messageInput-${n}`);
-                if (input && input.value === m) input.value = '';
-                onMsgInputChange(n);
             });
         }
 
-        let selectionMode = false;
+        // Chat recipients: chosen from the right-click menu or by clicking status cards.
         const selectedBots = new Set();
-        const selectionModeBtn = document.getElementById('selectionModeBtn');
-        const selectAllBotsBtn = document.getElementById('selectAllBotsBtn');
-        function updateSelectionUI() {
-            for (const name of selectedBots) {
-                if (!currentAgents.some(agent => agent.name === name && agent.in_game && agent.socket_connected)) selectedBots.delete(name);
-            }
-            selectionModeBtn.textContent = selectionMode ? 'Done selecting' : 'Select bots';
-            selectionModeBtn.setAttribute('aria-pressed', String(selectionMode));
-            selectAllBotsBtn.hidden = !selectionMode;
-            document.getElementById('selectionSummary').textContent = selectionMode
-                ? (selectedBots.size ? `Recipients: ${[...selectedBots].join(', ')} — send from any selected bot's input.` : 'Click bot cards to select recipients.') : '';
-            for (const agent of currentAgents) {
-                const card = document.getElementById(`agent-${agent.name}`);
-                if (card) {
-                    card.classList.toggle('selectable', selectionMode && agent.in_game && agent.socket_connected);
-                    card.classList.toggle('selected', selectedBots.has(agent.name));
-                }
-                onMsgInputChange(agent.name);
-            }
+        const chatInput = document.getElementById('chatInput');
+        const chatSendBtn = document.getElementById('chatSendBtn');
+        function isRecipientAvailable(name) {
+            return currentAgents.some(agent => agent.name === name && agent.in_game && agent.socket_connected);
         }
-        selectionModeBtn.addEventListener('click', () => {
-            selectionMode = !selectionMode;
-            if (!selectionMode) selectedBots.clear();
+        function updateSelectionUI() {
+            for (const name of selectedBots) if (!isRecipientAvailable(name)) selectedBots.delete(name);
+            const summary = document.getElementById('recipientSummary');
+            summary.textContent = selectedBots.size ? `To: ${[...selectedBots].join(', ')}` : 'No recipients — right-click to choose';
+            summary.classList.toggle('empty', !selectedBots.size);
+            for (const agent of currentAgents) document.getElementById(`agent-${agent.name}`)?.classList.toggle('selected', selectedBots.has(agent.name));
+            onChatInputChange();
+        }
+        function toggleRecipient(name) {
+            if (selectedBots.has(name)) selectedBots.delete(name);
+            else if (isRecipientAvailable(name)) selectedBots.add(name);
             updateSelectionUI();
-        });
-        document.addEventListener('keydown', event => {
-            if (event.key !== 'Control' || event.repeat || selectionMode || event.target.closest('input, textarea, select, [contenteditable]')) return;
-            selectionMode = true;
-            updateSelectionUI();
-        });
-        selectAllBotsBtn.addEventListener('click', () => {
-            if (!selectionMode) return;
+        }
+        function selectAllRecipients() {
             currentAgents.filter(agent => agent.in_game && agent.socket_connected).forEach(agent => selectedBots.add(agent.name));
             updateSelectionUI();
-        });
-        agentsDiv.addEventListener('click', event => {
-            if (!selectionMode || event.target.closest('button, input, textarea, select, a, label, iframe')) return;
-            const card = event.target.closest('.agent');
-            const name = card?.dataset.agentName;
-            if (!currentAgents.some(agent => agent.name === name && agent.in_game && agent.socket_connected)) return;
-            if (selectedBots.has(name)) selectedBots.delete(name);
-            else selectedBots.add(name);
+        }
+        function clearRecipients() {
+            selectedBots.clear();
             updateSelectionUI();
+        }
+        function onChatInputChange() {
+            const text = chatInput.value;
+            // An explicit @address prefix overrides (or substitutes for) the selection.
+            const hasTarget = selectedBots.size > 0 || text.trimStart().startsWith('@');
+            chatSendBtn.disabled = !socket.connected || !hasTarget || !text.trim();
+            chatSendBtn.textContent = selectedBots.size > 1 ? `Send to ${selectedBots.size} bots` : 'Send';
+        }
+        function sendChat() {
+            const m = chatInput.value;
+            if (chatSendBtn.disabled) return;
+            socket.emit('send-message', [...selectedBots], { from: 'ADMIN', message: m }, result => {
+                document.getElementById('groupResult').textContent = result.success ? `Sent to: ${result.recipients.join(', ')}` : result.error;
+                if (!result.success) return;
+                appendChatRecord({ at: new Date().toISOString(), kind: 'operator', recipients: result.recipients, message: m, live: true });
+                if (chatInput.value === m) chatInput.value = '';
+                onChatInputChange();
+            });
+        }
+        chatInput.addEventListener('input', onChatInputChange);
+        chatInput.addEventListener('keydown', event => {
+            if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
+            event.preventDefault();
+            sendChat();
+        });
+        chatSendBtn.addEventListener('click', sendChat);
+        agentsDiv.addEventListener('click', event => {
+            if (event.target.closest('button, input, textarea, select, a, label, iframe, .agent-inventory')) return;
+            const name = event.target.closest('.agent')?.dataset.agentName;
+            if (name) toggleRecipient(name);
         });
         socket.on('connect', updateSelectionUI);
         socket.on('disconnect', updateSelectionUI);
-        function onMsgInputChange(name) {
-            const input = document.getElementById(`messageInput-${name}`);
-            const btn = document.getElementById(`sendBtn-${name}`);
-            if (btn && input) {
-                const agent = currentAgents.find(agent => agent.name === name);
-                const canSend = !selectionMode || selectedBots.has(name) || input.value.trimStart().startsWith('@');
-                btn.disabled = !socket.connected || !agent?.in_game || !agent.socket_connected || !canSend || !input.value.trim();
-                btn.textContent = selectionMode && selectedBots.has(name) ? `Send to ${selectedBots.size} bots` : 'Send';
+
+        const recipientMenu = document.getElementById('recipientMenu');
+        function menuItem(label, onClick, { checked = null, disabled = false, dot = null } = {}) {
+            const item = document.createElement('button');
+            item.type = 'button';
+            item.className = 'menu-item';
+            item.disabled = disabled;
+            const check = document.createElement('span');
+            check.className = 'menu-check';
+            check.textContent = checked ? '✓' : '';
+            item.append(check);
+            if (dot) {
+                const icon = document.createElement('span');
+                icon.className = `status-icon ${dot}`;
+                icon.textContent = '●';
+                item.append(icon);
             }
+            item.append(label);
+            item.addEventListener('click', event => { event.stopPropagation(); onClick(); });
+            return item;
         }
+        function buildRecipientMenu() {
+            const title = document.createElement('div');
+            title.className = 'menu-title';
+            title.textContent = 'Send to (multiple allowed)';
+            const items = [title];
+            if (!currentAgents.length) items.push(menuItem('No agents', () => {}, { disabled: true }));
+            for (const agent of currentAgents) {
+                const available = agent.in_game && agent.socket_connected;
+                items.push(menuItem(agent.name, () => { toggleRecipient(agent.name); buildRecipientMenu(); },
+                    { checked: selectedBots.has(agent.name), disabled: !available, dot: available ? 'online' : 'offline' }));
+            }
+            const separator = document.createElement('div');
+            separator.className = 'menu-separator';
+            items.push(separator,
+                menuItem('Select all connected', () => { selectAllRecipients(); buildRecipientMenu(); }),
+                menuItem('Clear selection', () => { clearRecipients(); buildRecipientMenu(); }, { disabled: !selectedBots.size }));
+            recipientMenu.replaceChildren(...items);
+        }
+        function openRecipientMenu(x, y) {
+            buildRecipientMenu();
+            recipientMenu.hidden = false;
+            const rect = recipientMenu.getBoundingClientRect();
+            recipientMenu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - rect.width - 4))}px`;
+            recipientMenu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - rect.height - 4))}px`;
+        }
+        function closeRecipientMenu() { recipientMenu.hidden = true; }
+        // Right-click in the chat or on a status card opens the recipient menu; Shift+right-click keeps the browser menu.
+        for (const area of [document.getElementById('chatPane'), agentsDiv]) {
+            area.addEventListener('contextmenu', event => {
+                if (event.shiftKey) return;
+                event.preventDefault();
+                openRecipientMenu(event.clientX, event.clientY);
+            });
+        }
+        recipientMenu.addEventListener('contextmenu', event => event.preventDefault());
+        document.addEventListener('mousedown', event => { if (!recipientMenu.hidden && !recipientMenu.contains(event.target)) closeRecipientMenu(); });
+        document.addEventListener('keydown', event => { if (event.key === 'Escape') closeRecipientMenu(); });
+        window.addEventListener('resize', closeRecipientMenu);
+        window.addEventListener('blur', closeRecipientMenu);
 
         function toggleDetails(name) {
             const invSection = document.getElementById(`inventorySection-${name}`);
