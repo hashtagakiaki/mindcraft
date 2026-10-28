@@ -10,6 +10,7 @@ function parseArguments() {
             type: 'array',
             describe: 'List of agent profile paths',
         })
+        .option('ui-only', { type: 'boolean', default: false, describe: 'Register agents without starting them' })
         .option('task_path', {
             type: 'string',
             describe: 'Path to task file to execute'
@@ -90,5 +91,5 @@ Mindcraft.init(false, settings.mindserver_port, settings.auto_open_ui);
 for (let profile of settings.profiles) {
     const profile_json = JSON.parse(readFileSync(profile, 'utf8'));
     settings.profile = profile_json;
-    Mindcraft.createAgent(settings);
+    Mindcraft.createAgent(settings, { startStopped: args.uiOnly });
 }

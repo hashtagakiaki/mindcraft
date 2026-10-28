@@ -22,6 +22,8 @@ Run focused fixtures while iterating and the required suite once for final verif
 
 ## Personal development fork
 
+`main.js --ui-only` はprofileを未接続のagentとして登録し、UIのConnectで初めて起動する。通常起動は従来どおり全agentを接続する。手動playでは [`../play/start.sh --ui-only`](../play/README.md) を使う。
+
 操作者はbotに目的と明示的な制約を渡し、方法・準備・実行・失敗からの回復を自律的に判断させる。bot共通指示は6-lunaでの利用を前提に、最優先の方針と「未達の成果を確認 → 次の作業と不足を選択 → 不足だけ補って実行 → 結果から続行・回復・完了を判断」の循環を中心にする。道具の準備や原因別の回復には具体例を残し、確認や準備は次の行動に必要な範囲で終える。個別場面の方法・経路は固定せず、SDKの実行境界と確認済みの操作結果を使う。正本は [bot用AGENTS.md](src/process/codex/AGENTS.md)。
 
 管理UIの状態APIと `!stats` は、HP・空腹度を丸めずに返す。統括役とbotが同じ実測値でしきい値を判定でき、HP 9.5 が管理側だけ10になることを防ぐ。

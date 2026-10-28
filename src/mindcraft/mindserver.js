@@ -149,7 +149,8 @@ export function createMindServer(host_public = false, port = 8080) {
             socket.on('readiness', callback => {
                 if (!allowed(socket, ['observer'])) return deny(callback);
                 callback?.({ ready: true, agents: Object.entries(agent_connections).map(([name, connection]) => ({
-                    name, ready: Boolean(connection.in_game && connection.socket?.connected)
+                    name, ready: Boolean(connection.in_game && connection.socket?.connected),
+                    in_game: connection.in_game, socket_connected: Boolean(connection.socket?.connected)
                 })) });
             });
             return;

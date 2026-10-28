@@ -177,7 +177,7 @@ export async function init(host_public=false, port=8080, auto_open_ui=true) {
     }
 }
 
-export async function createAgent(settings) {
+export async function createAgent(settings, { startStopped = false } = {}) {
     if (shuttingDown) return { success: false, error: 'MindServer is shutting down' };
     if (!settings.profile.name) {
         console.error('Agent name is required in profile');
@@ -194,13 +194,13 @@ export async function createAgent(settings) {
     const creationToken = Symbol(agent_name);
     pendingAgentCreations.set(agent_name, creationToken);
     try {
-        return await createReservedAgent(settings, agent_name, creationToken);
+        return await createReservedAgent(settings, agent_name, creationToken, startStopped);
     } finally {
         if (pendingAgentCreations.get(agent_name) === creationToken) pendingAgentCreations.delete(agent_name);
     }
 }
 
-async function createReservedAgent(settings, agent_name, creationToken) {
+async function createReservedAgent(settings, agent_name, creationToken, startStopped) {
     const agentIndex = agent_count++;
     const viewer_port = getBotViewerPort(agentIndex);
     let load_memory = settings.load_memory || false;
@@ -235,6 +235,10 @@ async function createReservedAgent(settings, agent_name, creationToken) {
             onConsoleChunk: (stream, chunk, identity) => forwardAgentConsole(stream, chunk, identity)
         });
         agent_processes[settings.profile.name] = agentProcess;
+        if (startStopped) {
+            agentProcess.initialStartOptions = { load_memory, init_message, agentIndex };
+            return { success: true, error: null };
+        }
         const started = await agentProcess.start(load_memory, init_message, agentIndex);
         const creationCancelled = shuttingDown
             || pendingAgentCreations.get(agent_name) !== creationToken
@@ -278,7 +282,13 @@ export function startAgent(agentName) {
         return Promise.resolve({ state: 'stopped', reason: 'shutdown-or-stop-in-progress' });
     }
     if (agent_processes[agentName]) {
-        return agent_processes[agentName].forceRestart();
+        const process = agent_processes[agentName];
+        if (process.initialStartOptions) {
+            const { load_memory, init_message, agentIndex } = process.initialStartOptions;
+            delete process.initialStartOptions;
+            return process.start(load_memory, init_message, agentIndex);
+        }
+        return process.forceRestart();
     }
     else {
         console.error(`Cannot start agent ${agentName}; not found`);

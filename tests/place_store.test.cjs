@@ -394,6 +394,16 @@ async function runHubShutdownFixture(root) {
     globalThis.__fixtureSocketServer.emit('connection', controlSocket)
     const settings = name => ({ profile: { name }, host: 'localhost', port: 1, minecraft_version: '1.20' })
 
+    const stoppedCreated = await mindcraft.createAgent(settings('initially-stopped'), { startStopped: true })
+    assert.equal(stoppedCreated.success, true)
+    const stoppedProcess = mindcraft.getAgentProcess('initially-stopped')
+    fixtureSupervisors.push(stoppedProcess)
+    assert.equal(stoppedProcess.process, undefined, 'UI-only registration must not spawn a bot')
+    assert.equal(stoppedProcess.desiredState, 'stopped')
+    assert.equal((await mindcraft.startAgent('initially-stopped')).state, 'running', 'UI Connect starts the registered bot')
+    assert.equal(stoppedProcess.count_id, 0)
+    await mindcraft.destroyAgent('initially-stopped')
+
     const emitCreate = input => new Promise(resolve => controlSocket.emit('create-agent', input, resolve))
     const raceResults = await Promise.all([
       emitCreate(settings('same-name-race')),
