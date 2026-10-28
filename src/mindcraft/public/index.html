@@ -141,7 +141,20 @@
             margin-bottom: 6px;
             min-height: 1.4em;
         }
-        #recipientSummary { color: #9fd49f; cursor: context-menu; }
+        #recipientSummary {
+            background: #2d2d2d;
+            border: 1px solid #444;
+            border-radius: 12px;
+            padding: 3px 10px;
+            color: #9fd49f;
+            cursor: pointer;
+            text-align: left;
+        }
+        #recipientSummary:hover { background: #363636; }
+        @media (pointer: coarse) {
+            #recipientSummary { padding: 8px 12px; }
+            .menu-item { padding: 12px 14px; }
+        }
         #recipientSummary.empty { color: #f0ad4e; }
         #groupResult { color: #999; margin-left: auto; text-align: right; }
         .composer-row { display: flex; gap: 8px; align-items: flex-end; }
@@ -350,12 +363,12 @@
     <main class="app-main">
         <section class="chat-pane" id="chatPane" aria-label="Chat">
             <div id="bot-output-log" aria-label="Bot output log">
-                <div class="chat-note">Bot replies are loaded from server history (newest 200). Right-click to choose recipients.</div>
+                <div class="chat-note">Bot replies are loaded from server history (newest 200). Tap the recipient button or right-click to choose recipients.</div>
                 <div id="bot-output-entries" aria-live="polite"></div>
             </div>
             <div class="composer">
                 <div class="composer-meta">
-                    <span id="recipientSummary" class="empty" role="status" title="Right-click to choose recipients">No recipients — right-click to choose</span>
+                    <button id="recipientSummary" type="button" class="empty" aria-haspopup="menu" title="Tap or right-click to choose recipients">No recipients — tap to choose ▾</button>
                     <span id="groupResult" role="status"></span>
                 </div>
                 <div class="composer-row">
@@ -1047,7 +1060,7 @@
         function updateSelectionUI() {
             for (const name of selectedBots) if (!isRecipientAvailable(name)) selectedBots.delete(name);
             const summary = document.getElementById('recipientSummary');
-            summary.textContent = selectedBots.size ? `To: ${[...selectedBots].join(', ')}` : 'No recipients — right-click to choose';
+            summary.textContent = selectedBots.size ? `To: ${[...selectedBots].join(', ')} ▾` : 'No recipients — tap to choose ▾';
             summary.classList.toggle('empty', !selectedBots.size);
             for (const agent of currentAgents) document.getElementById(`agent-${agent.name}`)?.classList.toggle('selected', selectedBots.has(agent.name));
             onChatInputChange();
@@ -1136,24 +1149,34 @@
                 menuItem('Clear selection', () => { clearRecipients(); buildRecipientMenu(); }, { disabled: !selectedBots.size }));
             recipientMenu.replaceChildren(...items);
         }
-        function openRecipientMenu(x, y) {
+        function openRecipientMenu(x, y, above = false) {
             buildRecipientMenu();
             recipientMenu.hidden = false;
             const rect = recipientMenu.getBoundingClientRect();
+            const top = above ? y - rect.height - 4 : y;
             recipientMenu.style.left = `${Math.max(4, Math.min(x, window.innerWidth - rect.width - 4))}px`;
-            recipientMenu.style.top = `${Math.max(4, Math.min(y, window.innerHeight - rect.height - 4))}px`;
+            recipientMenu.style.top = `${Math.max(4, Math.min(top, window.innerHeight - rect.height - 4))}px`;
         }
         function closeRecipientMenu() { recipientMenu.hidden = true; }
         // Right-click in the chat or on a status card opens the recipient menu; Shift+right-click keeps the browser menu.
         for (const area of [document.getElementById('chatPane'), agentsDiv]) {
             area.addEventListener('contextmenu', event => {
-                if (event.shiftKey) return;
+                // Touch long-press in the input keeps the native paste/select menu; the recipient button covers touch.
+                if (event.shiftKey || (event.pointerType === 'touch' && event.target === chatInput)) return;
                 event.preventDefault();
                 openRecipientMenu(event.clientX, event.clientY);
             });
         }
         recipientMenu.addEventListener('contextmenu', event => event.preventDefault());
-        document.addEventListener('mousedown', event => { if (!recipientMenu.hidden && !recipientMenu.contains(event.target)) closeRecipientMenu(); });
+        const recipientSummary = document.getElementById('recipientSummary');
+        recipientSummary.addEventListener('click', () => {
+            if (!recipientMenu.hidden) return closeRecipientMenu();
+            const rect = recipientSummary.getBoundingClientRect();
+            openRecipientMenu(rect.left, rect.top, true);
+        });
+        document.addEventListener('mousedown', event => {
+            if (!recipientMenu.hidden && !recipientMenu.contains(event.target) && !recipientSummary.contains(event.target)) closeRecipientMenu();
+        });
         document.addEventListener('keydown', event => { if (event.key === 'Escape') closeRecipientMenu(); });
         window.addEventListener('resize', closeRecipientMenu);
         window.addEventListener('blur', closeRecipientMenu);
