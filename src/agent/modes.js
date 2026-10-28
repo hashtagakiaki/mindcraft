@@ -11,6 +11,8 @@ const CREEPER_RETREAT_DISTANCE = 7;
 const RANGED_RETREAT_DAMAGE_MS = 3000;
 // Melee mobs are imminent at the same range self_defense engages them.
 const MELEE_RETREAT_DISTANCE = 8;
+// A melee enemy this close can hit the bot within a step or two.
+const CORNERED_FIGHT_DISTANCE = 3;
 const RANGED_RETREAT_HEALTH = 10;
 const failedRetreats = new WeakMap();
 const terrainRevisions = new WeakMap();
@@ -199,7 +201,11 @@ const modes_list = [
         update: async function (agent) {
             const bot = agent.bot;
             const enemies = await world.getNearbyThreats(bot, 16);
-            if (modes_map.cowardice.on && failedRetreats.get(bot) === encounterKey(bot, imminentThreats(bot, enemies))) return;
+            // After a failed retreat, leave unreachable enemies alone so work is not
+            // interrupted, but fight one that closes to attack range: the bot
+            // cannot escape it.
+            const cornered = enemies.some(enemy => bot.entity.position.distanceTo(enemy.position) <= CORNERED_FIGHT_DISTANCE);
+            if (modes_map.cowardice.on && !cornered && failedRetreats.get(bot) === encounterKey(bot, imminentThreats(bot, enemies))) return;
             const enemy = enemies.find(enemy => bot.entity.position.distanceTo(enemy.position) <= 8);
             if (enemy) {
                 say(agent, `Fighting ${enemy.name}!`);

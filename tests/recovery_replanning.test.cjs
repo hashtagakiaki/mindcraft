@@ -187,7 +187,7 @@ async function testFailedRetreatWaitsForChangedEncounter() {
   const fixture = await makeModeFixture()
   try {
     const { agent, calls } = fixture
-    const enemy = { id: 1, name: 'zombie', type: 'hostile', position: vector(2) }
+    const enemy = { id: 1, name: 'zombie', type: 'hostile', position: vector(5) }
     Object.assign(agent.bot, { health: 1, food: 5, fixtureEnemies: [enemy], fixtureRetreatResult: false })
     agent.bot.blockAt = () => ({ name: 'air' })
     agent.bot.modes.loadJson({ cowardice: true, self_defense: true })
@@ -199,16 +199,26 @@ async function testFailedRetreatWaitsForChangedEncounter() {
     agent.bot.emit('blockUpdate', null, { position: vector(1) })
     await agent.bot.modes.update()
     await updateUntil(() => calls.run.length === 2 && agent.actions.currentAction === null)
-    enemy.position = vector(3)
+    enemy.position = vector(6)
     for (let i = 0; i < 3; i++) await agent.bot.modes.update()
     assert.equal(calls.run.length, 2, 'a chasing enemy changing cells does not restart a failed escape')
-    agent.bot.fixtureEnemies = [enemy, { ...enemy, id: 2, position: vector(4) }]
+    agent.bot.fixtureEnemies = [enemy, { ...enemy, id: 2, position: vector(7) }]
     await agent.bot.modes.update()
     await updateUntil(() => calls.run.length === 3 && agent.actions.currentAction === null)
     agent.bot.fixtureEnemies = [enemy]
     enemy.blocked = true
     await agent.bot.modes.update()
     assert.equal(calls.run.length, 3, 'wall-separated enemy does not interrupt work')
+    // An enemy that catches up after a failed escape is fought, not ignored.
+    agent.bot.fixtureRetreatResult = false
+    enemy.blocked = false
+    enemy.position = vector(6)
+    await agent.bot.modes.update()
+    await updateUntil(() => calls.run.length === 4 && agent.actions.currentAction === null)
+    enemy.position = vector(2)
+    await agent.bot.modes.update()
+    await updateUntil(() => calls.run.length === 5 && agent.actions.currentAction === null)
+    assert.equal(calls.run[4].label, 'mode:self_defense', 'a cornered bot fights an enemy within attack range')
   } finally { await rm(fixture.root, { recursive: true, force: true }) }
 }
 
