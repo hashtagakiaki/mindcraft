@@ -11,7 +11,7 @@ import { DiagnosticWriter, checkDiagnosticsSpace } from './diagnostics_store.js'
 import convoManager from './conversation.js';
 import { serverProxy, sendOutputToServer } from './mindserver_proxy.js';
 
-const DEFAULTS = { stall_timeout_ms: 30000, action_timeout_ms: 600000, output_limit: 16000, max_search_radius: 64,
+const DEFAULTS = { action_timeout_ms: 600000, output_limit: 16000, max_search_radius: 64,
     task_budget_ms: null, max_operations: null, max_turns: null, goals: false,
     execution_window_ms: NATIVE_EXECUTION_WINDOW_MS };
 const OPTIONAL_TASK_LIMITS = new Set(['task_budget_ms', 'max_operations', 'max_turns']);
@@ -29,6 +29,8 @@ export function validateCodexRuntime(profile) {
     const selected = typeof profile.model === 'string' ? { api: profile.model.startsWith('codex/') ? 'codex' : null, model: profile.model.replace(/^codex\//, '') } : { ...profile.model };
     selected.model = selected.model?.replace(/^codex\//, '');
     if (selected.api !== 'codex' || !selected.model) throw new Error('codex-session requires an explicit codex/model profile');
+    // Navigation and dig deadlines own stall decisions; the action-wide stall timer was removed.
+    if (settings.codex_session && 'stall_timeout_ms' in settings.codex_session) throw new Error('codex_session.stall_timeout_ms was removed; delete it from the settings');
     const config = { ...DEFAULTS, ...settings.codex_session };
     for (const [key, value] of Object.entries(config)) {
         if (key === 'goals') {
@@ -693,7 +695,7 @@ export class CodexRuntime {
                 this.actionId = agent.actions.currentAction?.id;
                 this._taskScope.operationSignal = agent.actions.currentAction?.controller?.signal ?? null;
                 return agent.coder.executeCode(code);
-            }, { timeout: config.action_timeout_ms / 60000, stallTimeoutMs: config.stall_timeout_ms, outputLimit: config.output_limit, taskId });
+            }, { timeout: config.action_timeout_ms / 60000, outputLimit: config.output_limit, taskId });
             operationsWithoutProgress = result.progressObserved || result.confirmedChanges?.length
                 ? 0 : operationsWithoutProgress + 1;
             const observed = { ...result, operationsWithoutProgress,

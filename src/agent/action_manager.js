@@ -132,7 +132,7 @@ export class ActionManager {
         return this._executeResume(actionLabel, actionFn, timeout);
     }
 
-    async runAction(actionLabel, actionFn, { timeout, resume = false, stallTimeoutMs = 0, outputLimit = MAX_OUTPUT_LENGTH, taskId = null, interruptionContext = null, reflex = false } = {}) {
+    async runAction(actionLabel, actionFn, { timeout, resume = false, outputLimit = MAX_OUTPUT_LENGTH, taskId = null, interruptionContext = null, reflex = false } = {}) {
         if (this.shuttingDown) return this._rejectedResult('shutdown');
         if (this.managementPaused) return this._rejectedResult('management-paused');
         if (this.managementIntentRequired) return this._rejectedResult('management-intent-required');
@@ -144,7 +144,7 @@ export class ActionManager {
         if (resume) return this._executeResume(actionLabel, actionFn, timeout);
         const epoch = this.intentEpoch;
         if (this.userStopped) return this._rejectedResult('user-stop');
-        return this._executeAction(actionLabel, actionFn, timeout, epoch, recoveryAdmissionId, { stallTimeoutMs, outputLimit, taskId, interruptionContext, reflex });
+        return this._executeAction(actionLabel, actionFn, timeout, epoch, recoveryAdmissionId, { outputLimit, taskId, interruptionContext, reflex });
     }
 
     isRecoveryAdmission(actionLabel, recoveryAdmissionId) {
@@ -327,52 +327,6 @@ export class ActionManager {
             action.operation.requestStop = reason => { void this.stop(reason); };
             if (action.recoveryAdmissionId) this.agent.onRecoveryPlanActionStarted?.({ recoveryId: action.recoveryAdmissionId, actionId: action.id, actionLabel });
             if (timeout > 0) timeoutHandle = this._startTimeout(timeout, action.id);
-            if (options.stallTimeoutMs > 0) {
-                let last = captureObservedProgress(this.agent.bot);
-                let progressedAt = Date.now();
-                let navigationPhaseActive = false;
-                let navigationWaitProgress = 0;
-                action.stallTimer = setInterval(() => {
-                    if (this.currentAction !== action || action.reason) return;
-                    const now = captureObservedProgress(this.agent.bot);
-                    // A dig owns its finite ground/look/break deadlines; count from when it ends.
-                    const miningDeadline = this.agent.bot?.miningSync?.activeDeadline();
-                    if (miningDeadline != null && Date.now() <= miningDeadline) {
-                        last = now;
-                        progressedAt = Date.now();
-                        return;
-                    }
-                    if (action.phase === 'navigation') {
-                        const wait = currentOwnedWait(action.operation);
-                        if (!navigationPhaseActive) {
-                            navigationPhaseActive = true;
-                            navigationWaitProgress = 0;
-                            progressedAt = Date.now();
-                        }
-                        if (wait && wait.progressCount > navigationWaitProgress) {
-                            navigationWaitProgress = wait.progressCount;
-                            progressedAt = Date.now();
-                        }
-                        if (Date.now() - progressedAt >= options.stallTimeoutMs) void this.stop('stall');
-                        last = now;
-                        return;
-                    }
-                    if (navigationPhaseActive) {
-                        // Do not turn navigation distance accumulated under its own detector into progress for the next phase.
-                        navigationPhaseActive = false;
-                        navigationWaitProgress = 0;
-                        last = now;
-                        progressedAt = Date.now();
-                        return;
-                    }
-                    const moved = last.position && now.position && Math.hypot(...now.position.map((v, i) => v - last.position[i])) >= MIN_PROGRESS_DISTANCE;
-                    if (moved || JSON.stringify(last.inventory) !== JSON.stringify(now.inventory)) {
-                        last = now;
-                        progressedAt = Date.now();
-                    }
-                    if (Date.now() - progressedAt >= options.stallTimeoutMs) void this.stop('stall');
-                }, Math.min(1000, options.stallTimeoutMs));
-            }
         } finally {
             releaseTransition();
         }
@@ -473,7 +427,6 @@ export class ActionManager {
 
     _finishAction(action, timeoutHandle) {
         clearTimeout(timeoutHandle);
-        clearInterval(action.stallTimer);
         clearTimeout(this.timeoutEscalations.get(action.id));
         this.timeoutEscalations.delete(action.id);
         if (this.currentAction !== action) return;

@@ -34,7 +34,7 @@ async function main() {
     process.env.CODEX_HOME = sourceHome
     const load = relative => import(pathToFileURL(path.join(root, relative)))
     const { default: settings } = await load('src/agent/settings.js')
-    Object.assign(settings, { agent_runtime: 'codex-session', allow_insecure_coding: true, codex_session: { stall_timeout_ms: 60, action_timeout_ms: 2000, output_limit: 16000 }, language: 'en' })
+    Object.assign(settings, { agent_runtime: 'codex-session', allow_insecure_coding: true, codex_session: { action_timeout_ms: 2000, output_limit: 16000 }, language: 'en' })
     const { CodexRuntime: NativeCodexRuntime, validateCodexRuntime, observedState, modelObservation, modelOperationResult } = await load('src/agent/codex_runtime.js')
     // Scripted model decisions use the same wait-for-tool-result boundary as app-server.
     // Existing multi-step scripts remain useful for host ownership/error/budget scenarios.
@@ -57,7 +57,7 @@ async function main() {
         } })
       }
     }
-    const { operationFactsSummary, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait } = await load('src/agent/library/operation_context.js')
+    const { operationFactsSummary } = await load('src/agent/library/operation_context.js')
     const { ActionManager } = await load('src/agent/action_manager.js')
     const { Coder } = await load('src/agent/coder.js')
     const { CodexSession } = await load('src/process/codex_session.js')
@@ -79,9 +79,12 @@ async function main() {
     settings.allow_insecure_coding = false
     assert.throws(() => validateCodexRuntime({ model: 'codex/gpt-6-luna' }), /allow_insecure/)
     settings.allow_insecure_coding = true
-    settings.codex_session.stall_timeout_ms = 0
+    settings.codex_session.action_timeout_ms = 0
     assert.throws(() => validateCodexRuntime({ model: 'codex/gpt-6-luna' }), /Invalid/)
-    settings.codex_session.stall_timeout_ms = 60
+    settings.codex_session.action_timeout_ms = 2000
+    settings.codex_session.stall_timeout_ms = 30000
+    assert.throws(() => validateCodexRuntime({ model: 'codex/gpt-6-luna' }), /stall_timeout_ms was removed/, 'a stale action-wide stall setting fails instead of being ignored')
+    delete settings.codex_session.stall_timeout_ms
     const defaultConfig = { ...settings.codex_session }
     delete settings.codex_session.action_timeout_ms
     const longDefaults = validateCodexRuntime({ model: 'codex/gpt-6-luna' }).config
@@ -677,51 +680,14 @@ for (let batch = 0; batch < 10; batch++) {
     assert.match(bad.message, /functions do not exist/)
     const partial = await agent.actions.runAction('partial', () => agent.coder.executeCode('log(bot, "kept mutation");\nawait Promise.resolve();\nthrow new Error("boom");'), { timeout: 0 })
     assert.match(partial.message, /kept mutation[\s\S]*boom/)
-    const nativeNavigation = agent.actions.runAction('navigation-phase-route-progress', async () => {
-      agent.actions.setPhase('navigation')
-      const wait = beginOwnedWait({ phase: 'navigation', reason: 'goal-or-new-route-segment', timeoutMs: 180 })
-      await delay(40)
-      markOwnedWaitProgress(wait)
-      await delay(45)
-      finishOwnedWait(wait, { outcome: 'settled' })
-    }, { timeout: 0, stallTimeoutMs: 60 })
-    assert.equal((await nativeNavigation).success, true, 'a new owned route segment refreshes the native stall timer')
-    // goToGoal reports goal-distance and dig progress from its check interval.
-    const timerNavigation = agent.actions.runAction('navigation-phase-timer-progress', async () => {
-      agent.actions.setPhase('navigation')
-      const wait = beginOwnedWait({ phase: 'navigation', reason: 'goal-or-new-route-segment', timeoutMs: 400 })
-      const timer = setInterval(() => markOwnedWaitProgress(wait), 25)
-      await delay(150)
-      clearInterval(timer)
-      finishOwnedWait(wait, { outcome: 'settled' })
-    }, { timeout: 0, stallTimeoutMs: 60 })
-    assert.equal((await timerNavigation).success, true, 'progress marked from the owned check interval refreshes the stall timer')
-    const noRouteProgressStartedAt = Date.now()
-    const noRouteProgress = await agent.actions.runAction('navigation-phase-no-progress', async () => {
-      agent.actions.setPhase('navigation')
-      const wait = beginOwnedWait({ phase: 'navigation', reason: 'goal-or-new-route-segment', timeoutMs: 180 })
-      await new Promise(resolve => agent.actions.currentAction.controller.signal.addEventListener('abort', () => {
-        finishOwnedWait(wait, { outcome: 'cancelled' })
-        resolve()
-      }, { once: true }))
-    }, { timeout: 0, stallTimeoutMs: 60 })
-    assert.equal(noRouteProgress.reason, 'stall', 'an unresponsive navigation still stops at the existing native stall limit')
-    assert.ok(Date.now() - noRouteProgressStartedAt < 500, 'unresponsive native navigation does not inherit the longer source-navigation timeout')
-    // A dig within its finite deadline is not stalled; the clock restarts when it ends.
-    let digDeadline = Date.now() + 250
-    agent.bot.miningSync = { activeDeadline: () => digDeadline }
-    const slowDig = await agent.actions.runAction('slow-dig', async () => {
-      await delay(250)
-      digDeadline = null
-      await delay(20)
-    }, { timeout: 0, stallTimeoutMs: 100 })
-    assert.equal(slowDig.success, true, 'a dig longer than the stall limit keeps its own deadline')
-    delete agent.bot.miningSync
     const stopped = deferred()
     agent.interrupt = () => stopped.resolve()
-    const stall = await agent.actions.runAction('action:codex-code', async () => { agent.bot.output = 'x'.repeat(4232); await stopped.promise }, { timeout: 1, stallTimeoutMs: 60, outputLimit: 16000 })
-    assert.equal(stall.reason, 'stall')
-    assert.ok(stall.message.includes('x'.repeat(4232)), '4232-character result is retained')
+    const stopping = agent.actions.runAction('action:codex-code', async () => { agent.bot.output = 'x'.repeat(4232); await stopped.promise }, { timeout: 1, outputLimit: 16000 })
+    await delay(20)
+    await agent.actions.stop('superseded')
+    const stoppedAction = await stopping
+    assert.equal(stoppedAction.reason, 'superseded')
+    assert.ok(stoppedAction.message.includes('x'.repeat(4232)), '4232-character result is retained')
     assert.equal(agent.actions.executing, false)
     // A native task suppresses the old recovery actor and NPC idle during inference.
     agent.codexRuntime = { active: true }
@@ -828,8 +794,9 @@ Agent.prototype.start = async function() {
   this.codexRuntime = { cancel: () => session.close() };
   session.runTurn('fixture task').catch(() => null);
   await operationStarted;
-  void this.actions.runAction('action:codex-code', () => neverSettles, { timeout: 0, stallTimeoutMs: 20 });
+  void this.actions.runAction('action:codex-code', () => neverSettles, { timeout: 0 });
   recordLifecycle('action-started');
+  realTimeout(() => void this.actions.stop('superseded'), 20);
   await new Promise(() => {});
 };`)
       .replace("import { serverProxy } from '../agent/mindserver_proxy.js';", "import { serverProxy } from './lifecycle-proxy.mjs';")
@@ -1449,7 +1416,7 @@ Agent.prototype.start = async function() {
     // Default tasks survive the previous elapsed/operation/decision caps. Advance only
     // the elapsed clock after a settled operation; real action timers remain exercised below.
     const unlimitedSettings = { ...settings.codex_session }
-    settings.codex_session = { stall_timeout_ms: 60 }
+    settings.codex_session = {}
     const longAgent = makeAgent('LongTask')
     longAgent.coder.executeCode = async () => { longAgent.bot.entity.position.x++; return true }
     const originalNow = Date.now
@@ -1486,7 +1453,7 @@ Agent.prototype.start = async function() {
       assert.equal(budget.remainingHostDecisions, null)
     }
     // A settled operation timeout permits a corrected operation in the same task.
-    settings.codex_session = { ...unlimitedSettings, action_timeout_ms: 30, stall_timeout_ms: 1000 }
+    settings.codex_session = { ...unlimitedSettings, action_timeout_ms: 30 }
     const timeoutAgent = makeAgent('TimeoutRepair')
     const timeoutBody = deferred()
     timeoutAgent.interrupt = () => timeoutBody.resolve()
@@ -1827,7 +1794,7 @@ Agent.prototype.start = async function() {
       const terminals = (await eventsFor('Cancel' + reason)).filter(event => event.type === 'finished')
       assert.equal(terminals.length, 1, `${reason} cancellation writes one terminal record`)
     }
-    console.log('codex session fixtures passed: compound/lint/false domain result/unawaited SDK drain/partial/stall/owned transport/tool-result wait/phases/cancellation')
+    console.log('codex session fixtures passed: compound/lint/false domain result/unawaited SDK drain/partial/stop/owned transport/tool-result wait/phases/cancellation')
   } finally {
     process.chdir(oldCwd)
     if (oldBin === undefined) delete process.env.MINDCRAFT_CODEX_BIN; else process.env.MINDCRAFT_CODEX_BIN = oldBin
