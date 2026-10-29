@@ -383,6 +383,19 @@ async function testNavigation(root) {
   assert.equal(timedOut.status, 'not_found')
   assert.equal(timedOut.code, 'timeout')
   bot = makeBot()
+  bot.navigation.blocks = []
+  bot.entity.position = { ...movablePosition(0, 0), y: -30 }
+  bot.blockAt = groundAt
+  bot.pathfinder.goto = async goal => {
+    await delay(5)
+    bot.exploreGoalY = goal.y
+    bot.entity.position = movablePosition(bot.entity.position.x + 32, 0)
+  }
+  const firstLeg = await skills.exploreUntilBlock(bot, { blockTypes: ['bell'], timeoutMs: 12 })
+  assert.equal(bot.exploreGoalY, 1, 'a bot underground still aims at the column surface')
+  const secondLeg = await skills.exploreUntilBlock(bot, { blockTypes: ['bell'], timeoutMs: 12 })
+  assert.ok(secondLeg.travelled > firstLeg.travelled, 'a call starting where the previous one ended continues its trail origin')
+  bot = makeBot()
   const actionPhases = []
   const cancellation = { signal: new AbortController().signal, setPhase(phase) { actionPhases.push(phase) } }
   bot.getActionCancellationContext = () => cancellation

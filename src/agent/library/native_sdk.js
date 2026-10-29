@@ -21,6 +21,7 @@ const placeKinds = ['base', 'farm', 'storage', 'forest', 'village', 'mine', 'res
 const PRESERVE_ROUTE = Object.freeze({ allowDig: false, scaffold: 'forbid', scaffoldBlocks: Object.freeze([]) });
 const PRESERVE_WITH_CLEANUP = Object.freeze({ allowDig: false, scaffold: 'temporary', scaffoldBlocks: Object.freeze(['dirt', 'cobblestone']) });
 const EDIT_ROUTE = Object.freeze({ allowDig: true, scaffold: 'leave', scaffoldBlocks: Object.freeze(['dirt', 'cobblestone']) });
+const EXPLORE_ROUTE = Object.freeze({ allowDig: true, scaffold: 'forbid', scaffoldBlocks: Object.freeze([]) });
 const COMBAT_ROUTE = Object.freeze({ allowDig: false, scaffold: 'leave', scaffoldBlocks: Object.freeze(['dirt', 'cobblestone']), allowTowers: false });
 const navigationPolicies = Object.freeze({
     'skills.goToPosition': PRESERVE_WITH_CLEANUP, 'skills.reachPosition': EDIT_ROUTE,
@@ -29,7 +30,7 @@ const navigationPolicies = Object.freeze({
     'skills.collectBlock': EDIT_ROUTE, 'skills.pickupNearbyItems': PRESERVE_ROUTE,
     'skills.breakBlockAt': PRESERVE_ROUTE, 'skills.approachBlock': PRESERVE_ROUTE, 'skills.inspectChest': PRESERVE_ROUTE,
     'skills.putInChest': PRESERVE_ROUTE, 'skills.takeFromChest': PRESERVE_ROUTE,
-    'skills.giveToPlayer': PRESERVE_ROUTE, 'skills.receiveFromPlayer': PRESERVE_ROUTE, 'skills.goToNearestBlock': PRESERVE_ROUTE, 'skills.goToNearestEntity': PRESERVE_ROUTE, 'skills.exploreUntilBlock': PRESERVE_ROUTE,
+    'skills.giveToPlayer': PRESERVE_ROUTE, 'skills.receiveFromPlayer': PRESERVE_ROUTE, 'skills.goToNearestBlock': PRESERVE_ROUTE, 'skills.goToNearestEntity': PRESERVE_ROUTE, 'skills.exploreUntilBlock': EXPLORE_ROUTE,
     'skills.goToPlayer': PRESERVE_ROUTE, 'skills.followPlayer': PRESERVE_ROUTE,
     'skills.moveAway': COMBAT_ROUTE, 'skills.moveAwayFromEntity': COMBAT_ROUTE, 'skills.avoidEnemies': COMBAT_ROUTE,
     'skills.skipNight': PRESERVE_ROUTE, 'skills.useDoor': PRESERVE_ROUTE, 'skills.tillAndSow': PRESERVE_ROUTE,
@@ -66,6 +67,8 @@ function define(namespace, name, fields, description, args, options = {}) {
 }
 const policyDescription = policy => (policy === EDIT_ROUTE
     ? 'Its route may dig and leave confirmed dirt/cobblestone scaffolds; the selected work target keeps this skill’s own permissions.'
+    : policy === EXPLORE_ROUTE
+        ? 'Its route may dig through obstacles such as leaves and vines but places no scaffolds.'
     : policy === COMBAT_ROUTE
         ? 'Its route cannot dig or use one-block towers and may place confirmed dirt/cobblestone bridge scaffolds that may remain; the existing target/follow/retreat goal is preserved.'
         : 'Its ordinary route preserves existing blocks and leaves no route scaffolds; an unreachable target returns this skill’s normal failure result.')
@@ -133,7 +136,7 @@ s('exploreUntilBlock', {
     searchRadius: radius(64, { positive: true, description: 'Loaded-block observation radius checked before each step.' }),
     stepDistance: positiveInt({ default: 32, description: 'Horizontal blocks per wander step.' }),
     timeoutMs: positiveInt({ default: 300000, description: 'Search time budget; the host action timeout still applies.' }),
-}, 'Wander away from the start over loaded dry ground in stepDistance surface steps until a listed block is loaded within searchRadius. Water, lava and unreachable directions make it try other headings; it does not approach the block. Returns {ok:true,status:"found",block:{name,position},steps,travelled,elapsedMs}; otherwise ok:false with status not_found (code timeout), blocked (no progress in seven directions) or cancelled, plus the same counters. Use found block.position with goToPosition or reachPosition to go there.', a => [{ blockTypes: a.blockTypes, searchRadius: a.searchRadius, stepDistance: a.stepDistance, timeoutMs: a.timeoutMs }]);
+}, 'Wander away from the start in stepDistance steps, each aimed at the dry-ground surface of the next column (also when starting underground), until a listed block is loaded within searchRadius. Water, lava, trunks and unreachable directions make it try other headings; it does not approach the block. One call keeps exploring until timeoutMs; it is not shortened by execution_window_ms, so pass the whole search budget instead of repeating short calls. A call starting where the previous call ended continues that call\u2019s origin and heading. Returns {ok:true,status:"found",block:{name,position},steps,travelled,elapsedMs}; otherwise ok:false with status not_found (code timeout), blocked (no progress in seven directions or 25s without moving) or cancelled, plus the same counters; travelled is measured from the trail origin. Use found block.position with goToPosition or reachPosition to go there.', a => [{ blockTypes: a.blockTypes, searchRadius: a.searchRadius, stepDistance: a.stepDistance, timeoutMs: a.timeoutMs }]);
 s('goToPlayer', { playerName: text(), minDistance: distance({ default: 3 }) }, 'Navigate near a visible player.', a => [a.playerName, a.minDistance]);
 s('followPlayer', { playerName: text(), minDistance: distance({ default: 4 }) }, 'Follow a player until interrupted.', a => [a.playerName, a.minDistance]);
 s('moveAway', { distance: distance() }, 'Move distance blocks away from current position.', a => [a.distance]);

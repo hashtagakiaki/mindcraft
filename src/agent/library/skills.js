@@ -4602,20 +4602,26 @@ export async function goToNearestEntity(bot, entityType, min_distance=2, range=6
     return await goToPosition(bot, entity.position.x, entity.position.y, entity.position.z, min_distance);
 }
 
-const EXPLORE_STEP_TIMEOUT_MS = 20000;
 const EXPLORE_TURNS = [0, 1, -1, 2, -2, 3, -3].map(turn => turn * Math.PI / 4);
-const EXPLORE_SURFACE_SCAN = 48;
+// A step stops after this long without moving a block; the whole call returns blocked before the
+// host's 30s action stall stops it and discards the result.
+const EXPLORE_STEP_STALL_MS = 8000;
+const EXPLORE_NO_PROGRESS_MS = 25000;
+// Consecutive calls that start where the previous one ended keep its origin and heading.
+const exploreTrails = new WeakMap();
 
-// Feet position on the topmost ground of a loaded column; trees are not ground. Water columns
-// return null so wandering turns toward land: open-water recovery cannot find a landing.
-function exploreSurfaceTarget(bot, x, z, nearY) {
+// Feet position on the topmost ground of a loaded column, scanned from the world top so a bot
+// underground still aims at the real surface. Trunks, water and lava return null so wandering
+// turns elsewhere: open-water recovery cannot find a landing.
+function exploreSurfaceTarget(bot, x, z) {
     const column = new Vec3(Math.floor(x), 0, Math.floor(z));
-    for (let y = Math.floor(nearY) + EXPLORE_SURFACE_SCAN; y >= Math.floor(nearY) - EXPLORE_SURFACE_SCAN; y--) {
+    const minY = bot.game?.minY ?? -64;
+    for (let y = minY + (bot.game?.height ?? 384) - 1; y >= minY; y--) {
         const block = bot.blockAt(column.offset(0, y, 0));
-        if (!block) continue;
-        if (block.name === 'air' || block.name === 'cave_air' || block.name.endsWith('_leaves') || block.name.endsWith('_log')) continue;
-        if (block.name === 'water' || block.name === 'lava') return null;
-        if (block.boundingBox === 'block') return { x: column.x, y: y + 1, z: column.z };
+        if (!block) return null;
+        if (block.name === 'water' || block.name === 'lava' || block.name.endsWith('_log')) return null;
+        if (block.boundingBox !== 'block' || block.name.endsWith('_leaves')) continue;
+        return { x: column.x, y: y + 1, z: column.z };
     }
     return null;
 }
@@ -4629,7 +4635,7 @@ export async function exploreUntilBlock(bot, options = {}) {
      * @param {number} options.searchRadius - Observation radius checked before each step, default 64.
      * @param {number} options.stepDistance - Horizontal distance of each wander step, default 32.
      * @param {number} options.timeoutMs - Search time budget, default 300000.
-     * @returns {Promise<object>} found returns {ok:true,status:'found',block:{name,position},steps,travelled,elapsedMs}; otherwise ok:false with status not_found (timeout), blocked (no progress in any of seven directions) or cancelled. It does not approach the found block.
+     * @returns {Promise<object>} found returns {ok:true,status:'found',block:{name,position},steps,travelled,elapsedMs}; otherwise ok:false with status not_found (timeout), blocked (no progress in any of seven directions, or 25s without moving) or cancelled. travelled is measured from the trail origin, which a call starting where the previous call ended keeps. It does not approach the found block.
      * @example
      * const result = await skills.exploreUntilBlock(bot, { blockTypes: ['bell', 'hay_block'] });
      **/
@@ -4639,44 +4645,59 @@ export async function exploreUntilBlock(bot, options = {}) {
     if (unknown.length) throw new TypeError(`skills.exploreUntilBlock(bot, options): unknown block types ${unknown.join(', ')}.`);
     const context = getActionContext(bot);
     const startedAt = Date.now();
-    const start = bot.entity.position.clone();
-    let heading = Math.random() * 2 * Math.PI;
+    const position = () => bot.entity.position;
+    const flat = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
+    const trail = exploreTrails.get(bot);
+    const resumed = trail && flat(trail.end, position()) <= 2 * stepDistance;
+    const start = resumed ? trail.origin : position().clone();
+    let heading = resumed ? trail.heading : Math.random() * 2 * Math.PI;
     let steps = 0;
     let failures = 0;
     let lastFailure = null;
-    const summary = () => ({ steps, travelled: Math.round(Math.hypot(bot.entity.position.x - start.x, bot.entity.position.z - start.z)),
-        elapsedMs: Date.now() - startedAt });
-    const finish = result => { log(bot, JSON.stringify(result)); return result; };
+    let progressAt = Date.now();
+    const summary = () => ({ steps, travelled: Math.round(flat(position(), start)), elapsedMs: Date.now() - startedAt });
+    const finish = result => {
+        exploreTrails.set(bot, { origin: start, end: position().clone(), heading });
+        log(bot, JSON.stringify(result));
+        return result;
+    };
     while (true) {
         const block = world.getNearestBlocks(bot, blockTypes, searchRadius, 1)[0];
         if (block) return finish({ ok: true, status: 'found', block: { name: block.name, position: { x: block.position.x, y: block.position.y, z: block.position.z } }, ...summary() });
         if (isActionCancelled(bot, context)) return finish({ ok: false, status: 'cancelled', code: 'cancelled', reason: 'Exploration cancelled.', ...summary() });
         if (Date.now() - startedAt >= timeoutMs) return finish({ ok: false, status: 'not_found', code: 'timeout',
             reason: `No ${blockTypes.join('/')} found within ${timeoutMs}ms of exploration.`, ...summary() });
+        if (Date.now() - progressAt >= EXPLORE_NO_PROGRESS_MS) return finish({ ok: false, status: 'blocked', code: lastFailure?.code ?? 'no_progress',
+            reason: `Exploration did not move for ${EXPLORE_NO_PROGRESS_MS}ms${lastFailure ? `: ${lastFailure.reason}` : '.'}`, ...summary() });
         // Head away from the start so the search keeps reaching new chunks; after a failed step try
         // the next offset from that outward direction instead of reversing the whole walk.
-        const before = bot.entity.position.clone();
-        const away = Math.hypot(before.x - start.x, before.z - start.z) >= stepDistance
-            ? Math.atan2(before.z - start.z, before.x - start.x) : heading;
+        const before = position().clone();
+        const away = flat(before, start) >= stepDistance ? Math.atan2(before.z - start.z, before.x - start.x) : heading;
         let target = null;
         for (; failures < EXPLORE_TURNS.length && !target; failures += target ? 0 : 1) {
             const angle = away + EXPLORE_TURNS[failures] + (failures === 0 ? (Math.random() - 0.5) * Math.PI / 3 : 0);
-            target = exploreSurfaceTarget(bot, before.x + Math.cos(angle) * stepDistance, before.z + Math.sin(angle) * stepDistance, before.y);
+            target = exploreSurfaceTarget(bot, before.x + Math.cos(angle) * stepDistance, before.z + Math.sin(angle) * stepDistance);
             if (!target) lastFailure = { code: 'no_ground', reason: 'No loaded dry ground in the remaining wander directions.' };
         }
         if (!target) return finish({ ok: false, status: 'blocked', code: lastFailure?.code ?? 'no_progress',
             reason: `Exploration found no way forward in ${EXPLORE_TURNS.length} directions${lastFailure ? `: ${lastFailure.reason}` : '.'}`, ...summary() });
         steps++;
+        let sample = before;
+        let sampleAt = Date.now();
+        const watchdog = setInterval(() => {
+            if (flat(position(), sample) >= 1) { sample = position().clone(); sampleAt = progressAt = Date.now(); }
+            else if (Date.now() - sampleAt >= EXPLORE_STEP_STALL_MS) bot.pathfinder.stop();
+        }, 1000);
         // An XZ-only goal lets the route follow caves downward, so aim at the column's surface instead.
-        const stepTimer = setTimeout(() => bot.pathfinder.stop(), EXPLORE_STEP_TIMEOUT_MS);
         try {
             await goToGoal(bot, new pf.goals.GoalNear(target.x, target.y, target.z, 3));
         } catch (err) {
             lastFailure = { code: err?.navigation?.code ?? 'route_failed', reason: String(err?.message ?? err) };
-        } finally { clearTimeout(stepTimer); }
-        const moved = Math.hypot(bot.entity.position.x - before.x, bot.entity.position.z - before.z);
+        } finally { clearInterval(watchdog); }
+        const moved = flat(position(), before);
+        if (moved >= 1) progressAt = Date.now();
         if (moved >= stepDistance / 4) {
-            heading = Math.atan2(bot.entity.position.z - before.z, bot.entity.position.x - before.x);
+            heading = Math.atan2(position().z - before.z, position().x - before.x);
             failures = 0;
         } else failures++;
     }
