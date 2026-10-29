@@ -5012,37 +5012,114 @@ export async function useDoor(bot, door_pos=null, options={}) {
     }
 }
 
-export async function goToBed(bot) {
-    /**
-     * Sleep in the nearest bed.
-     * @param {MinecraftBot} bot, reference to the minecraft bot.
-     * @returns {Promise<boolean>} true if the bed was found, false otherwise.
-     * @example
-     * await skills.goToBed(bot);
-     **/
-    const beds = bot.findBlocks({
-        matching: (block) => {
-            return block.name.includes('bed');
-        },
-        maxDistance: 32,
-        count: 1
-    });
-    if (beds.length === 0) {
-        return failSkill(bot, 'target_not_found', `Could not find a bed to sleep in.`);
-    }
-    let loc = beds[0];
-    if (!await goToPosition(bot, loc.x, loc.y, loc.z)) return false;
-    const bed = bot.blockAt(loc);
-    await bot.sleep(bed);
-    log(bot, `You are in bed.`);
-    while (bot.isSleeping) {
-        if (isActionCancelled(bot)) {
-            await bot.wake().catch(() => {});
-            return failSkill(bot, 'cancelled', 'Sleeping was interrupted; left the bed.');
+const SKIP_NIGHT_BED_RADIUS = 64;
+const SKIP_NIGHT_WAIT_MS = 60000;
+const BED_SITE_RADIUS = 6;
+const BED_SITE_ATTEMPTS = 3;
+// Cells a bed may replace; matches the plants block_placement accepts as empty.
+const BED_SITE_OPEN = new Set(['air', 'cave_air', 'short_grass', 'tall_grass', 'fern', 'dead_bush', 'snow']);
+const BED_FACINGS = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] };
+
+function bedSites(bot) {
+    const origin = bot.entity.position.floored();
+    const occupied = new Set([origin.toString(), origin.offset(0, 1, 0).toString()]);
+    const open = position => {
+        const block = bot.blockAt(position);
+        return !!block && BED_SITE_OPEN.has(block.name) && !occupied.has(position.toString());
+    };
+    const clear = position => { const block = bot.blockAt(position); return !!block && block.boundingBox !== 'block'; };
+    const floor = position => { const block = bot.blockAt(position); return !!block && block.boundingBox === 'block'; };
+    const sites = [];
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -BED_SITE_RADIUS; dx <= BED_SITE_RADIUS; dx++) for (let dz = -BED_SITE_RADIUS; dz <= BED_SITE_RADIUS; dz++) {
+        const foot = origin.offset(dx, dy, dz);
+        if (!open(foot) || !floor(foot.offset(0, -1, 0)) || !clear(foot.offset(0, 1, 0))) continue;
+        for (const [facing, [fx, fz]] of Object.entries(BED_FACINGS)) {
+            const head = foot.offset(fx, 0, fz);
+            if (open(head) && floor(head.offset(0, -1, 0)) && clear(head.offset(0, 1, 0)))
+                sites.push({ position: foot, facing, distance: Math.hypot(dx, dy, dz) });
         }
+    }
+    return sites.sort((a, b) => a.distance - b.distance);
+}
+
+function bedCount(bot, name) {
+    return bot.inventory.items().filter(item => item.name === name).reduce((sum, item) => sum + item.count, 0);
+}
+
+export async function skipNight(bot, { waitMs = SKIP_NIGHT_WAIT_MS } = {}) {
+    /**
+     * Sleep through the night: use the nearest placed bed within 64 blocks, otherwise place a carried bed nearby. Gets up after waitMs if the night does not pass, and picks a bed it placed back up.
+     * @param {MinecraftBot} bot, reference to the minecraft bot.
+     * @returns {Promise<boolean>} true only if the night passed.
+     * @example
+     * await skills.skipNight(bot);
+     **/
+    if (!world.isSleepableNight(bot)) {
+        return failSkill(bot, 'not_night', `There is no night to skip: timeOfDay ${bot.time?.timeOfDay ?? 'unknown'} in ${bot.game?.dimension ?? 'an unknown dimension'}.`);
+    }
+    const context = getActionContext(bot);
+    let bed = null;
+    let placed = null;
+    let unreachable = null;
+    const found = bot.findBlocks({ matching: block => block.name.endsWith('_bed'), maxDistance: SKIP_NIGHT_BED_RADIUS, count: 1 });
+    if (found.length) {
+        if (await goToPosition(bot, found[0].x, found[0].y, found[0].z)) bed = bot.blockAt(found[0]);
+        else unreachable = found[0];
+    }
+    if (!bed) {
+        if (isActionCancelled(bot, context)) return failSkill(bot, 'cancelled', 'Going to bed was interrupted.');
+        const carried = bot.inventory.items().find(item => item.name.endsWith('_bed'));
+        if (!carried) {
+            return unreachable
+                ? failSkill(bot, 'route_failed', `Could not reach the bed at ${unreachable} and no bed is carried.`, { bedPosition: { x: unreachable.x, y: unreachable.y, z: unreachable.z } })
+                : failSkill(bot, 'target_not_found', `No bed within ${SKIP_NIGHT_BED_RADIUS} blocks and no bed in inventory.`);
+        }
+        const before = bedCount(bot, carried.name);
+        for (const site of bedSites(bot).slice(0, BED_SITE_ATTEMPTS)) {
+            const { x, y, z } = site.position;
+            if (await placeBlock(bot, carried.name, x, y, z, { facing: site.facing })) {
+                placed = { name: carried.name, position: { x, y, z }, before };
+                bed = bot.blockAt(site.position);
+                break;
+            }
+            if (isActionCancelled(bot, context)) return failSkill(bot, 'cancelled', 'Placing the bed was interrupted.');
+        }
+        if (!bed) return failSkill(bot, 'placement_failed', `Could not place ${carried.name} on open floor within ${BED_SITE_RADIUS} blocks.`);
+    }
+    const bedDetail = () => ({ bed: { name: bed.name, position: { x: bed.position.x, y: bed.position.y, z: bed.position.z },
+        placed: !!placed, recovered: placed ? placed.recovered ?? false : null } });
+    const recover = async () => {
+        if (!placed) return;
+        const { x, y, z } = placed.position;
+        if (await breakBlockAt(bot, x, y, z)) await pickupNearbyItems(bot);
+        placed.recovered = bedCount(bot, placed.name) >= placed.before;
+        log(bot, placed.recovered ? `Picked the ${placed.name} back up.` : `The ${placed.name} at ${x}, ${y}, ${z} was not recovered.`);
+    };
+    try {
+        await bot.sleep(bed);
+    } catch (error) {
+        await recover();
+        return failSkill(bot, 'sleep_rejected', `Could not sleep: ${error?.message ?? error}.`, bedDetail());
+    }
+    log(bot, `You are in bed.`);
+    const sleptAt = Date.now();
+    let cancelled = false;
+    while (bot.isSleeping) {
+        if (isActionCancelled(bot, context)) { cancelled = true; break; }
+        if (Date.now() - sleptAt >= waitMs) break;
         await new Promise(resolve => setTimeout(resolve, 500));
     }
-    log(bot, `You have woken up.`);
+    if (bot.isSleeping) await bot.wake().catch(() => {});
+    if (cancelled) return failSkill(bot, 'cancelled', 'Sleeping was interrupted; left the bed.', bedDetail());
+    // The skipped-time update can trail the wake packet.
+    for (let i = 0; i < 4 && world.isSleepableNight(bot); i++) await new Promise(resolve => setTimeout(resolve, 250));
+    const skipped = !world.isSleepableNight(bot);
+    await recover();
+    if (!skipped) {
+        return failSkill(bot, 'night_not_skipped', `Got up after ${Math.round((Date.now() - sleptAt) / 1000)}s in bed; the night did not pass, likely because other players are awake.`, bedDetail());
+    }
+    log(bot, `The night passed.`);
+    reportSkillOutcome({ ok: true, status: 'complete', reason: 'The night passed.', ...bedDetail() });
     return true;
 }
 
@@ -6528,7 +6605,7 @@ moveAwayFromEntity = trackSkill("skills.moveAwayFromEntity", moveAwayFromEntity)
 avoidEnemies = trackSkill("skills.avoidEnemies", avoidEnemies);
 stay = trackSkill("skills.stay", stay);
 useDoor = trackSkill("skills.useDoor", useDoor);
-goToBed = trackSkill("skills.goToBed", goToBed);
+skipNight = trackSkill("skills.skipNight", skipNight);
 tillAndSow = trackSkill("skills.tillAndSow", tillAndSow);
 activateNearestBlock = trackSkill("skills.activateNearestBlock", activateNearestBlock);
 showVillagerTrades = trackSkill("skills.showVillagerTrades", showVillagerTrades);

@@ -239,6 +239,8 @@ native操作結果の`operationsWithoutProgress`は確認済みの変更や移�
 
 全actionを中断する危険対応mode（`self_preservation`、`cowardice`、`self_defense`）の実行中に、Codexのコードやコマンドなどmode以外のactionが届いても、その反射行動は上書きされない。届いたactionは反射行動の終了を待ってから開始し、待機開始時に `action_waiting_for_reflex` を記録する。2026-10-28のplayでは、退避・反撃・瀕死退避の計152件が、Codexの次のコードに上書きされて途中で止まっていた。mode同士の優先順位、`stop()` による停止、operatorの新しい指示によるepochの更新は従来どおり反射行動より優先する。[action manager fixture](tests/action_manager.test.cjs) で確認する。
 
+overworldの夜（`timeOfDay` 12541〜23458）は1晩に1回だけ扱う。Codex taskが動いていればそのtaskへ日没を1回通知し、寝るか作業を続けるかはbotが判断する。通知した夜は、その後待機に戻っても自動では寝ない。待機中なら `sleeping` modeが作業に割り込まずに `skills.skipNight` を実行し、model turnは始めない。ベッドに入る前に失敗したら30秒後に再試行し、ベッドに入った時点でその夜は終わる。profileの `modes.sleeping: false` で通知と自動睡眠の両方を止める。`skipNight` は64ブロック以内の置かれたベッドを使い、なければ持っているベッドを6ブロック以内の空いた床に置いて、起きた後に回収する。60秒で夜が明けなければ起きて `night_not_skipped` を返す。[skip night fixture](tests/skip_night.test.cjs) で確認する。
+
 `collectBlock` は通常ブロックでも mineflayer-collectblock の `collect()` を使わず、移動（鉱石は `GoalNear` 2、その他は `GoalLookAtBlock`）、道具の装備、`bot.dig`、`pickupNearbyItems` を順に実行する。プラグインの `collect()` はドロップの消失を期限も取消もなく待つため、2026-10-28のplayでは土の採取が2回止まり、停止watchdogによるbot再起動に至った。
 
 auto-eatの設定（`foodPoints` 優先、空腹度14以下で開始、除外食料）はプラグインの既定値に上書きして足す。以前はoptionsをオブジェクトごと置き換えていたため `eatingTimeout` などが消え、食事が完了前に打ち切られていた。

@@ -32,7 +32,7 @@ const navigationPolicies = Object.freeze({
     'skills.giveToPlayer': PRESERVE_ROUTE, 'skills.receiveFromPlayer': PRESERVE_ROUTE, 'skills.goToNearestBlock': PRESERVE_ROUTE, 'skills.goToNearestEntity': PRESERVE_ROUTE, 'skills.exploreUntilBlock': PRESERVE_ROUTE,
     'skills.goToPlayer': PRESERVE_ROUTE, 'skills.followPlayer': PRESERVE_ROUTE,
     'skills.moveAway': COMBAT_ROUTE, 'skills.moveAwayFromEntity': COMBAT_ROUTE, 'skills.avoidEnemies': COMBAT_ROUTE,
-    'skills.goToBed': PRESERVE_ROUTE, 'skills.useDoor': PRESERVE_ROUTE, 'skills.tillAndSow': PRESERVE_ROUTE,
+    'skills.skipNight': PRESERVE_ROUTE, 'skills.useDoor': PRESERVE_ROUTE, 'skills.tillAndSow': PRESERVE_ROUTE,
     'skills.activateNearestBlock': PRESERVE_ROUTE, 'skills.showVillagerTrades': PRESERVE_ROUTE,
     'skills.tradeWithVillager': PRESERVE_ROUTE, 'skills.goToSurface': EDIT_ROUTE, 'skills.tendNearbyFarm': PRESERVE_ROUTE,
     'skills.fellTree': PRESERVE_ROUTE, 'skills.placeBlock': PRESERVE_ROUTE, 'skills.useToolOn': PRESERVE_ROUTE,
@@ -141,7 +141,7 @@ s('moveAwayFromEntity', { entity: field('entity'), distance: distance({ default:
 s('avoidEnemies', { distance: distance({ default: 16 }) }, 'Retreat from the group of nearby enemies with a confirmed approach route or ranged line of sight. Ignores terrain-separated enemies. Completes when none remain in range; path failure, 5 seconds without distance progress, the 30-second limit, or cancellation fail.', a => [a.distance]);
 s('stay', { seconds: field('staySeconds', { default: 30, description: '-1 means stay until interrupted.' }) }, 'Stay for seconds, disabling modes; -1 stays until interrupted.', a => [a.seconds]);
 s('useDoor', { position: optional(position()), open: optional(field('boolean')) }, 'Use a wooden door or fence gate at position, or the nearest when omitted. open:true opens and leaves it open; open:false closes it. Explicit state is server-confirmed without walking through. Omitting open keeps the legacy open, walk through, close behavior.', a => [a.position ?? null, has(a, 'open') ? { open: a.open } : {}]);
-s('goToBed', {}, 'Sleep in the nearest bed.', () => []);
+s('skipNight', {}, 'Sleep through the night. Uses the nearest placed bed within 64 blocks; when none is reachable, places a carried bed on open floor within 6 blocks and picks it back up afterwards. Gets up after 60 seconds in bed if the night has not passed (code:"night_not_skipped", usually because other players are awake). Success means the night passed; the result reports bed {name,position,placed,recovered}. Other failures: not_night (daytime or outside the overworld), target_not_found (no bed nearby or carried), route_failed, placement_failed, sleep_rejected (server/Mineflayer reason such as monsters nearby), cancelled.', () => []);
 s('tillAndSow', { position: position(), seedType: optional(text({ description: 'Seed item or supported crop name; omission only tills.' })) }, 'Till absolute ground position and optionally plant a crop. True requires confirmed requested planting.', a => [...coords(a), a.seedType ?? null]);
 s('activateNearestBlock', { blockType: text(), position: optional(position()) }, 'Activate the nearest matching block, or the exact block at position when supplied.', a => [a.blockType, a.position]);
 s('showVillagerTrades', { entityId: field('nonnegativeInteger') }, 'Read and return structured trades from the specified villager entity ID.', a => [a.entityId], { kind: 'query' });

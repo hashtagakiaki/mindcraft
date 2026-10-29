@@ -180,6 +180,7 @@ export function inspectBlockAt(bot, x, y, z) {
 export function getNearestBlocksWhere(bot, predicate) { return (bot.navigation.blocks || []).filter(predicate); }
 export function getNearestBlocks(bot, types) { return (bot.navigation.blocks || []).filter(block => types.includes(block.name)); }
 export function getNearestEntityWhere(bot, predicate) { return (bot.navigation.entities || []).find(predicate) || null; }
+export function isSleepableNight(bot) { return bot.time?.timeOfDay >= 12541 && bot.time?.timeOfDay <= 23458; }
 export function isEntityType(name) { return name === 'cow'; }
 export function shouldPlaceTorch() { return false; }
 export function getNearbyEntities(bot) { return bot.navigation.entities || []; }
@@ -326,18 +327,19 @@ async function testNavigation(root) {
     const receiver = makeHandoffBot('receiver', 'giver', 0, channels.receiver)
     assert.equal(await skills.receiveFromPlayer(receiver, 'oak_log', 'giver', 1, 50), false, 'receiver stops when the giving bot never starts')
   }
-  bot = makeBot()
+  const night = bot => Object.assign(bot, { time: { timeOfDay: 14000, day: 1 }, game: { ...bot.game, dimension: 'overworld' } })
+  bot = night(makeBot())
   bot.findBlocks = () => []
-  assert.equal(await skills.goToBed(bot), false)
-  bot = makeBot({ result: false })
+  assert.equal(await skills.skipNight(bot), false)
+  bot = night(makeBot({ result: false }))
   bot.slept = false
   bot.sleep = async () => { bot.slept = true }
-  assert.equal(await skills.goToBed(bot), false)
+  assert.equal(await skills.skipNight(bot), false)
   assert.equal(bot.slept, false, 'bed is not used after failed navigation')
-  bot = makeBot()
+  bot = night(makeBot())
   bot.sleep = async () => { bot.isSleeping = true; setTimeout(() => { bot.interrupt_code = true }, 10) }
   bot.wake = async () => { bot.woke = true; bot.isSleeping = false }
-  assert.equal(await skills.goToBed(bot), false, 'an interrupted sleep fails instead of waiting for morning')
+  assert.equal(await skills.skipNight(bot), false, 'an interrupted sleep fails instead of waiting for morning')
   assert.equal(bot.woke, true, 'the bot leaves the bed when its action is cancelled')
   assert.match(bot.output, /Sleeping was interrupted/)
 
@@ -844,6 +846,7 @@ async function main() {
     'surface_navigation.test.cjs',
     'climbable_navigation.test.cjs',
     'enemy_retreat.test.cjs',
+    'skip_night.test.cjs',
     'tree_felling.test.cjs',
     'block_interaction.test.cjs',
     'native_sdk.test.cjs',

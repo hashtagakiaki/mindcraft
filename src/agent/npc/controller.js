@@ -145,7 +145,7 @@ export class NPCContoller {
 
             // Go to bed
             await this.agent.actions.runAction('npc:bed', async () => {
-                await skills.goToBed(this.agent.bot);
+                await skills.skipNight(this.agent.bot);
             });
         }
 

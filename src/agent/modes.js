@@ -216,6 +216,25 @@ const modes_list = [
         }
     },
     {
+        name: 'sleeping',
+        description: 'Skip the night in a bed when idle, once per night. Busy bots get a nightfall notice instead.',
+        interrupts: [],
+        on: true,
+        active: false,
+        cooldown: 30, // seconds before retrying after failing to get into a bed
+        last_attempt: 0,
+        update: function (agent) {
+            const bot = agent.bot;
+            if (!world.isSleepableNight(bot) || bot.isSleeping || agent.nightHandledDay === bot.time.day) return;
+            if (Date.now() - this.last_attempt < this.cooldown * 1000) return;
+            this.last_attempt = Date.now();
+            execute(this, agent, async () => {
+                say(agent, 'Going to bed.');
+                await skills.skipNight(bot);
+            }, -1, modeDecision(this, bot, 'idle_at_night', { timeOfDay: bot.time.timeOfDay, day: bot.time.day }));
+        }
+    },
+    {
         name: 'hunting',
         description: 'Hunt nearby animals when idle.',
         interrupts: ['action:followPlayer'],
@@ -394,6 +413,17 @@ async function execute(mode, agent, func, timeout=-1, decision = {}) {
     return code_return;
 }
 
+const NIGHTFALL_NOTICE = 'Night has fallen in the overworld. If you want to sleep through it, call skills.skipNight; whether to stop or continue the current work is your call for this task. Tonight you will not go to bed automatically, even after returning to idle.';
+
+// One decision per night: a busy task gets a single notice, an idle bot sleeps
+// via the sleeping mode, and getting into a bed by any path settles the night.
+function notifyNightfall(agent) {
+    const bot = agent.bot;
+    if (!modes_map.sleeping.on || !agent.codexRuntime?.active) return;
+    if (!world.isSleepableNight(bot) || bot.isSleeping || !(bot.health > 0) || agent.nightHandledDay === bot.time.day) return;
+    if (agent.codexRuntime.acceptSystemEvent(NIGHTFALL_NOTICE).accepted) agent.nightHandledDay = bot.time.day;
+}
+
 let _agent = null;
 const modes_map = {};
 for (let mode of modes_list) {
@@ -462,6 +492,7 @@ class ModeController {
     }
 
     async update() {
+        notifyNightfall(_agent);
         if (_agent.isIdle()) {
             this.unPauseAll();
         }
@@ -501,6 +532,7 @@ export function initModes(agent) {
     _agent = agent;
     // the mode controller is added to the bot object so it is accessible from anywhere the bot is used
     agent.bot.modes = new ModeController();
+    agent.bot.on?.('sleep', () => { agent.nightHandledDay = agent.bot.time?.day; });
     agent.bot.on?.('blockUpdate', (_old, block) => {
         if (block?.position && agent.bot.entity.position.distanceTo(block.position) <= 28)
             terrainRevisions.set(agent.bot, (terrainRevisions.get(agent.bot) ?? 0) + 1);

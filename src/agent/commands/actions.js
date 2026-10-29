@@ -477,10 +477,10 @@ export const actionsList = [
         })
     },
     {
-        name: '!goToBed',
-        description: 'Go to the nearest bed and sleep.',
+        name: '!skipNight',
+        description: 'Sleep through the night in the nearest bed, or a carried bed placed nearby.',
         perform: runAsAction(async (agent) => {
-            await skills.goToBed(agent.bot);
+            await skills.skipNight(agent.bot);
         })
     },
     {

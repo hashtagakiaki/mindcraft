@@ -62,7 +62,7 @@ async function main() {
       assert.ok(!exposed.includes('skills.goToGoal'))
       assert.ok(!exposed.includes('skills.reachPositionWithScaffoldCleanup'))
       for (const internal of ['skills.craftRecipe', 'skills.inspectChestAt', 'skills.viewChest', 'skills.useToolOnBlockAt']) assert.ok(!exposed.includes(internal))
-    } else assert.deepEqual(exposed.sort(), exports.filter(name => !['world.shouldPlaceTorch', 'world.getNearbyThreats', 'world.isRangedThreat', 'world.getNearestBlock', 'world.getNearestBlocksWhere', 'world.isEntityType'].includes(name)).map(name => name === 'world.getBlockAtPosition' ? 'world.getBlockAtOffset' : name).sort())
+    } else assert.deepEqual(exposed.sort(), exports.filter(name => !['world.shouldPlaceTorch', 'world.getNearbyThreats', 'world.isRangedThreat', 'world.isSleepableNight', 'world.getNearestBlock', 'world.getNearestBlocksWhere', 'world.isEntityType'].includes(name)).map(name => name === 'world.getBlockAtPosition' ? 'world.getBlockAtOffset' : name).sort())
   }
 
   const invalid = (method, args, field) => {

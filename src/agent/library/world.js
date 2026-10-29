@@ -518,3 +518,14 @@ export function getBiomeName(bot) {
     const biomeId = bot.world.getBiome(bot.entity.position);
     return mc.getAllBiomes()[biomeId].name;
 }
+
+// Mineflayer's bed admission window outside thunderstorms; beds explode outside the overworld.
+// Internal helper for skipNight and the nightfall modes, not a model-facing query.
+export const SLEEP_START_TICK = 12541;
+export const SLEEP_END_TICK = 23458;
+
+export function isSleepableNight(bot) {
+    const time = bot.time?.timeOfDay;
+    const dimension = String(bot.game?.dimension ?? '').replace(/^minecraft:/, '');
+    return dimension === 'overworld' && Number.isFinite(time) && time >= SLEEP_START_TICK && time <= SLEEP_END_TICK;
+}

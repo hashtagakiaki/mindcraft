@@ -17,6 +17,7 @@
         "self_preservation": true,
         "cowardice": false,
         "self_defense": true,
+        "sleeping": true,
         "hunting": true,
         "item_collecting": true,
         "torch_placing": true,
