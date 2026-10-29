@@ -77,6 +77,7 @@
             flex: 0 0 auto;
         }
         .app-header h1 { margin: 0; font-size: 1.3em; color: #fff; }
+        .game-time { color: #ddd; font-size: 0.85em; white-space: nowrap; font-variant-numeric: tabular-nums; }
         .header-spacer { flex: 1; }
         .header-actions { display: flex; gap: 10px; }
         .view-tabs { display: none; }
@@ -408,6 +409,7 @@
     <header class="app-header">
         <h1>Mindcraft</h1>
         <span id="msStatus" class="status-badge offline">mindserver offline</span>
+        <span id="gameTime" class="game-time">Minecraft --:--</span>
         <button id="forgetManagementTokenBtn" class="token-btn" type="button" hidden>Forget saved token</button>
         <div class="header-spacer"></div>
         <nav class="view-tabs" aria-label="View">
@@ -516,6 +518,17 @@
         let currentAgents = [];
 
         const statusEl = document.getElementById('msStatus');
+        const gameTimeEl = document.getElementById('gameTime');
+        function updateGameTime(states) {
+            const state = Object.values(states || {}).find(st => st?._freshness?.status === 'fresh'
+                && Number.isFinite(st.gameplay?.timeOfDay));
+            if (!state) { gameTimeEl.textContent = 'Minecraft --:--'; return; }
+            const ticks = ((state.gameplay.timeOfDay % 24000) + 24000) % 24000;
+            const minutes = (Math.floor(ticks * 1440 / 24000) + 360) % 1440;
+            const hour = String(Math.floor(minutes / 60)).padStart(2, '0');
+            const minute = String(minutes % 60).padStart(2, '0');
+            gameTimeEl.textContent = `Minecraft ${hour}:${minute}`;
+        }
         const forgetManagementTokenBtn = document.getElementById('forgetManagementTokenBtn');
         updateForgetTokenButton();
         forgetManagementTokenBtn.addEventListener('click', () => {
@@ -606,6 +619,7 @@
         });
         socket.on('disconnect', () => {
             updateStatus(false);
+            updateGameTime(null);
         });
         socket.on('connect_error', (error) => {
             updateStatus(false);
@@ -742,6 +756,7 @@
         // Subscribe to aggregated state updates (re-sent on each connect)
         socket.on('state-update', (states) => {
             window.lastStates = states;
+            updateGameTime(states);
             Object.keys(states || {}).forEach(name => {
                 const st = states[name];
                 const freshnessEl = document.getElementById(`freshness-${name}`);

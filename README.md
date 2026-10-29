@@ -28,6 +28,8 @@ Run focused fixtures while iterating and the required suite once for final verif
 
 管理UIの状態APIと `!stats` は、HP・空腹度を丸めずに返す。統括役とbotが同じ実測値でしきい値を判定でき、HP 9.5 が管理側だけ10になることを防ぐ。
 
+管理UIのヘッダーは、接続中のbotから取得したMinecraft内の時刻を24時間表記で表示する。最新の状態を取得できないときは `--:--` と表示する。
+
 bot用AGENTSには行動方針・SDK文書の読み方・共通の実行境界を置く。個別メソッドの引数・動作・戻り値・固定経路方針は [`native_sdk.js`](src/agent/library/native_sdk.js) の遅延文書に集約し、使用前に必要な文書を読む。実行時にAGENTSへ追加するSDK一覧はメソッド名のみとする。
 
 The native SDK uses one explicit method registry for execution, argument validation, deferred documentation, completion metadata and code linting. Legacy SDK documentation retains its `places`/`vision` method map. The opt-in native Codex runtime uses deferred SDK documentation and direct image results; see [Opt-in Codex task session](#opt-in-codex-task-session). The selection and helper-model description below applies to legacy tasks. Relevant place methods are selected by task relevance; vision methods remain in the always-shown docs. Native `lookAtPosition` aims at the exact requested coordinates and returns structured aim, timestamp and image analysis; legacy `lookAtPosition(x, y, z)` retains its `y + 2` camera offset. `lookAtBlock` resolves a loaded block and aims at its center. Native `codex-session` skips embedding model construction and example/skill embedding initialization; legacy selection retains its embedding path and text-overlap fallback.
