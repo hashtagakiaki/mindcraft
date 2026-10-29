@@ -2724,8 +2724,15 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     let lastPathRecordAt = 0;
     const seenRouteSegments = new Set();
     let activeRouteNodes = [];
+    // The pathfinder shifts this array in place as nodes are reached.
+    let livePath = [];
+    // Early replan: once per stall episode, re-armed by real progress.
+    let segment = null;
+    let earlyReplanArmed = true;
+    let earlyReplans = 0;
     const positionKey = point => `${point.x},${point.y},${point.z}`;
     const onPathUpdate = result => {
+        livePath = Array.isArray(result?.path) ? result.path : [];
         lastPathUpdate = result && typeof result === 'object' ? {
             status: result.status ?? null,
             endpoint: Array.isArray(result.path) && result.path.length ? (() => {
@@ -2758,6 +2765,33 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         recordNavigationDiagnostic(bot, 'navigation_path_reset', { routeId: navigationRouteId,
             reason: reason ?? 'unknown', previousNodeCount: activeRouteNodes.length });
         activeRouteNodes = [];
+        livePath = [];
+    };
+    // A segment starts when the next node changes (or after work ends) and is
+    // predicted from the current state. Overrunning prediction plus grace
+    // replans the same goal once; it never fails navigation by itself.
+    const onPredictionTick = () => {
+        const next = livePath[0];
+        const key = next && [next.x, next.y, next.z].every(Number.isFinite) ? positionKey(next) : null;
+        const working = bot.pathfinder.isMining?.() || bot.pathfinder.isBuilding?.()
+            || (bot.miningSync?.activeDeadline() ?? -Infinity) >= Date.now();
+        if (segment && (segment.key !== key || working)) segment = null;
+        if (!key || working || next.toBreak?.length || next.toPlace?.length) return;
+        if (!segment) {
+            const expectedMs = bot.navigationPrediction.segmentMs(next);
+            segment = { key, startedAt: Date.now(), expectedMs,
+                graceMs: expectedMs == null ? null : Math.max(250, expectedMs * 0.5) };
+            return;
+        }
+        if (segment.expectedMs == null || !earlyReplanArmed || bot.pathfinder.goal !== goal) return;
+        const overdueMs = Date.now() - segment.startedAt - segment.expectedMs;
+        if (overdueMs <= segment.graceMs) return;
+        earlyReplanArmed = false;
+        earlyReplans++;
+        recordNavigationDiagnostic(bot, 'navigation_segment_late', { routeId: navigationRouteId, next: { x: next.x, y: next.y, z: next.z },
+            expectedMs: segment.expectedMs, graceMs: segment.graceMs, overdueMs,
+            position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z } });
+        bot.pathfinder.setGoal(goal);
     };
     const routeSegmentAdvanced = () => {
         const position = bot.entity.position;
@@ -2779,6 +2813,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         lastProgressAt = Date.now();
         bot.on?.('path_update', onPathUpdate);
         bot.on?.('path_reset', onPathReset);
+        if (bot.navigationPrediction) bot.on?.('physicsTick', onPredictionTick);
         const call = operationCallContext();
         const record = (type, detail) => {
             const event = { taskId: owner?.taskId ?? null, actionId: owner?.actionId ?? null,
@@ -2822,22 +2857,25 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             if (digProgressPending) {
                 digProgressPending = false;
                 lastProgressAt = Date.now();
+                earlyReplanArmed = true;
                 markOwnedWaitProgress(navigationWait);
             }
             if (currentGoalDistance <= bestGoalDistance - 0.5) {
                 bestGoalDistance = currentGoalDistance;
                 lastProgressAt = Date.now();
+                earlyReplanArmed = true;
                 // The action stall watchdog only sees owned-wait progress.
                 markOwnedWaitProgress(navigationWait);
             } else if (routeSegmentAdvanced()) {
                 lastProgressAt = Date.now();
+                earlyReplanArmed = true;
             } else if (!stallError && Date.now() - lastProgressAt >= navigationStallTimeoutMs) {
                 stallError = new Error(`Navigation made no goal or new route-segment progress for ${navigationStallTimeoutMs}ms.`);
                 stallError.name = 'NavigationStallTimeoutError';
                 stallError.navigation = {
                     code: 'no_progress', phase: 'movement', lastPathUpdate,
                     position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
-                    stallTimeoutMs: navigationStallTimeoutMs, visitedRouteSegments: seenRouteSegments.size,
+                    stallTimeoutMs: navigationStallTimeoutMs, visitedRouteSegments: seenRouteSegments.size, earlyReplans,
                     observedAt: new Date().toISOString(),
                 };
                 stopOwnedNavigation();
@@ -2899,7 +2937,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         }
         recordNavigationArrival(bot);
         recordNavigationDiagnostic(bot, 'navigation_route_arrived', { routeId: navigationRouteId,
-            elapsedMs: Date.now() - Date.parse(navigationStartedAt), visitedRouteSegments: seenRouteSegments.size,
+            elapsedMs: Date.now() - Date.parse(navigationStartedAt), visitedRouteSegments: seenRouteSegments.size, earlyReplans,
             finalPosition: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
             lastPathUpdate });
         return true;
@@ -2921,6 +2959,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         if (timeoutHandle) clearInterval(timeoutHandle);
         bot.removeListener?.('path_update', onPathUpdate);
         bot.removeListener?.('path_reset', onPathReset);
+        bot.removeListener?.('physicsTick', onPredictionTick);
         setActionPhase(cancellation, previousActionPhase);
         finishOwnedWait(navigationWait, {
             phase: 'navigation', reason: 'goal-or-new-route-segment',

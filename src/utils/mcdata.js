@@ -8,6 +8,7 @@ import { plugin as collectblock } from 'mineflayer-collectblock';
 import { plugin as autoEat } from 'mineflayer-auto-eat';
 import plugin from 'mineflayer-armor-manager';
 import { miningSyncPlugin } from '../agent/library/mining_sync.js';
+import { navigationPredictionPlugin } from '../agent/library/navigation_prediction.js';
 import { climbableNavigationPlugin } from '../agent/library/climbable_navigation.js';
 import { withNavigationScaffoldTickGate } from '../agent/library/navigation_policy.js';
 import { createMinecraftConnectionProtocolOptions } from './minecraft_protocol_overrides.js';
@@ -132,6 +133,7 @@ export function initBot(username) {
     bot.loadPlugin(autoEat);
     bot.loadPlugin(armorManager); // auto equip armor
     bot.loadPlugin(miningSyncPlugin);
+    bot.loadPlugin(navigationPredictionPlugin);
     bot.once('resourcePack', () => {
         bot.acceptResourcePack();
     });

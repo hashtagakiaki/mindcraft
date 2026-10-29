@@ -459,6 +459,53 @@ async function testNavigation(root) {
   await assert.rejects(skills.goToGoal(bot, { heuristic: () => 10 }), /made no goal or new route-segment progress/)
   assert.ok(Date.now() - hungStartedAt < 60, 'an expired dig deadline does not suspend the stall decision')
 
+  // Overrunning the predicted next-node time plus grace replans the same goal once;
+  // only real progress re-arms it, and the stall clock still decides failure.
+  const predictionRun = async ({ segmentMs, advanceAt = null, stallMs }) => {
+    Object.assign(runtimeSettings, { navigation_stall_timeout_ms: stallMs })
+    const predicted = makeBot()
+    const node = x => ({ x, y: 0, z: 0, toBreak: [], toPlace: [] })
+    let path
+    let rejectPredicted
+    const replans = []
+    predicted.navigationPrediction = { segmentMs }
+    predicted.pathfinder.goto = goal => {
+      predicted.pathfinder.goal = goal
+      path = [node(1), node(2)]
+      setImmediate(() => predicted.emit('path_update', { status: 'success', path }))
+      return new Promise((resolve, reject) => { rejectPredicted = reject })
+    }
+    predicted.pathfinder.setGoal = goal => {
+      if (goal === predicted.pathfinder.goal) { replans.push(Date.now()); return }
+      predicted.pathfinder.goal = goal
+      rejectPredicted(new Error('stopped by stall'))
+    }
+    const ticks = setInterval(() => predicted.emit('physicsTick'), 5)
+    const startedAt = Date.now()
+    const advance = advanceAt == null ? null : setTimeout(() => { predicted.entity.position.x = 1; path.shift() }, advanceAt)
+    try {
+      const error = await skills.goToGoal(predicted, { heuristic: () => 10 }).then(() => null, caught => caught)
+      return { error, replans: replans.map(at => at - startedAt) }
+    } finally {
+      clearInterval(ticks)
+      clearTimeout(advance)
+      Object.assign(runtimeSettings, { navigation_stall_timeout_ms: 20 })
+    }
+  }
+  {
+    const late = await predictionRun({ segmentMs: () => 10, stallMs: 700 })
+    assert.equal(late.replans.length, 1, 'an overrun segment replans the same goal once without progress')
+    assert.ok(late.replans[0] >= 250, 'the replan waits for prediction plus the 250ms minimum grace')
+    assert.equal(late.error?.navigation?.code, 'no_progress', 'the early replan does not decide failure; the stall clock does')
+    assert.equal(late.error.navigation.earlyReplans, 1)
+    const unpredicted = await predictionRun({ segmentMs: () => null, stallMs: 400 })
+    assert.equal(unpredicted.replans.length, 0, 'an unpredictable segment is not replanned early')
+    assert.equal(unpredicted.error?.navigation?.code, 'no_progress', 'an unpredictable segment is still ended by the stall clock')
+    const rearmed = await predictionRun({ segmentMs: () => 10, advanceAt: 350, stallMs: 1200 })
+    assert.equal(rearmed.replans.length, 2, 'reaching a new node re-arms one early replan for the next segment')
+    assert.ok(rearmed.replans[1] >= 600, 'the second replan belongs to the new segment')
+  }
+
   bot = makeBot()
   stopCalls = 0
   let rejectDetour

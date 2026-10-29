@@ -48,6 +48,7 @@ async function loadRuntime() {
     ['src/agent/library/crafting_sync.js', 'src/agent/library/crafting_sync.js'],
     ['src/agent/library/mining_sync.js', 'src/agent/library/mining_sync.js'],
     ['src/agent/library/climbable_navigation.js', 'src/agent/library/climbable_navigation.js'],
+    ['src/agent/library/navigation_prediction.js', 'src/agent/library/navigation_prediction.js'],
     ['src/agent/library/native_sdk.js', 'src/agent/library/native_sdk.js'],
     ['src/agent/action_manager.js', 'src/agent/action_manager.js'],
     ['src/agent/settings.js', 'src/agent/settings.js'],
