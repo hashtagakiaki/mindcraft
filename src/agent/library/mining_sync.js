@@ -132,7 +132,10 @@ function waitForGround (bot, timeoutMs, state) {
       if (settled) return
       settled = true
       cleanup()
-      if (state.cancelGroundWait === cancel) state.cancelGroundWait = null
+      if (state.cancelGroundWait === cancel) {
+        state.cancelGroundWait = null
+        state.groundWaitDeadline = null
+      }
       error ? reject(error) : resolve()
     }
     const cancel = () => finish(new Error('Digging aborted while waiting for ground contact'))
@@ -145,6 +148,7 @@ function waitForGround (bot, timeoutMs, state) {
     bot.on('death', onDeath)
     bot.on('end', onEnd)
     state.cancelGroundWait = cancel
+    state.groundWaitDeadline = Date.now() + timeoutMs
     timer = setTimeout(() => finish(new Error('Timed out waiting for ground contact')), timeoutMs)
     onPhysicsTick()
   })
@@ -345,6 +349,8 @@ function installDigContract (bot, state, options) {
       startedAt: null,
       expectedDigMs,
       deadline: null,
+      // Turning to the block and sending the start packet are bounded by the look timeout.
+      startDeadline: Date.now() + options.lookTimeoutMs + options.confirmationGraceMs,
       inferredAir: false,
       serverConfirmed: false,
       cancelled: false,
@@ -460,11 +466,21 @@ export function installMiningSync (bot, config = {}) {
   installDigContract(bot, state, options)
   installGotoContract(bot)
   installedBots.set(bot, state)
+  bot.miningSync = { activeDeadline: () => activeMiningDeadline(bot) }
   return state
 }
 
 export function miningSyncPlugin (bot) {
   installMiningSync(bot)
+}
+
+// The finite deadline of the dig phase in progress, including the ground and
+// look waits before the start packet. Movement monitors pause only until it.
+export function activeMiningDeadline (bot) {
+  const state = installedBots.get(bot)
+  if (!state) return null
+  if (state.activeDig) return state.activeDig.deadline ?? state.activeDig.startDeadline
+  return state.groundWaitDeadline ?? null
 }
 
 export function getMiningState (bot) {

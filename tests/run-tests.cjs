@@ -378,6 +378,18 @@ async function testNavigation(root) {
   assert.equal(stuck.ok, false)
   assert.equal(stuck.status, 'blocked', 'consecutive steps without movement end exploration')
   assert.equal(stuck.steps, 7, 'each of the seven headings is tried once')
+  // A stalled step returns at once with its cause instead of trying other headings.
+  bot.pathfinder.goto = () => { const error = new Error('stalled'); error.name = 'NavigationStallTimeoutError'; throw error }
+  const stalledStep = await skills.exploreUntilBlock(bot, { blockTypes: ['bell'] })
+  assert.deepEqual([stalledStep.status, stalledStep.code, stalledStep.steps], ['blocked', 'no_progress', 1])
+  assert.equal(stalledStep.navigation.code, 'no_progress')
+  // Unreachable directions turn to the next heading.
+  bot.pathfinder.goto = async () => { bot.emit('path_update', { status: 'noPath', path: [] }); throw new Error('No path') }
+  const unreachable = await skills.exploreUntilBlock(bot, { blockTypes: ['bell'] })
+  assert.deepEqual([unreachable.status, unreachable.code, unreachable.steps], ['blocked', 'route_not_found', 7])
+  // Other navigation errors are raised, not turned into a new heading.
+  bot.pathfinder.goto = async () => { throw new Error('unexpected runtime failure') }
+  await assert.rejects(skills.exploreUntilBlock(bot, { blockTypes: ['bell'] }), /unexpected runtime failure/)
   bot.pathfinder.goto = () => delay(5)
   const timedOut = await skills.exploreUntilBlock(bot, { blockTypes: ['bell'], timeoutMs: 1 })
   assert.equal(timedOut.status, 'not_found')
@@ -421,6 +433,31 @@ async function testNavigation(root) {
   assert.equal(stalledCall.waits[0].phase, 'navigation')
   assert.equal(stalledCall.waits[0].reason, 'goal-or-new-route-segment')
   assert.equal(stalledCall.waits[0].outcome, 'stalled')
+  assert.equal(stalledCall.result.code, 'no_progress', 'the stall cause reaches skillResults')
+  assert.equal(stalledCall.result.diagnostics.phase, 'movement')
+  assert.ok(Number.isFinite(stalledCall.result.diagnostics.position.x), 'the stall records the final position')
+
+  // A dig with a finite deadline pauses the stall clock; it restarts when the dig ends.
+  bot = makeBot()
+  stopCalls = 0
+  let rejectDig
+  let digDeadline = Date.now() + 60
+  bot.miningSync = { activeDeadline: () => digDeadline }
+  bot.pathfinder.goto = goal => { bot.pathfinder.goal = goal; return new Promise((resolve, reject) => { rejectDig = reject }) }
+  bot.pathfinder.setGoal = goal => { bot.pathfinder.goal = goal; stopCalls++; rejectDig(new Error('stalled after dig')) }
+  const digStartedAt = Date.now()
+  await assert.rejects(skills.goToGoal(bot, { heuristic: () => 10 }), error => error.name === 'NavigationStallTimeoutError' && error.navigation.code === 'no_progress')
+  assert.ok(Date.now() - digStartedAt >= 75, 'a slow normal dig is not cut by the movement stall clock')
+  assert.equal(stopCalls, 1)
+  // A dig whose deadline passed no longer holds the clock.
+  bot = makeBot()
+  stopCalls = 0
+  bot.miningSync = { activeDeadline: () => Date.now() - 1 }
+  bot.pathfinder.goto = goal => { bot.pathfinder.goal = goal; return new Promise((resolve, reject) => { rejectDig = reject }) }
+  bot.pathfinder.setGoal = goal => { bot.pathfinder.goal = goal; stopCalls++; rejectDig(new Error('stalled in hung dig')) }
+  const hungStartedAt = Date.now()
+  await assert.rejects(skills.goToGoal(bot, { heuristic: () => 10 }), /made no goal or new route-segment progress/)
+  assert.ok(Date.now() - hungStartedAt < 60, 'an expired dig deadline does not suspend the stall decision')
 
   bot = makeBot()
   stopCalls = 0

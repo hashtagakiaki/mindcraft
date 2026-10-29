@@ -23,7 +23,7 @@ function recordNavigationDiagnostic(bot, type, detail) {
 }
 
 // Observe the pathfinder's mutable path without changing its execution.
-function observeNavigation(bot, record, routeId) {
+function observeNavigation(bot, record, routeId, { onPlacementResolved = () => {} } = {}) {
     let path = [];
     let lastPlan = null;
     let lastSignature = null;
@@ -78,7 +78,7 @@ function observeNavigation(bot, record, routeId) {
         try { result = originalPlace.call(this, reference, face, ...args); }
         catch (error) { record('navigation_placement_result', { ...detail, status: 'error', error: String(error) }); throw error; }
         Promise.resolve(result).then(
-            () => record('navigation_placement_result', { ...detail, status: 'resolved' }),
+            () => { record('navigation_placement_result', { ...detail, status: 'resolved' }); onPlacementResolved(); },
             error => record('navigation_placement_result', { ...detail, status: 'error', error: String(error) }));
         return result;
     };
@@ -119,8 +119,8 @@ const FARM_CHEST_RADIUS = 32;
 const FARM_SEARCH_LIMIT = 10000;
 const FURNACE_POLL_INTERVAL_MS = 100;
 const FURNACE_IDLE_TIMEOUT_MS = 11000;
-const DEFAULT_NAVIGATION_STALL_TIMEOUT_MS = 90_000;
-const DEFAULT_NAVIGATION_CHECK_INTERVAL_MS = 5_000;
+const DEFAULT_NAVIGATION_STALL_TIMEOUT_MS = 8_000;
+const DEFAULT_NAVIGATION_CHECK_INTERVAL_MS = 250;
 const REACH_POSITION_MAX_DISTANCE = 512;
 const REACH_POSITION_MAX_SEGMENTS = 32;
 const REACH_POSITION_MAX_DURATION_MS = 180_000;
@@ -1293,7 +1293,9 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
     const finish = (legacyResult) => {
         const complete = collected >= num;
         reportSkillOutcome({ ok: complete, status: complete ? 'complete' : unconfirmed ? 'unknown' : collected ? 'partial' : 'failed',
-            ...(complete ? {} : { code: stop?.code ?? 'collection_unconfirmed', reason: stop?.reason ?? 'Some block collections were not confirmed.' }),
+            ...(complete ? {} : { code: stop?.code ?? 'collection_unconfirmed', reason: stop?.reason ?? 'Some block collections were not confirmed.',
+                ...(stop?.failedPhase ? { failedPhase: stop.failedPhase, target: stop.target, finalPosition: stop.finalPosition } : {}),
+                ...(stop?.navigation ? { navigation: stop.navigation } : {}) }),
             blockType, unit: 'block', requestedQuantity: num, confirmedQuantity: collected, remainingQuantity: Math.max(0, num - collected),
             ...(unconfirmed ? { unconfirmedQuantity: unconfirmed } : {}), collectedItems });
         return legacyResult;
@@ -1413,11 +1415,16 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                 log(bot, stop.reason);
                 break;
             }
-            else {
-                stop = { code: 'collect_error', reason: `Failed to collect ${blockType}: ${err}.` };
-                log(bot, stop.reason);
-                continue;
-            }
+            // Retrying would pick the same nearest block; return the observed cause
+            // with the confirmed quantity and let the caller choose the next step.
+            const cancelled = !!bot.interrupt_code || operationContext()?.signal?.aborted === true;
+            stop = { code: cancelled ? 'cancelled' : err.navigation?.code ?? 'collect_error',
+                reason: `Failed to collect ${blockType}: ${err}.`, failedPhase: err.navigation ? 'approach' : 'collect',
+                target: { name: block.name, position: { x: block.position.x, y: block.position.y, z: block.position.z } },
+                finalPosition: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
+                ...(err.navigation ? { navigation: err.navigation } : {}) };
+            log(bot, stop.reason);
+            break;
         }
         finally {
             if (collectionTracker) for (const [name, count] of Object.entries(collectionTracker.collectedItems)) collectedItems[name] = (collectedItems[name] ?? 0) + count;
@@ -2779,7 +2786,10 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             if (owner?.taskRecord) return owner.taskRecord(type, event);
             return bot._mindcraftDiagnosticRecord?.(type, event);
         };
-        navigationObserver = observeNavigation(bot, record, navigationRouteId);
+        // Bot event listeners run outside the owned async context; the interval
+        // below reports a completed dig or server-confirmed route placement as progress.
+        let digProgressPending = false;
+        navigationObserver = observeNavigation(bot, record, navigationRouteId, { onPlacementResolved: () => { digProgressPending = true; } });
         setActionPhase(cancellation, 'navigation');
         // Emergency reachPosition already owns and confirms its edits. A second
         // segment would reapply the normal policy and enqueue placement twice.
@@ -2792,9 +2802,6 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         // toward the goal; the stall check still ends routes without progress.
         let digCompletedSinceStart = false;
         let attemptStartedAt = Date.now();
-        // Bot event listeners run outside the owned async context; the interval
-        // below reports the completed dig as owned-wait progress.
-        let digProgressPending = false;
         const onDigCompleted = () => { digCompletedSinceStart = true; digProgressPending = true; };
         bot.on?.('diggingCompleted', onDigCompleted);
         removeDigListener = () => bot.removeListener?.('diggingCompleted', onDigCompleted);
@@ -2808,6 +2815,10 @@ export async function goToGoal(bot, goal, movementOverride=null) {
                 return;
             }
             const currentGoalDistance = goal.heuristic(navigationGoalPosition(bot));
+            // A dig owns its own finite ground/look/break deadlines; restart the
+            // stall clock when it ends instead of cutting a slow, normal break.
+            const miningDeadline = bot.miningSync?.activeDeadline();
+            if (miningDeadline != null && Date.now() <= miningDeadline) lastProgressAt = Date.now();
             if (digProgressPending) {
                 digProgressPending = false;
                 lastProgressAt = Date.now();
@@ -2823,6 +2834,12 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             } else if (!stallError && Date.now() - lastProgressAt >= navigationStallTimeoutMs) {
                 stallError = new Error(`Navigation made no goal or new route-segment progress for ${navigationStallTimeoutMs}ms.`);
                 stallError.name = 'NavigationStallTimeoutError';
+                stallError.navigation = {
+                    code: 'no_progress', phase: 'movement', lastPathUpdate,
+                    position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
+                    stallTimeoutMs: navigationStallTimeoutMs, visitedRouteSegments: seenRouteSegments.size,
+                    observedAt: new Date().toISOString(),
+                };
                 stopOwnedNavigation();
             }
         }, navigationCheckIntervalMs);
@@ -4323,6 +4340,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                 if (error.navigation) {
                     resultCode = error.navigation.code;
                     lastSearchDiagnostics = error.navigation;
+                    diagnosticPhase = error.navigation.phase ?? diagnosticPhase;
                 }
                 if (cancelled()) throw error;
                 if (unconfirmedScaffolds.length) {
@@ -4605,8 +4623,6 @@ export async function goToNearestEntity(bot, entityType, min_distance=2, range=6
 const EXPLORE_TURNS = [0, 1, -1, 2, -2, 3, -3].map(turn => turn * Math.PI / 4);
 // A step stops after this long without moving a block; the whole call returns blocked before the
 // host's 30s action stall stops it and discards the result.
-const EXPLORE_STEP_STALL_MS = 8000;
-const EXPLORE_NO_PROGRESS_MS = 25000;
 // Consecutive calls that start where the previous one ended keep its origin and heading.
 const exploreTrails = new WeakMap();
 
@@ -4635,7 +4651,7 @@ export async function exploreUntilBlock(bot, options = {}) {
      * @param {number} options.searchRadius - Observation radius checked before each step, default 64.
      * @param {number} options.stepDistance - Horizontal distance of each wander step, default 32.
      * @param {number} options.timeoutMs - Search time budget, default 300000.
-     * @returns {Promise<object>} found returns {ok:true,status:'found',block:{name,position},steps,travelled,elapsedMs}; otherwise ok:false with status not_found (timeout), blocked (no progress in any of seven directions, or 25s without moving) or cancelled. travelled is measured from the trail origin, which a call starting where the previous call ended keeps. It does not approach the found block.
+     * @returns {Promise<object>} found returns {ok:true,status:'found',block:{name,position},steps,travelled,elapsedMs}; otherwise ok:false with status not_found (timeout), blocked (no route progress in any of seven directions, or a step whose movement stalled) or cancelled. travelled is measured from the trail origin, which a call starting where the previous call ended keeps. It does not approach the found block.
      * @example
      * const result = await skills.exploreUntilBlock(bot, { blockTypes: ['bell', 'hay_block'] });
      **/
@@ -4654,7 +4670,6 @@ export async function exploreUntilBlock(bot, options = {}) {
     let steps = 0;
     let failures = 0;
     let lastFailure = null;
-    let progressAt = Date.now();
     const summary = () => ({ steps, travelled: Math.round(flat(position(), start)), elapsedMs: Date.now() - startedAt });
     const finish = result => {
         exploreTrails.set(bot, { origin: start, end: position().clone(), heading });
@@ -4667,8 +4682,6 @@ export async function exploreUntilBlock(bot, options = {}) {
         if (isActionCancelled(bot, context)) return finish({ ok: false, status: 'cancelled', code: 'cancelled', reason: 'Exploration cancelled.', ...summary() });
         if (Date.now() - startedAt >= timeoutMs) return finish({ ok: false, status: 'not_found', code: 'timeout',
             reason: `No ${blockTypes.join('/')} found within ${timeoutMs}ms of exploration.`, ...summary() });
-        if (Date.now() - progressAt >= EXPLORE_NO_PROGRESS_MS) return finish({ ok: false, status: 'blocked', code: lastFailure?.code ?? 'no_progress',
-            reason: `Exploration did not move for ${EXPLORE_NO_PROGRESS_MS}ms${lastFailure ? `: ${lastFailure.reason}` : '.'}`, ...summary() });
         // Head away from the start so the search keeps reaching new chunks; after a failed step try
         // the next offset from that outward direction instead of reversing the whole walk.
         const before = position().clone();
@@ -4682,20 +4695,20 @@ export async function exploreUntilBlock(bot, options = {}) {
         if (!target) return finish({ ok: false, status: 'blocked', code: lastFailure?.code ?? 'no_progress',
             reason: `Exploration found no way forward in ${EXPLORE_TURNS.length} directions${lastFailure ? `: ${lastFailure.reason}` : '.'}`, ...summary() });
         steps++;
-        let sample = before;
-        let sampleAt = Date.now();
-        const watchdog = setInterval(() => {
-            if (flat(position(), sample) >= 1) { sample = position().clone(); sampleAt = progressAt = Date.now(); }
-            else if (Date.now() - sampleAt >= EXPLORE_STEP_STALL_MS) bot.pathfinder.stop();
-        }, 1000);
         // An XZ-only goal lets the route follow caves downward, so aim at the column's surface instead.
+        // A stalled step returns at once; an unreachable direction tries the next heading.
+        // Cancellation, edit failures and other errors are not turned into a new heading.
         try {
             await goToGoal(bot, new pf.goals.GoalNear(target.x, target.y, target.z, 3));
         } catch (err) {
-            lastFailure = { code: err?.navigation?.code ?? 'route_failed', reason: String(err?.message ?? err) };
-        } finally { clearInterval(watchdog); }
+            const code = err?.navigation?.code;
+            if (isActionCancelled(bot, context)) return finish({ ok: false, status: 'cancelled', code: 'cancelled', reason: 'Exploration cancelled.', ...summary() });
+            if (code === 'no_progress') return finish({ ok: false, status: 'blocked', code, reason: String(err?.message ?? err),
+                navigation: err.navigation, ...summary() });
+            if (code !== 'route_not_found' && code !== 'search_limit') throw err;
+            lastFailure = { code, reason: String(err?.message ?? err) };
+        }
         const moved = flat(position(), before);
-        if (moved >= 1) progressAt = Date.now();
         if (moved >= stepDistance / 4) {
             heading = Math.atan2(position().z - before.z, position().x - before.x);
             failures = 0;

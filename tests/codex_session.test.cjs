@@ -186,6 +186,7 @@ async function main() {
     const falseConfigured = await agent.actions.runAction('generated-false-configured', () => agent.coder.executeCode('await skills.goToPlayer({playerName: "missing"});\nlog(bot, "must not run");'), { timeout: 0 })
     assert.equal(falseConfigured.success, false, 'configured generated SDK false stops the generated action')
     assert.match(falseConfigured.message, /skills\.goToPlayer returned false/)
+    assert.match(falseConfigured.message, /target_not_found/, 'the configured false error names the cause the skill reported')
     assert.doesNotMatch(falseConfigured.message, /must not run/)
     assert.equal(falseConfigured.skillResults.some(call => call.skill === 'skills.goToPlayer' && call.status === 'returned_false'), true)
     const caughtFalse = await agent.actions.runAction('generated-caught-false', () => agent.coder.executeCode(
@@ -706,6 +707,16 @@ for (let batch = 0; batch < 10; batch++) {
     }, { timeout: 0, stallTimeoutMs: 60 })
     assert.equal(noRouteProgress.reason, 'stall', 'an unresponsive navigation still stops at the existing native stall limit')
     assert.ok(Date.now() - noRouteProgressStartedAt < 500, 'unresponsive native navigation does not inherit the longer source-navigation timeout')
+    // A dig within its finite deadline is not stalled; the clock restarts when it ends.
+    let digDeadline = Date.now() + 250
+    agent.bot.miningSync = { activeDeadline: () => digDeadline }
+    const slowDig = await agent.actions.runAction('slow-dig', async () => {
+      await delay(250)
+      digDeadline = null
+      await delay(20)
+    }, { timeout: 0, stallTimeoutMs: 100 })
+    assert.equal(slowDig.success, true, 'a dig longer than the stall limit keeps its own deadline')
+    delete agent.bot.miningSync
     const stopped = deferred()
     agent.interrupt = () => stopped.resolve()
     const stall = await agent.actions.runAction('action:codex-code', async () => { agent.bot.output = 'x'.repeat(4232); await stopped.promise }, { timeout: 1, stallTimeoutMs: 60, outputLimit: 16000 })

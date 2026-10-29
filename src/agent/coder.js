@@ -5,7 +5,7 @@ import * as world from './library/world.js';
 import settings from './settings.js';
 import { Vec3 } from 'vec3';
 import {ESLint} from "eslint";
-import { trackSkill, operationContext, registerOwnedPromise, NATIVE_EXECUTION_WINDOW_MS } from './library/operation_context.js';
+import { trackSkill, operationContext, operationCallContext, registerOwnedPromise, NATIVE_EXECUTION_WINDOW_MS } from './library/operation_context.js';
 
 export class Coder {
     constructor(agent) {
@@ -315,8 +315,16 @@ function configureGeneratedCodeFalseMode(skillLibrary, configuredNames = []) {
     return Object.fromEntries(Object.entries(skillLibrary).map(([name, skill]) => {
         if (!selected.has(name) || typeof skill !== 'function') return [name, skill];
         return [name, new Proxy(skill, { apply(target, thisArg, args) {
+            const operation = operationContext();
+            const parent = operationCallContext();
             const checkResult = value => {
                 if (value === false) {
+                    // Name the cause the skill reported instead of generic guidance.
+                    const result = operation?.calls.findLast(call => call.skill === `skills.${name}` && call.parentCallId === parent?.id)?.result;
+                    if (result?.code) {
+                        const counts = result.requestedQuantity != null ? ` confirmed ${result.confirmedQuantity ?? 'unknown'}/${result.requestedQuantity}.` : '';
+                        throw new Error(`skills.${name} returned false: ${result.code}: ${result.reason ?? 'no reason reported'}${counts}`);
+                    }
                     throw new Error(`skills.${name} returned false: action failed. Check the action output and inventory, then gather or craft missing prerequisites before retrying.`);
                 }
                 return value;

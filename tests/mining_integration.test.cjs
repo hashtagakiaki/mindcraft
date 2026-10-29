@@ -362,6 +362,29 @@ async function main() {
     assert.deepEqual(cancelled.packets, [['use', true], ['release']])
   }
 
+  // An approach failure ends the collection with its navigation cause and the confirmed counts.
+  {
+    const { createOperationContext, operationResult, runOwnedOperation } = await import(pathToFileURL(path.join(root, 'src/agent/library/operation_context.js')))
+    const scenario = scenarioFor(ore(), async () => { throw new Error('unreachable target must not be dug') })
+    scenario.collectBlocks.push(ore())
+    const bot = createBot(scenario)
+    let approaches = 0
+    bot.pathfinder.goto = async () => {
+      approaches++
+      bot.emit('path_update', { status: 'noPath', path: [] })
+      throw new Error('No path to the goal!')
+    }
+    const owner = createOperationContext({ id: 'collect-approach', controller: new AbortController() }, { bot }, { intentEpoch: 0 })
+    assert.equal(await runOwnedOperation(owner, () => collectBlock(bot, 'iron_ore', 3)), false)
+    assert.equal(approaches, 1, 'a failed approach is not retried for the remaining count')
+    const result = operationResult(owner).skillResults.find(call => call.skill === 'skills.collectBlock').result
+    assert.equal(result.code, 'route_not_found')
+    assert.equal(result.failedPhase, 'approach')
+    assert.deepEqual(result.target.position, { x: 1, y: 0, z: 0 })
+    assert.equal(result.navigation.code, 'route_not_found')
+    assert.deepEqual([result.confirmedQuantity, result.remainingQuantity], [0, 3])
+  }
+
   console.log('mining integration tests passed')
 }
 

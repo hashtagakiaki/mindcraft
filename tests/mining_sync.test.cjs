@@ -300,15 +300,23 @@ async function main() {
   {
     const { bot, block } = fixture({ digMs: 15, groundTimeoutMs: 50 })
     bot.entity.onGround = false
+    const requestedAt = Date.now()
     const digging = bot.dig(block, 'ignore')
     await sleep(5)
     assert.equal(mining.getMiningState(bot), null)
+    // Each dig phase, including the ground wait, exposes its finite deadline to movement monitors.
+    const groundDeadline = bot.miningSync.activeDeadline()
+    assert.ok(groundDeadline >= requestedAt + 50 && groundDeadline <= Date.now() + 50)
     bot.entity.onGround = true
     bot.emit('physicsTick')
     await sleep(0)
     assert.equal(mining.getMiningState(bot).expectedDigMs, 15)
+    const digDeadline = bot.miningSync.activeDeadline()
+    assert.equal(digDeadline, mining.getMiningState(bot).deadline ?? digDeadline)
+    assert.ok(Number.isFinite(digDeadline))
     serverAir(bot, block)
     await digging
+    assert.equal(bot.miningSync.activeDeadline(), null, 'no deadline remains after the dig settles')
   }
   {
     const { bot, block } = fixture({ groundTimeoutMs: 10 })

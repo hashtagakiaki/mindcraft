@@ -335,6 +335,13 @@ export class ActionManager {
                 action.stallTimer = setInterval(() => {
                     if (this.currentAction !== action || action.reason) return;
                     const now = captureObservedProgress(this.agent.bot);
+                    // A dig owns its finite ground/look/break deadlines; count from when it ends.
+                    const miningDeadline = this.agent.bot?.miningSync?.activeDeadline();
+                    if (miningDeadline != null && Date.now() <= miningDeadline) {
+                        last = now;
+                        progressedAt = Date.now();
+                        return;
+                    }
                     if (action.phase === 'navigation') {
                         const wait = currentOwnedWait(action.operation);
                         if (!navigationPhaseActive) {
