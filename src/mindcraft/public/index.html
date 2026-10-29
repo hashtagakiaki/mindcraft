@@ -1,11 +1,14 @@
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
     <title>Mindcraft</title>
     <script src="/socket.io/socket.io.js"></script>
     <style>
         * { box-sizing: border-box; }
         html, body { height: 100%; }
+        html { -webkit-text-size-adjust: 100%; }
         body {
             font-family: Arial, sans-serif;
             margin: 0;
@@ -75,6 +78,8 @@
         }
         .app-header h1 { margin: 0; font-size: 1.3em; color: #fff; }
         .header-spacer { flex: 1; }
+        .header-actions { display: flex; gap: 10px; }
+        .view-tabs { display: none; }
         .token-btn {
             background: #505050;
             color: #fff;
@@ -267,10 +272,60 @@
         .agent-controls button { font-size: 0.8em; padding: 4px 8px; }
         .no-agents { color: #888; padding: 10px; }
 
+        /* Phones and narrow windows: one full-height view at a time, sized to the visible viewport
+           so the on-screen keyboard leaves the latest messages and the composer visible. */
         @media (max-width: 900px) {
-            body { overflow: auto; }
-            .app-main { grid-template-columns: 1fr; grid-template-rows: 70vh auto; }
-            .chat-pane { border-right: none; border-bottom: 1px solid #333; }
+            body { height: var(--app-height, 100dvh); font-size: 16px; }
+            .app-header {
+                flex-wrap: wrap;
+                gap: 6px 8px;
+                padding: 6px 10px;
+                padding-top: max(6px, env(safe-area-inset-top));
+            }
+            .app-header h1 { font-size: 1.1em; }
+            #msStatus { font-size: 0.7em; }
+            .view-tabs { display: flex; gap: 4px; order: 3; }
+            .view-tab {
+                background: #333;
+                color: #ccc;
+                border: none;
+                border-radius: 16px;
+                padding: 7px 14px;
+                position: relative;
+            }
+            .view-tab.active { background: #2196F3; color: #fff; }
+            .tab-badge {
+                display: inline-block;
+                min-width: 1.4em;
+                margin-left: 4px;
+                padding: 0 5px;
+                border-radius: 10px;
+                background: #f44336;
+                color: #fff;
+                font-size: 0.75em;
+            }
+            .tab-badge[hidden] { display: none; }
+            .header-actions { order: 4; flex-basis: 100%; flex-wrap: wrap; gap: 6px; }
+            .header-actions button { flex: 1 1 auto; padding: 8px; }
+            body:not(.view-bots) .header-actions { display: none; }
+            .app-main { grid-template-columns: 1fr; }
+            .chat-pane { border-right: none; }
+            body.view-bots .chat-pane, body:not(.view-bots) .status-pane { display: none; }
+            #bot-output-log { padding: 10px 10px; overscroll-behavior: contain; }
+            .bot-output-content { max-width: 90%; }
+            .composer { padding: 6px 8px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+            .composer-meta { margin-bottom: 4px; }
+            .composer-meta, #groupResult { font-size: 0.8em; }
+            #groupResult { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+            /* 16px or more keeps iOS Safari from zooming the page when the input is focused. */
+            #chatInput { font-size: 16px; min-height: 44px; max-height: 35vh; }
+            #chatSendBtn { height: 44px; padding: 0 14px; }
+            .status-pane { padding: 8px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+            .agent-grid { font-size: 0.85em; }
+            .agent-controls button { flex: 1 1 30%; font-size: 0.85em; padding: 9px 6px; }
+            .gear-btn { padding: 6px 10px; }
+            .modal { width: 100vw; height: var(--app-height, 100dvh); border-radius: 0; }
+            .setting-wrapper input[type="text"], .setting-wrapper input[type="number"] { font-size: 16px; }
         }
 
         /* Settings forms */
@@ -355,9 +410,15 @@
         <span id="msStatus" class="status-badge offline">mindserver offline</span>
         <button id="forgetManagementTokenBtn" class="token-btn" type="button" hidden>Forget saved token</button>
         <div class="header-spacer"></div>
-        <button id="openCreateAgentBtn" class="start-btn">New Agent</button>
-        <button class="stop-btn" onclick="disconnectAllAgents()">Disconnect All Agents</button>
-        <button class="stop-btn" onclick="confirmShutdown()">Full Shutdown</button>
+        <nav class="view-tabs" aria-label="View">
+            <button type="button" class="view-tab active" data-view="chat">Chat<span id="chatUnread" class="tab-badge" hidden></span></button>
+            <button type="button" class="view-tab" data-view="bots">Bots</button>
+        </nav>
+        <div class="header-actions">
+            <button id="openCreateAgentBtn" class="start-btn">New Agent</button>
+            <button class="stop-btn" onclick="disconnectAllAgents()">Disconnect All Agents</button>
+            <button class="stop-btn" onclick="confirmShutdown()">Full Shutdown</button>
+        </div>
     </header>
 
     <main class="app-main">
@@ -372,7 +433,7 @@
                     <span id="groupResult" role="status"></span>
                 </div>
                 <div class="composer-row">
-                    <textarea id="chatInput" rows="1" placeholder="Message the selected bots (Enter to send, Shift+Enter for a new line)"></textarea>
+                    <textarea id="chatInput" rows="1" enterkeyhint="send" placeholder="Message the selected bots (Enter to send, Shift+Enter for a new line)"></textarea>
                     <button id="chatSendBtn" class="start-btn" disabled>Send</button>
                 </div>
             </div>
@@ -477,7 +538,8 @@
             author.className = 'chat-author';
             author.textContent = operator ? `You → ${record.recipients.join(', ')}` : record.agentName;
             if (!operator) author.style.color = botColor(record.agentName);
-            meta.append(author, ` · ${new Date(record.at).toLocaleString()}`);
+            const at = new Date(record.at);
+            meta.append(author, ` · ${at.toDateString() === new Date().toDateString() ? at.toLocaleTimeString() : at.toLocaleString()}`);
             const content = document.createElement('div');
             content.className = 'bot-output-content';
             content.textContent = record.message;
@@ -509,6 +571,7 @@
                 botOutputEntries.firstElementChild?.remove();
             }
             if (stick) chatLog.scrollTop = chatLog.scrollHeight;
+            if (record.kind !== 'operator') noteUnreadChat();
         }
         renderBotOutputLog();
         function updateStatus(connected) {
@@ -1084,6 +1147,7 @@
             const hasTarget = selectedBots.size > 0 || text.trimStart().startsWith('@');
             chatSendBtn.disabled = !socket.connected || !hasTarget || !text.trim();
             chatSendBtn.textContent = selectedBots.size > 1 ? `Send to ${selectedBots.size} bots` : 'Send';
+            if (chatInput.style) resizeChatInput();
         }
         function sendChat() {
             const m = chatInput.value;
@@ -1178,8 +1242,71 @@
             if (!recipientMenu.hidden && !recipientMenu.contains(event.target) && !recipientSummary.contains(event.target)) closeRecipientMenu();
         });
         document.addEventListener('keydown', event => { if (event.key === 'Escape') closeRecipientMenu(); });
-        window.addEventListener('resize', closeRecipientMenu);
+        // Height-only resizes come from the on-screen keyboard and must not close the menu.
+        let menuLayoutWidth = window.innerWidth;
+        window.addEventListener('resize', () => {
+            if (window.innerWidth !== menuLayoutWidth) closeRecipientMenu();
+            menuLayoutWidth = window.innerWidth;
+        });
         window.addEventListener('blur', closeRecipientMenu);
+
+        // Phone layout: Chat / Bots tabs, visible-viewport sizing and an auto-growing composer.
+        const narrowLayout = window.matchMedia('(max-width: 900px)');
+        const chatUnread = document.getElementById('chatUnread');
+        let unreadChat = 0;
+        function isChatViewVisible() {
+            return !narrowLayout.matches || !document.body.classList.contains('view-bots');
+        }
+        function noteUnreadChat() {
+            if (isChatViewVisible()) return;
+            unreadChat += 1;
+            chatUnread.textContent = String(unreadChat);
+            chatUnread.hidden = false;
+        }
+        function showView(view) {
+            document.body.classList.toggle('view-bots', view === 'bots');
+            for (const tab of document.querySelectorAll('.view-tab')) tab.classList.toggle('active', tab.dataset.view === view);
+            closeRecipientMenu();
+            if (view === 'chat') {
+                unreadChat = 0;
+                chatUnread.hidden = true;
+                chatLog.scrollTop = chatLog.scrollHeight;
+            }
+        }
+        for (const tab of document.querySelectorAll('.view-tab')) tab.addEventListener('click', () => showView(tab.dataset.view));
+
+        function resizeChatInput() {
+            chatInput.style.height = 'auto';
+            chatInput.style.height = `${chatInput.scrollHeight + 2}px`;
+        }
+        // Keep the keyboard open when tapping Send so several messages can be typed in a row.
+        chatSendBtn.addEventListener('pointerdown', event => {
+            if (event.pointerType !== 'mouse' && document.activeElement === chatInput) event.preventDefault();
+        });
+
+        // Size the app to the visible viewport. iOS Safari does not shrink the layout for the
+        // keyboard and instead scrolls the page, which pushed the chat out of view.
+        let lastAppHeight = 0;
+        function fitToVisualViewport() {
+            const viewport = window.visualViewport;
+            const height = Math.round(viewport ? viewport.height : window.innerHeight);
+            if (height === lastAppHeight) return;
+            const stick = isChatAtBottom();
+            lastAppHeight = height;
+            document.documentElement.style.setProperty('--app-height', `${height}px`);
+            if (narrowLayout.matches) window.scrollTo(0, 0);
+            if (stick) chatLog.scrollTop = chatLog.scrollHeight;
+        }
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', fitToVisualViewport);
+            window.visualViewport.addEventListener('scroll', () => { if (narrowLayout.matches && window.scrollY) window.scrollTo(0, 0); });
+        }
+        window.addEventListener('resize', fitToVisualViewport);
+        chatInput.addEventListener('focus', () => {
+            const stick = isChatAtBottom();
+            setTimeout(() => { fitToVisualViewport(); if (stick) chatLog.scrollTop = chatLog.scrollHeight; }, 300);
+        });
+        fitToVisualViewport();
 
         function toggleDetails(name) {
             const invSection = document.getElementById(`inventorySection-${name}`);
