@@ -147,12 +147,29 @@ async function main() {
       const [{ position, properties }] = bot.state.placed
       assert.notDeepEqual([position.x, position.y, position.z], [0, 65, 0], 'the bed is not placed in the bot cell')
       assert.notDeepEqual([position.x, position.y, position.z], [1, 65, 0], 'occupied cells are skipped')
+      assert.notDeepEqual([position.x, position.y, position.z], [-1, 65, 0], 'plant-free floor is preferred over short grass')
       assert.equal(position.y, 65, 'the bed rests on the floor')
       assert.equal(bot.state.sleptIn, 'gray_bed')
       assert.deepEqual(result.bed, { name: 'gray_bed', position: { x: position.x, y: position.y, z: position.z }, placed: true, recovered: true })
       assert.equal(bot.state.beds, 1, 'the carried bed is picked back up')
       assert.equal(properties.facing && ['north', 'south', 'east', 'west'].includes(properties.facing), true)
       assert.equal(bot.state.wakes, 0, 'the server woke the bot at morning')
+    }
+
+    // On grassland the plants in the chosen cells are cut before the bed is placed.
+    {
+      const grass = []
+      for (let x = -3; x <= 3; x++) for (let z = -3; z <= 3; z++) if (x || z) grass.push(['short_grass', x, 65, z])
+      const bot = makeBot({ blocks: grass })
+      bot.state.morningAfterMs = 10
+      const result = await native(bot)
+      assert.equal(result.ok, true, JSON.stringify(result))
+      const [{ position, properties }] = bot.state.placed
+      const head = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] }[properties.facing]
+      const cleared = bot.state.commands.filter(command => / air$/.test(command))
+      assert.ok(cleared.includes(`/setblock ${position.x} 65 ${position.z} air`) && cleared.includes(`/setblock ${position.x + head[0]} 65 ${position.z + head[1]} air`),
+        'both bed cells are cleared of grass first')
+      assert.equal(bot.state.beds, 1)
     }
 
     // An existing bed is preferred over the carried bed; bedrock is not a bed.

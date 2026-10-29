@@ -5016,6 +5016,7 @@ const SKIP_NIGHT_BED_RADIUS = 64;
 const SKIP_NIGHT_WAIT_MS = 60000;
 const BED_SITE_RADIUS = 6;
 const BED_SITE_ATTEMPTS = 3;
+const BED_PICKUP_WAIT_MS = 3000;
 // Cells a bed may replace; matches the plants block_placement accepts as empty.
 const BED_SITE_OPEN = new Set(['air', 'cave_air', 'short_grass', 'tall_grass', 'fern', 'dead_bush', 'snow']);
 const BED_FACINGS = { north: [0, -1], south: [0, 1], east: [1, 0], west: [-1, 0] };
@@ -5035,11 +5036,17 @@ function bedSites(bot) {
         if (!open(foot) || !floor(foot.offset(0, -1, 0)) || !clear(foot.offset(0, 1, 0))) continue;
         for (const [facing, [fx, fz]] of Object.entries(BED_FACINGS)) {
             const head = foot.offset(fx, 0, fz);
-            if (open(head) && floor(head.offset(0, -1, 0)) && clear(head.offset(0, 1, 0)))
-                sites.push({ position: foot, facing, distance: Math.hypot(dx, dy, dz) });
+            if (open(head) && floor(head.offset(0, -1, 0)) && clear(head.offset(0, 1, 0))) {
+                const plants = [foot, head].filter(cell => bot.blockAt(cell).name !== 'air' && bot.blockAt(cell).name !== 'cave_air');
+                sites.push({ position: foot, facing, plants, distance: Math.hypot(dx, dy, dz) });
+            }
         }
     }
-    return sites.sort((a, b) => a.distance - b.distance);
+    // Plant-free floor first: the server refused beds clicked into short grass in isolated play.
+    sites.sort((a, b) => (a.plants.length > 0) - (b.plants.length > 0) || a.distance - b.distance);
+    // Each retry uses a different foot cell; a failed cell rarely works with another facing.
+    const seen = new Set();
+    return sites.filter(site => !seen.has(site.position.toString()) && seen.add(site.position.toString()));
 }
 
 function bedCount(bot, name) {
@@ -5077,6 +5084,7 @@ export async function skipNight(bot, { waitMs = SKIP_NIGHT_WAIT_MS } = {}) {
         const before = bedCount(bot, carried.name);
         for (const site of bedSites(bot).slice(0, BED_SITE_ATTEMPTS)) {
             const { x, y, z } = site.position;
+            for (const plant of site.plants) await breakBlockAt(bot, plant.x, plant.y, plant.z);
             if (await placeBlock(bot, carried.name, x, y, z, { facing: site.facing })) {
                 placed = { name: carried.name, position: { x, y, z }, before };
                 bed = bot.blockAt(site.position);
@@ -5091,7 +5099,14 @@ export async function skipNight(bot, { waitMs = SKIP_NIGHT_WAIT_MS } = {}) {
     const recover = async () => {
         if (!placed) return;
         const { x, y, z } = placed.position;
-        if (await breakBlockAt(bot, x, y, z)) await pickupNearbyItems(bot);
+        if (await breakBlockAt(bot, x, y, z)) {
+            // The dropped bed spawns as an item entity a moment after the break is confirmed.
+            const deadline = Date.now() + BED_PICKUP_WAIT_MS;
+            while (bedCount(bot, placed.name) < placed.before && Date.now() < deadline) {
+                if (bot.nearestEntity(entity => entity.name === 'item' && bot.entity.position.distanceTo(entity.position) < 8)) await pickupNearbyItems(bot);
+                else await new Promise(resolve => setTimeout(resolve, 100));
+            }
+        }
         placed.recovered = bedCount(bot, placed.name) >= placed.before;
         log(bot, placed.recovered ? `Picked the ${placed.name} back up.` : `The ${placed.name} at ${x}, ${y}, ${z} was not recovered.`);
     };
