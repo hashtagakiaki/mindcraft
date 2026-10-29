@@ -5125,13 +5125,14 @@ export async function skipNight(bot, { waitMs = SKIP_NIGHT_WAIT_MS } = {}) {
         await new Promise(resolve => setTimeout(resolve, 500));
     }
     if (bot.isSleeping) await bot.wake().catch(() => {});
+    const inBedSeconds = Math.round((Date.now() - sleptAt) / 1000);
     if (cancelled) return failSkill(bot, 'cancelled', 'Sleeping was interrupted; left the bed.', bedDetail());
     // The skipped-time update can trail the wake packet.
     for (let i = 0; i < 4 && world.isSleepableNight(bot); i++) await new Promise(resolve => setTimeout(resolve, 250));
     const skipped = !world.isSleepableNight(bot);
     await recover();
     if (!skipped) {
-        return failSkill(bot, 'night_not_skipped', `Got up after ${Math.round((Date.now() - sleptAt) / 1000)}s in bed; the night did not pass, likely because other players are awake.`, bedDetail());
+        return failSkill(bot, 'night_not_skipped', `Got up after ${inBedSeconds}s in bed; the night did not pass, likely because other players are awake.`, bedDetail());
     }
     log(bot, `The night passed.`);
     reportSkillOutcome({ ok: true, status: 'complete', reason: 'The night passed.', ...bedDetail() });
