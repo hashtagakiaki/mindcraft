@@ -35,7 +35,8 @@ export class CodexSession {
         const instructions = await readFile(instructionsPath, 'utf8');
         await writeFile(path.join(this.cwd, 'AGENTS.md'), instructions + (this.catalog ? '\n' + this.catalog + '\n' : ''));
         if (signal?.aborted) throw new Error('Session cancelled');
-        const args = ['app-server', '--strict-config', '--listen', 'stdio://', '--disable', 'shell_tool', '-c', 'web_search="disabled"',
+        const args = ['app-server', '--strict-config', '--listen', 'stdio://', '--disable', 'shell_tool', '-c', 'web_search="live"',
+            '-c', 'tools.web_search.allowed_domains=["minecraft.wiki","ja.minecraft.wiki"]',
             '-c', `model_auto_compact_token_limit=${AUTO_COMPACT_TOKEN_LIMIT}`,
             '-c', 'features.code_mode.direct_only_tool_namespaces=["functions"]',
             '-c', 'features.apps=false', '-c', 'features.plugins=false', '-c', 'features.multi_agent=false',
@@ -191,7 +192,10 @@ export class CodexSession {
             await this.toolWork;
         } else if (message.id !== undefined) {
             this.send({ id: message.id, error: { code: -32601, message: 'Only Minecraft execution/documentation calls are supported' } });
-        } else if (message.method === 'item/started' && ['commandExecution', 'fileChange', 'mcpToolCall', 'webSearch'].includes(message.params.item.type)) {
+        } else if (['item/started', 'item/completed'].includes(message.method) && message.params.item.type === 'webSearch') {
+            const { id, query, action } = message.params.item;
+            this.record('web_search', { id, phase: message.method === 'item/started' ? 'started' : 'completed', query, action });
+        } else if (message.method === 'item/started' && ['commandExecution', 'fileChange', 'mcpToolCall'].includes(message.params.item.type)) {
             throw new Error('Unexpected non-Minecraft tool');
         } else if (message.method === 'item/completed' && message.params.item.type === 'agentMessage') {
             const { text, phase } = message.params.item;
