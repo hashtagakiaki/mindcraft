@@ -9,8 +9,7 @@ import { plugin as autoEat } from 'mineflayer-auto-eat';
 import plugin from 'mineflayer-armor-manager';
 import { miningSyncPlugin } from '../agent/library/mining_sync.js';
 import { navigationPredictionPlugin } from '../agent/library/navigation_prediction.js';
-import { climbableNavigationPlugin } from '../agent/library/climbable_navigation.js';
-import { withNavigationScaffoldTickGate } from '../agent/library/navigation_policy.js';
+import { navigationEditGatePlugin } from '../agent/library/navigation_policy.js';
 import { createMinecraftConnectionProtocolOptions } from './minecraft_protocol_overrides.js';
 import { capturePartialReadErrors } from './partial_read_capture.js';
 const armorManager = plugin;
@@ -125,9 +124,8 @@ export function initBot(username) {
         return originalEmit(event, ...args);
     };
 
-    bot.loadPlugin((pluginBot, pluginOptions) =>
-        withNavigationScaffoldTickGate(pluginBot, () => pathfinder(pluginBot, pluginOptions)));
-    bot.loadPlugin(climbableNavigationPlugin);
+    bot.loadPlugin(pathfinder);
+    bot.loadPlugin(navigationEditGatePlugin);
     bot.loadPlugin(pvp);
     bot.loadPlugin(collectblock);
     bot.loadPlugin(autoEat);

@@ -9,6 +9,8 @@ const Lock = require('./lib/lock')
 const Vec3 = require('vec3').Vec3
 
 const Physics = require('./lib/physics')
+const { trimPassedNodes } = require('./lib/trim')
+const { holdClimbableDrift } = require('./lib/climbable')
 const nbt = require('prismarine-nbt')
 const interactableBlocks = require('./lib/interactable.json')
 
@@ -42,6 +44,10 @@ function inject (bot) {
   bot.pathfinder.searchRadius = -1 // in blocks, limits of the search area, -1: don't limit the search
   bot.pathfinder.enablePathShortcut = false // disabled by default as it can cause bugs in specific configurations
   bot.pathfinder.LOSWhenPlacingBlocks = true
+  // autonomy fork: while this returns true the movement loop skips the tick
+  // (no replanning, input or edits); Minecraft physics keeps running. Callers
+  // use it to hold the pathfinder until an owned route edit is confirmed.
+  bot.pathfinder.tickPaused = () => false
 
   bot.pathfinder.bestHarvestTool = (block) => {
     const availableTools = bot.inventory.items()
@@ -220,33 +226,7 @@ function inject (bot) {
   }
 
   function pathFromPlayer (path) {
-    if (path.length === 0) return
-    let minI = 0
-    let minDistance = 1000
-    for (let i = 0; i < path.length; i++) {
-      const node = path[i]
-      if (node.toBreak.length !== 0 || node.toPlace.length !== 0) break
-      const dist = bot.entity.position.distanceSquared(node)
-      if (dist < minDistance) {
-        minDistance = dist
-        minI = i
-      }
-    }
-    // check if we are between 2 nodes
-    const n1 = path[minI]
-    // check if node already reached
-    const dx = n1.x - bot.entity.position.x
-    const dy = n1.y - bot.entity.position.y
-    const dz = n1.z - bot.entity.position.z
-    const reached = Math.abs(dx) <= 0.35 && Math.abs(dz) <= 0.35 && Math.abs(dy) < 1
-    if (minI + 1 < path.length && n1.toBreak.length === 0 && n1.toPlace.length === 0) {
-      const n2 = path[minI + 1]
-      const d2 = bot.entity.position.distanceSquared(n2)
-      const d12 = n1.distanceSquared(n2)
-      minI += d12 > d2 || reached ? 1 : 0
-    }
-
-    path.splice(0, minI)
+    trimPassedNodes(path, bot.entity.position)
   }
 
   function isPositionNearPath (pos, path) {
@@ -432,6 +412,7 @@ function inject (bot) {
   })
 
   function monitorMovement () {
+    if (bot.pathfinder.tickPaused()) return
     // Test freemotion
     if (stateMovements && stateMovements.allowFreeMotion && stateGoal && stateGoal.entity) {
       const target = stateGoal.entity
@@ -503,10 +484,13 @@ function inject (bot) {
         const tool = bot.pathfinder.bestHarvestTool(block)
         fullStop()
 
+        // autonomy fork: edit failures emit path_edit_error (goto rejects with it)
+        // instead of being swallowed.
         const digBlock = () => {
           bot.dig(block, true)
-            .catch(_ignoreError => {
+            .catch(err => {
               resetPath('dig_error')
+              bot.emit('path_edit_error', err)
             })
             .then(function () {
               lastNodeTime = performance.now()
@@ -517,9 +501,11 @@ function inject (bot) {
         if (!tool) {
           digBlock()
         } else {
-          bot.equip(tool, 'hand')
-            .catch(_ignoreError => {})
-            .then(() => digBlock())
+          bot.equip(tool, 'hand').then(() => digBlock(), err => {
+            digging = false
+            resetPath('equip_error')
+            bot.emit('path_edit_error', err)
+          })
         }
       }
       return
@@ -579,8 +565,9 @@ function inject (bot) {
                 bot.setControlState('jump', false)
                 if (bot.pathfinder.LOSWhenPlacingBlocks && placingBlock.returnPos) returningPos = placingBlock.returnPos.clone()
               })
-              .catch(_ignoreError => {
+              .catch(err => {
                 resetPath('place_error')
+                bot.emit('path_edit_error', err)
               })
               .then(() => {
                 lockPlaceBlock.release()
@@ -588,7 +575,11 @@ function inject (bot) {
                 lastNodeTime = performance.now()
               })
           })
-          .catch(_ignoreError => {})
+          .catch(err => {
+            // Upstream kept the equip lock and placing=true forever here.
+            resetPath('equip_error')
+            bot.emit('path_edit_error', err)
+          })
       }
       return
     }
@@ -650,6 +641,7 @@ function inject (bot) {
       bot.setControlState('forward', false)
       bot.setControlState('sprint', false)
     }
+    holdClimbableDrift(bot, nextPoint, stateMovements.climbables)
 
     // check for futility
     if (performance.now() - lastNodeTime > 3500) {
@@ -662,5 +654,7 @@ function inject (bot) {
 module.exports = {
   pathfinder: inject,
   Movements: require('./lib/movements'),
-  goals: require('./lib/goals')
+  goals: require('./lib/goals'),
+  // autonomy fork: public for next-node arrival prediction.
+  Physics
 }

@@ -1,8 +1,6 @@
 'use strict'
 const assert = require('node:assert/strict')
-const { EventEmitter } = require('node:events')
 const path = require('node:path')
-const { pathToFileURL } = require('node:url')
 const { createRequire } = require('node:module')
 const { moduleRoot, pathfinderFork } = require('./dependency_root.cjs')
 const req = createRequire(path.join(moduleRoot(), 'package.json'))
@@ -12,7 +10,6 @@ const { Vec3 } = req('vec3')
 const { Movements, goals } = pathfinderFork()
 const AStar = pathfinderFork('./lib/astar')
 const Move = pathfinderFork('./lib/move')
-const repo = path.resolve(__dirname, '..')
 
 // Floor at y=63 from x=0..4, z=-1..1; a vine column fills x=1..3 at z=0.
 function vineCorridorBot() {
@@ -43,64 +40,45 @@ function routeThrough(movements) {
 }
 
 async function main() {
-  const { penalizeHorizontalClimbableMoves, climbableNavigationPlugin, CLIMB_DRIFT_TOLERANCE } =
-    await import(pathToFileURL(path.join(repo, 'src/agent/library/climbable_navigation.js')))
+  const { holdClimbableDrift, CLIMB_DRIFT_TOLERANCE } = pathfinderFork('./lib/climbable')
 
-  // B: a same-height walk through vines is avoided when a side row is free.
+  // B: the fork's A* avoids a same-height walk through vines when a side row is free,
+  // for its own Movements and for Movements instances other plugins pass in.
   const bot = vineCorridorBot()
-  const plain = new Movements(bot)
-  plain.allowParkour = false
-  assert.ok(routeThrough(plain).includes('2,0'), 'baseline walks the vine row')
-  const penalized = penalizeHorizontalClimbableMoves(Object.assign(new Movements(bot), { allowParkour: false }))
-  assert.equal(penalizeHorizontalClimbableMoves(penalized), penalized)
-  const avoided = routeThrough(penalized)
+  const movements = Object.assign(new Movements(bot), { allowParkour: false })
+  const avoided = routeThrough(movements)
   assert.ok(!avoided.some(node => ['1,0', '2,0', '3,0'].includes(node)), `route still enters vines: ${avoided}`)
+  const vineRow = Object.assign(new Movements(bot), { allowParkour: false })
+  vineRow.getNeighbors = function (node) { return Movements.prototype.getNeighbors.call(this, node).filter(move => move.z === 0) }
+  assert.ok(routeThrough(vineRow).includes('2,0'), 'a route that must use the vine row still exists')
 
-  // A: controls set by pathfinder are overridden after it while in a climbable block.
-  const fake = new EventEmitter()
+  // A: after the tick's controls are chosen, drifting up in a climbable stops the push.
   const vine = registry.blocksByName.vine.id
   let feetType = vine
   const controls = {}
-  const calls = []
-  fake.entity = { position: new Vec3(2.5, 64, 0.5) }
-  fake.blockAt = () => ({ type: feetType })
-  fake.setControlState = (name, value) => { controls[name] = value }
-  fake.pathfinder = {
-    movements: { climbables: new Set([vine]) },
-    isMoving: () => true,
-    getPathFromTo (movements, ...args) { calls.push([movements, args]); return 'generator' }
-  }
-  climbableNavigationPlugin(fake)
-  const searchMovements = { getNeighbors: () => [] }
-  assert.equal(fake.pathfinder.getPathFromTo(searchMovements, 'start', 'goal'), 'generator')
-  assert.equal(calls[0][0], searchMovements)
-  assert.deepEqual(calls[0][1], ['start', 'goal'])
-  assert.notEqual(searchMovements.getNeighbors.toString(), '() => []', 'search movements are penalized')
-
+  const fake = { entity: { position: new Vec3(2.5, 64, 0.5) }, blockAt: () => ({ type: feetType }),
+    setControlState: (name, value) => { controls[name] = value } }
+  const climbables = new Set([vine])
   const press = () => Object.assign(controls, { forward: true, jump: true, sprint: true })
-  const route = [Object.assign(new Vec3(3, 64, 0), { toBreak: [], toPlace: [] })]
-  fake.emit('path_update', { path: route })
+  const node = y => Object.assign(new Vec3(3, y, 0), { toBreak: [], toPlace: [] })
 
-  press(); fake.emit('physicsTick')
+  press(); holdClimbableDrift(fake, node(64), climbables)
   assert.deepEqual(controls, { forward: true, jump: false, sprint: true }, 'same level: only jump is released')
 
   fake.entity.position = new Vec3(2.5, 64 + CLIMB_DRIFT_TOLERANCE + 0.1, 0.5)
-  press(); fake.emit('physicsTick')
+  press(); holdClimbableDrift(fake, node(64), climbables)
   assert.deepEqual(controls, { forward: false, jump: false, sprint: false }, 'drifted up: stop pushing')
 
-  route[0] = Object.assign(new Vec3(3, 66, 0), { toBreak: [], toPlace: [] })
-  press(); fake.emit('physicsTick')
+  press(); holdClimbableDrift(fake, node(66), climbables)
   assert.deepEqual(controls, { forward: true, jump: true, sprint: true }, 'planned climb is untouched')
 
-  route[0] = Object.assign(new Vec3(3, 64, 0), { toBreak: [], toPlace: [] })
   feetType = registry.blocksByName.air.id
-  press(); fake.emit('physicsTick')
+  press(); holdClimbableDrift(fake, node(64), climbables)
   assert.deepEqual(controls, { forward: true, jump: true, sprint: true }, 'outside climbables is untouched')
 
   feetType = vine
-  fake.emit('path_reset')
-  press(); fake.emit('physicsTick')
-  assert.deepEqual(controls, { forward: true, jump: true, sprint: true }, 'reset path is forgotten')
+  press(); holdClimbableDrift(fake, Object.assign(node(64), { toPlace: [{}] }), climbables)
+  assert.deepEqual(controls, { forward: true, jump: true, sprint: true }, 'an edit node is untouched')
 }
 
 main().then(() => console.log('climbable_navigation ok')).catch(error => { console.error(error); process.exit(1) })

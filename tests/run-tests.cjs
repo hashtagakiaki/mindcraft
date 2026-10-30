@@ -962,6 +962,7 @@ async function main() {
     'run_tests_output.test.cjs',
     'surface_navigation.test.cjs',
     'climbable_navigation.test.cjs',
+    'pathfinder_fork.test.cjs',
     'enemy_retreat.test.cjs',
     'skip_night.test.cjs',
     'tree_felling.test.cjs',

@@ -7,6 +7,7 @@
 | Native session, thread and context | `src/process/codex_session.js`, `src/agent/codex_runtime.js` | `tests/codex_session.test.cjs` | `tests/run-tests.cjs` |
 | Public native SDK contract | `src/agent/library/native_sdk.js` | `tests/native_sdk.test.cjs` | `tests/run-tests.cjs` |
 | Mining, movement and placement | `src/agent/library/` | Matching existing fixture, such as `tests/block_interaction.test.cjs` or `tests/block_placement.test.cjs` | `tests/run-tests.cjs` |
+| Pathfinder fork | `src/vendor/mineflayer-pathfinder/` | `tests/pathfinder_fork.test.cjs`, `tests/climbable_navigation.test.cjs`, `tests/reach_position.test.cjs` | `tests/run-tests.cjs` |
 
 From the `mindcraft/` repository root, set the existing Node 20 binary once in the current shell, then copy the relevant fixture command:
 
@@ -185,7 +186,14 @@ Stage-four navigation evidence is in [the D03 report](docs/navigation-progress-s
 
 経路の足場設置は支持面へ視線を合わせてから、プレイヤーが設置先の上端を超えたことを確認して送信する。旋回待ちで送信時のクリアランス確認が古くなることを防ぐ。Navigation中の装備・採掘・設置が失敗した場合は、その移動が所有するgoalを解除し、元のエラーで終了する。pathfinderが装備失敗を内部で握りつぶす場合も、ジャンプ入力や設置中状態を保持したまま停滞させない。
 
-つた・はしごの中で壁に当たるかジャンプ入力があると、バニラの物理では上昇する。pathfinderは同じ高さの移動でこれを想定せず、1ブロック未満の高さずれを到着とみなして前進を続けるため、意図せず登り続けることがあった。[`climbable_navigation.js`](src/agent/library/climbable_navigation.js) は全探索で同じ高さのまま登れるブロックへ入る移動にコスト2を加え、実行中は登れるブロック内で次ノードが上にない場合にジャンプ入力を、0.5ブロックを超えて上にずれた場合は前進・ダッシュ入力も解除して元の高さへ戻す。予定された登りは変えない。[fixture](tests/climbable_navigation.test.cjs) は実際のpathfinder探索での迂回と入力解除を確認する。
+pathfinderは `src/vendor/mineflayer-pathfinder/` のfork（mineflayer-pathfinder 2.4.5、MIT）を使う。共有のread-only `node_modules` は変更せず、sourceは相対pathでforkを読み込む。collectblock・pvp・toolは先に読み込んだforkの `bot.pathfinder` を使う（goalsとMovementsは各自の依存のものをそのまま渡す）。upstreamからの変更は次のとおりで、以前sourceが外側から補っていた処理もforkへ移した。
+
+- 足場設置・掘削を伴うノードは座標がブロック中央に補正されないため、その手前の移動ノードを「通過済み」と誤判定して捨て、隣の列から足場を積んでは掘るループになっていた（2026-10-30の手動play）。編集ノードの手前の移動は実際に到着したときだけ捨てる（`lib/trim.js`）。
+- つた・はしご: 全探索で同じ高さのまま登れるブロックへ入る移動にコスト2を加え（A*で適用するので他pluginのMovementsにも効く）、実行中は登れるブロック内で次ノードが上にない場合にジャンプ入力を、0.5ブロックを超えて上にずれた場合は前進・ダッシュ入力も解除する。予定された登りは変えない（`lib/climbable.js`、旧 `climbable_navigation.js`）。
+- `goto` は観測した結果だけで終わる。noPath・timeout・goalを満たさない空経路・botの切断/死亡で失敗して自分のgoalを解除し、別goalのgoal_reachedや空のpartial経路では終わらない（`lib/goto.js`、旧mining_syncの契約）。
+- 経路上の装備・採掘・設置の失敗を握りつぶさず `path_edit_error` を出し、`goto` は元のエラーで失敗する。装備失敗で装備ロックと設置中状態が残り続ける問題も解消した（旧 `navigateWithEditErrors`）。
+- `bot.pathfinder.tickPaused()` がtrueの間は移動ループを止める。navigation policyは所有する経路編集のサーバー確認待ちの間これを使う（旧 `bot.on` の差し替え）。
+- 次ノード到達予測用に `Physics` を公開する。
 
 MindServer state polling is single-flight with a per-bot 750ms acknowledgement deadline and explicit fresh/stale/unknown state labels. Late state from a replaced connection or removed listener is discarded. Vision camera capture waits for a ready world view, permits one capture at a time, enforces a 2 MiB JPEG limit, and reports bounded shutdown drain status. See [the D13 lifecycle report](docs/state-polling-camera-lifecycle-stage4-20261005.md); offline fixtures do not measure live rendering performance.
 

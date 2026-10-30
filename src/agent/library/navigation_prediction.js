@@ -2,12 +2,10 @@
 // the pathfinder's own Physics.simulateUntil (prismarine-physics) from the
 // current state. Navigation only uses the prediction to request one early
 // replan of the same goal; it never decides a navigation failure.
-//
-// lib/physics is not part of mineflayer-pathfinder's public exports; the
-// dependency is pinned (2.4.5) and read-only.
-import Physics from '../../vendor/mineflayer-pathfinder/lib/physics.js'
+import pf from '../../vendor/mineflayer-pathfinder/index.js'
 import prismarinePhysics from 'prismarine-physics'
 
+const { Physics } = pf
 const { PlayerState } = prismarinePhysics
 
 export const PREDICTION_HORIZON_TICKS = 80

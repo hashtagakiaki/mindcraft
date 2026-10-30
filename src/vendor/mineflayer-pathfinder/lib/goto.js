@@ -1,66 +1,85 @@
+// autonomy fork: goto settles only on observed outcomes.
+//
+// Upstream resolved on any goal_reached or empty path_update (including an
+// empty partial path and a stale reached event for another goal), ignored the
+// bot ending, and left the goal set after a failure. This contract rejects
+// noPath/timeout and a completed empty path that does not satisfy the goal,
+// rejects with the original error when a route dig, placement or equip fails,
+// resolves only when this goal is reached and satisfied at the bot's feet,
+// clears its own goal on failure, and settles on the next tick so callers can
+// chain goals.
+
 function error (name, message) {
   const err = new Error(message)
   err.name = name
   return err
 }
 
-/**
-   * Adds a easy-to-use API wrapper for quickly executing a goal and running
-   * a callback when that goal is reached. This function serves to remove a
-   * lot of boilerplate code for quickly executing a goal.
-   *
-   * @param {Bot} bot - The bot.
-   * @param {Goal} goal - The goal to execute.
-   * @returns {Promise} - resolves on success, rejects on error
-   */
+function goalSatisfied (goal, bot) {
+  if (!goal || typeof goal.isEnd !== 'function' || !bot.entity?.position) return false
+  const position = bot.entity.position
+  const floored = typeof position.floored === 'function' ? position.floored() : position
+  try {
+    return goal.isEnd(floored) || goal.isEnd(floored.offset?.(0, 1, 0) ?? floored)
+  } catch {
+    return false
+  }
+}
+
 function goto (bot, goal) {
+  const pathfinder = bot.pathfinder
   return new Promise((resolve, reject) => {
-    function goalReached () {
+    let settled = false
+    const cleanup = () => {
+      bot.removeListener('goal_reached', onGoalReached)
+      bot.removeListener('path_update', onPathUpdate)
+      bot.removeListener('goal_updated', onGoalUpdated)
+      bot.removeListener('path_stop', onPathStop)
+      bot.removeListener('path_edit_error', onEditError)
+      bot.removeListener('end', onLifecycleEnd)
+      bot.removeListener('death', onLifecycleEnd)
+    }
+    const finish = (err, stopCurrentGoal = false) => {
+      if (settled) return
+      settled = true
       cleanup()
+      if (stopCurrentGoal && pathfinder.goal === goal) pathfinder.setGoal(null)
+      setTimeout(() => err ? reject(err) : resolve(), 0)
     }
-
-    function noPathListener (results) {
-      if (results.path.length === 0) {
-        cleanup()
-      } else if (results.status === 'noPath') {
-        cleanup(error('NoPath', 'No path to the goal!'))
-      } else if (results.status === 'timeout') {
-        cleanup(error('Timeout', 'Took to long to decide path to goal!'))
+    const onGoalReached = reachedGoal => {
+      if (reachedGoal === goal && goalSatisfied(goal, bot)) finish(null)
+    }
+    const onPathUpdate = result => {
+      if (pathfinder.goal !== goal) return
+      if (result?.status === 'noPath') {
+        finish(error('NoPath', 'No path to the goal'), true)
+      } else if (result?.status === 'timeout') {
+        finish(error('Timeout', 'Path search timed out'), true)
+      } else if (result?.status === 'success' && result.path?.length === 0 && !goalSatisfied(goal, bot)) {
+        finish(error('NoPath', 'Path completed without reaching the goal'), true)
       }
     }
+    const onGoalUpdated = nextGoal => {
+      if (nextGoal !== goal) finish(error('GoalChanged', 'Goal changed before completion'))
+    }
+    const onEditError = err => finish(err, true)
+    const onPathStop = () => finish(error('PathStopped', 'Path stopped before reaching the goal'))
+    const onLifecycleEnd = () => finish(error('BotStopped', 'Bot stopped before reaching the goal'), true)
 
-    function goalChangedListener (newGoal) {
-      if (newGoal !== goal) {
-        cleanup(error('GoalChanged', 'The goal was changed before it could be completed!'))
-      }
+    if (goalSatisfied(goal, bot)) {
+      if (pathfinder.goal) pathfinder.setGoal(null)
+      setTimeout(resolve, 0)
+      return
     }
 
-    function pathStopped () {
-      cleanup(error('PathStopped', 'Path was stopped before it could be completed! Thus, the desired goal was not reached.'))
-    }
-
-    function cleanup (err) {
-      bot.removeListener('goal_reached', goalReached)
-      bot.removeListener('path_update', noPathListener)
-      bot.removeListener('goal_updated', goalChangedListener)
-      bot.removeListener('path_stop', pathStopped)
-
-      // Run callback on next event stack to let pathfinder properly cleanup,
-      // otherwise chaining waypoints does not work properly.
-      setTimeout(() => {
-        if (err) {
-          reject(err)
-        } else {
-          resolve()
-        }
-      }, 0)
-    }
-
-    bot.on('path_stop', pathStopped)
-    bot.on('goal_reached', goalReached)
-    bot.on('path_update', noPathListener)
-    bot.on('goal_updated', goalChangedListener)
-    bot.pathfinder.setGoal(goal)
+    bot.on('goal_reached', onGoalReached)
+    bot.on('path_update', onPathUpdate)
+    bot.on('goal_updated', onGoalUpdated)
+    bot.on('path_stop', onPathStop)
+    bot.on('path_edit_error', onEditError)
+    bot.on('end', onLifecycleEnd)
+    bot.on('death', onLifecycleEnd)
+    pathfinder.setGoal(goal)
   })
 }
 

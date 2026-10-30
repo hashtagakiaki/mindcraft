@@ -386,61 +386,6 @@ async function main() {
     serverAir(bot, freshBlock)
     await digging
   }
-  // goto rejects failure statuses, ignores empty partial paths and stale reached events, and resolves next tick.
-  {
-    const { bot } = fixture()
-    const goal = { reached: false, isEnd() { return this.reached } }
-    const moving = bot.pathfinder.goto(goal)
-    bot.emit('path_update', { status: 'partial', path: [] })
-    bot.emit('goal_reached', { isEnd: () => true })
-    let settled = false
-    moving.then(() => { settled = true }, () => {})
-    await sleep(0)
-    assert.equal(settled, false)
-    bot.emit('path_update', { status: 'noPath', path: [] })
-    await rejects(moving, { name: 'NoPath' })
-    for (const event of ['goal_reached', 'path_update', 'goal_updated', 'path_stop']) assert.equal(bot.listenerCount(event), 0)
-  }
-  for (const status of ['noPath', 'timeout']) {
-    const { bot } = fixture()
-    const goal = { isEnd: () => false }
-    const moving = bot.pathfinder.goto(goal)
-    bot.emit('path_update', { status, path: [{ x: 1 }] })
-    await rejects(moving, { name: status === 'timeout' ? 'Timeout' : 'NoPath' })
-  }
-  {
-    const { bot } = fixture()
-    const goal = { reached: false, isEnd() { return this.reached } }
-    const moving = bot.pathfinder.goto(goal)
-    goal.reached = true
-    bot.emit('goal_reached', goal)
-    await moving
-    assert.equal(bot.listenerCount('goal_reached'), 0)
-  }
-  {
-    const { bot } = fixture()
-    const goal = { isEnd: () => true }
-    bot.pathfinder.setGoal({ isEnd: () => false })
-    await bot.pathfinder.goto(goal)
-    assert.equal(bot.pathfinder.goal, null)
-  }
-  {
-    const { bot } = fixture()
-    const goal = { isEnd: () => false }
-    const moving = bot.pathfinder.goto(goal)
-    bot.emit('goal_reached', goal)
-    bot.emit('path_stop')
-    await rejects(moving, { name: 'PathStopped' })
-  }
-  for (const event of ['death', 'end']) {
-    const { bot } = fixture()
-    const goal = { isEnd: () => false }
-    const moving = bot.pathfinder.goto(goal)
-    bot.emit(event)
-    await rejects(moving, { name: 'BotStopped' })
-    assert.equal(bot.pathfinder.goal, null)
-    assert.equal(bot.listenerCount('goal_reached'), 0)
-  }
   // The real plugin loader and collectblock plugin defer mineflayer-tool; the mining plugin's
   // late pass must run after that dependency has installed its real Tool instance.
   {

@@ -314,7 +314,7 @@ async function main() {
     const { registerNavigationCleanup } = await import(pathToFileURL(path.join(root, 'src/agent/library/navigation_policy.js')))
     const { runWithNavigationPolicy } = await import(pathToFileURL(path.join(root, 'src/agent/library/navigation_policy.js')))
     const { placeAndConfirmNavigationScaffold } = await import(pathToFileURL(path.join(root, 'src/agent/library/navigation_policy.js')))
-    const { beginNavigationEdit, navigationScaffoldPlacementPending, withNavigationScaffoldTickGate } = await import(pathToFileURL(path.join(root, 'src/agent/library/navigation_policy.js')))
+    const { beginNavigationEdit, navigationScaffoldPlacementPending, navigationEditGatePlugin } = await import(pathToFileURL(path.join(root, 'src/agent/library/navigation_policy.js')))
     const wall = []
     for (let z = -4; z <= 4; z++) for (const y of [64, 65]) wall.push({ x: 3, y, z, name: 'dirt' })
 
@@ -1153,16 +1153,15 @@ async function main() {
       assert.equal(unknownOutcomes[1].status, 'rejected')
       assert.equal(afterUnknownRawStarts, 0, 'an unconfirmed placement invalidates already-queued scaffold attempts')
 
+      // The real fork plugin skips its movement loop while the gate reports a pending edit.
       const gatedPathfinderBot = makeBot()
       gatedPathfinderBot.entity.position = new Vec3(2.5, 64, 0.5)
       let pathfinderPhysicsTicks = 0
       let worldPhysicsTicks = 0
-      const injectPlugin = plugin => setTimeout(() => plugin(gatedPathfinderBot, {}), 0)
-      injectPlugin((pluginBot, pluginOptions) => withNavigationScaffoldTickGate(pluginBot, () => {
-        assert.deepEqual(pluginOptions, {})
-        pluginBot.on('physicsTick', () => pathfinderPhysicsTicks++)
-      }))
-      await delay(5)
+      pathfinder.pathfinder(gatedPathfinderBot)
+      navigationEditGatePlugin(gatedPathfinderBot)
+      gatedPathfinderBot.pathfinder.getPathTo = () => { pathfinderPhysicsTicks++; return { status: 'noPath', path: [] } }
+      gatedPathfinderBot.pathfinder.setGoal(new pathfinder.goals.GoalBlock(9, 64, 0))
       gatedPathfinderBot.on('physicsTick', () => worldPhysicsTicks++)
       const gateSupport = gatedPathfinderBot.blockAt(new Vec3(0, 63, 0))
       const gateTarget = gateSupport.position.offset(0, 1, 0)
@@ -1180,21 +1179,15 @@ async function main() {
       gatedPathfinderBot.emit('physicsTick')
       assert.equal(pathfinderPhysicsTicks, 1, 'pathfinder resumes after authoritative placement settlement')
       assert.equal(worldPhysicsTicks, 2)
+      gatedPathfinderBot.pathfinder.setGoal(null)
 
       const pendingRouteEditBot = makeBot()
-      let pendingRoutePathfinderTicks = 0
-      let pendingRouteWorldTicks = 0
-      withNavigationScaffoldTickGate(pendingRouteEditBot, () => {
-        pendingRouteEditBot.on('physicsTick', () => pendingRoutePathfinderTicks++)
-      })
-      pendingRouteEditBot.on('physicsTick', () => pendingRouteWorldTicks++)
+      pendingRouteEditBot.pathfinder = {}
+      navigationEditGatePlugin(pendingRouteEditBot)
       const releaseRouteEdit = beginNavigationEdit(pendingRouteEditBot)
-      pendingRouteEditBot.emit('physicsTick')
-      assert.equal(pendingRoutePathfinderTicks, 0, 'pathfinder route planning pauses while an owned route edit is unsettled')
-      assert.equal(pendingRouteWorldTicks, 1, 'route edit gating leaves Minecraft physics listeners active')
+      assert.equal(pendingRouteEditBot.pathfinder.tickPaused(), true, 'pathfinder route planning pauses while an owned route edit is unsettled')
       releaseRouteEdit()
-      pendingRouteEditBot.emit('physicsTick')
-      assert.equal(pendingRoutePathfinderTicks, 1, 'pathfinder resumes after the owned route edit settles')
+      assert.equal(pendingRouteEditBot.pathfinder.tickPaused(), false, 'pathfinder resumes after the owned route edit settles')
 
       // Use the real plugin: its equip rejection handler otherwise keeps the
       // equip lock and placing=true forever, without rejecting goto.
@@ -1206,7 +1199,8 @@ async function main() {
       const equipFailure = new Error('Navigation stopped after an unconfirmed scaffold placement.')
       let rejectedEquipCalls = 0
       const rejectedEquip = failedEquipBot.equip = async () => { rejectedEquipCalls++; throw equipFailure }
-      withNavigationScaffoldTickGate(failedEquipBot, () => pathfinder.pathfinder(failedEquipBot))
+      pathfinder.pathfinder(failedEquipBot)
+      navigationEditGatePlugin(failedEquipBot)
       failedEquipBot.pathfinder.getPathTo = () => ({ status: 'success', path: [{
         x: 0, y: 66, z: 0, toBreak: [],
         toPlace: [{ x: 0, y: 63, z: 0, dx: 0, dy: 1, dz: 0, jump: true }],
@@ -1223,24 +1217,22 @@ async function main() {
       assert.equal(failedEquipBot.equip, rejectedEquip, 'navigation restores the original edit methods')
 
       const routeDigGateBot = makeBot()
-      let routeDigGateTicks = 0
-      withNavigationScaffoldTickGate(routeDigGateBot, () => routeDigGateBot.on('physicsTick', () => routeDigGateTicks++))
+      routeDigGateBot.pathfinder = {}
+      navigationEditGatePlugin(routeDigGateBot)
       let settleRouteDig
       routeDigGateBot.dig = () => new Promise(resolve => { settleRouteDig = resolve })
       const routeDigPolicy = runWithNavigationPolicy(routeDigGateBot,
         { allowDig: true, scaffold: 'forbid', scaffoldBlocks: ['dirt'] },
         () => trackNavigationSegment(routeDigGateBot, () => routeDigGateBot.dig(routeDigGateBot.blockAt(new Vec3(2, 64, 0)))))
       await delay(1)
-      routeDigGateBot.emit('physicsTick')
-      assert.equal(routeDigGateTicks, 0, 'an owned route dig suppresses competing pathfinder replans')
+      assert.equal(routeDigGateBot.pathfinder.tickPaused(), true, 'an owned route dig suppresses competing pathfinder replans')
       settleRouteDig()
       await routeDigPolicy
-      routeDigGateBot.emit('physicsTick')
-      assert.equal(routeDigGateTicks, 1, 'pathfinder route planning resumes after route dig settlement')
+      assert.equal(routeDigGateBot.pathfinder.tickPaused(), false, 'pathfinder route planning resumes after route dig settlement')
 
       const workDigGateBot = makeBot()
-      let workDigGateTicks = 0
-      withNavigationScaffoldTickGate(workDigGateBot, () => workDigGateBot.on('physicsTick', () => workDigGateTicks++))
+      workDigGateBot.pathfinder = {}
+      navigationEditGatePlugin(workDigGateBot)
       let settleWorkDig
       const workTargetBlock = workDigGateBot.blockAt(new Vec3(2, 63, 0))
       workDigGateBot.dig = () => new Promise(resolve => { settleWorkDig = resolve })
@@ -1248,8 +1240,7 @@ async function main() {
         { allowDig: false, scaffold: 'forbid', scaffoldBlocks: ['dirt'] },
         () => trackNavigationSegment(workDigGateBot, () => workDigGateBot.dig(workTargetBlock), { workTarget: workTargetBlock.position }))
       await delay(1)
-      workDigGateBot.emit('physicsTick')
-      assert.equal(workDigGateTicks, 1, 'a selected work-target dig keeps its separate non-route permission and does not gate navigation')
+      assert.equal(workDigGateBot.pathfinder.tickPaused(), false, 'a selected work-target dig keeps its separate non-route permission and does not gate navigation')
       settleWorkDig()
       await workDigPolicy
 

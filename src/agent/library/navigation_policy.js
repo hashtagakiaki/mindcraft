@@ -32,63 +32,10 @@ export function beginNavigationEdit(bot) {
     };
 }
 
-export function withNavigationScaffoldTickGate(bot, registerPathfinder) {
-    const originalOn = bot.on;
-    const gatedOn = function (event, listener, ...args) {
-        if (event !== 'physicsTick' || typeof listener !== 'function') return originalOn.call(this, event, listener, ...args);
-        const gatedListener = function (...eventArgs) {
-            if (navigationScaffoldPlacementPending(bot)) return;
-            return listener.apply(this, eventArgs);
-        };
-        gatedListener.listener = listener;
-        return originalOn.call(this, event, gatedListener, ...args);
-    };
-    bot.on = gatedOn;
-    try { return registerPathfinder(); }
-    finally { if (bot.on === gatedOn) bot.on = originalOn; }
-}
-
-export async function navigateWithEditErrors(bot, goal, body) {
-    const originals = new Map();
-    const wrappers = new Map();
-    let failure = null;
-    let active = true;
-    const failed = error => {
-        if (!active) return;
-        failure ??= error;
-        // Pathfinder swallows equip errors and can retain its equip lock and
-        // building state. Changing this call's goal settles goto and clears
-        // those states, while the original edit error remains the result.
-        if (bot.pathfinder.goal === goal) bot.pathfinder.setGoal(null);
-    };
-    for (const name of ['equip', 'dig', 'placeBlock']) {
-        const original = bot[name];
-        if (typeof original !== 'function') continue;
-        const wrapper = function (...args) {
-            try {
-                const result = original.apply(this, args);
-                return result?.then ? result.catch(error => { failed(error); throw error; }) : result;
-            } catch (error) {
-                failed(error);
-                throw error;
-            }
-        };
-        originals.set(name, original);
-        wrappers.set(name, wrapper);
-        bot[name] = wrapper;
-    }
-    try {
-        const result = await body();
-        if (failure) throw failure;
-        return result;
-    } catch (error) {
-        throw failure ?? error;
-    } finally {
-        active = false;
-        for (const [name, original] of originals) {
-            if (bot[name] === wrappers.get(name)) bot[name] = original;
-        }
-    }
+// Holds the pathfinder's movement loop while an owned route edit is unsettled, so
+// it neither replans nor starts another edit before the server confirms the last.
+export function navigationEditGatePlugin(bot) {
+    bot.pathfinder.tickPaused = () => navigationScaffoldPlacementPending(bot);
 }
 
 export function registerNavigationCleanup(cleanup) {

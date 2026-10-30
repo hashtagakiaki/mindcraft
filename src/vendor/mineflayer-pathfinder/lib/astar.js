@@ -1,3 +1,4 @@
+const { penalizeClimbableNeighbors } = require('./climbable')
 const { performance } = require('perf_hooks')
 
 const Heap = require('./heap.js')
@@ -82,7 +83,7 @@ class AStar {
       this.closedDataSet.add(node.data.hash)
       this.visitedChunks.add(`${node.data.x >> 4},${node.data.z >> 4}`)
 
-      const neighbors = this.movements.getNeighbors(node.data)
+      const neighbors = penalizeClimbableNeighbors(this.movements, node.data, this.movements.getNeighbors(node.data))
       for (const neighborData of neighbors) {
         if (this.closedDataSet.has(neighborData.hash)) {
           continue // skip closed neighbors

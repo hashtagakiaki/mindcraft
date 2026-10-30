@@ -9,7 +9,7 @@ import craftingSync from "./crafting_sync.js";
 import { placeBlockOriented } from './block_placement.js';
 import { resolveBlockInteraction, makeBlockInteractionGoal, interactionFaceVector, interactionEye } from './block_interaction.js';
 import { trackSkill, reportSkillOutcome, skillFailure, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, operationCallContext, withSkillPhase, registerOwnedPromise, withNativeNavigationEditScope, nativeNavigationEditScopeActive } from './operation_context.js';
-import { awaitNavigationPlacementSettled, beginNavigationEdit, navigateWithEditErrors, navigationPolicy, navigationScaffoldsPlaced, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, placeAndConfirmNavigationScaffold, recordNavigationArrival, registerNavigationCleanup, registerNavigationScaffoldSettledCallback, trackNavigationSegment } from './navigation_policy.js';
+import { awaitNavigationPlacementSettled, beginNavigationEdit, navigationPolicy, navigationScaffoldsPlaced, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, placeAndConfirmNavigationScaffold, recordNavigationArrival, registerNavigationCleanup, registerNavigationScaffoldSettledCallback, trackNavigationSegment } from './navigation_policy.js';
 
 const require = createRequire(import.meta.url);
 
@@ -2843,7 +2843,8 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         setActionPhase(cancellation, 'navigation');
         // Emergency reachPosition already owns and confirms its edits. A second
         // segment would reapply the normal policy and enqueue placement twice.
-        const navigate = () => navigateWithEditErrors(bot, goal, () => bot.pathfinder.goto(goal));
+        // goto rejects with the original route edit error (pathfinder fork).
+        const navigate = () => bot.pathfinder.goto(goal);
         const startNavigation = () => navigationRecoveryActive.has(bot)
             ? navigate() : trackNavigationSegment(bot, navigate);
         // Pathfinder's think timeout is wall-clock and keeps running while the bot

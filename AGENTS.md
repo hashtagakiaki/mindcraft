@@ -16,7 +16,7 @@
 
 ## よく使う確認
 
-Node 20と既存read-only dependenciesを使う。diagnostics quota lockはNode helperがLinux util-linux `flock` commandを呼び出す。install/ciやpackage postinstallは禁止。共有quota lock inodeは使用中にunlinkしない。
+Node 20と既存read-only dependenciesを使う。pathfinderだけはこのrepoの `src/vendor/mineflayer-pathfinder/` のforkを使い、修正はそこで行う（変更点はREADME）。diagnostics quota lockはNode helperがLinux util-linux `flock` commandを呼び出す。install/ciやpackage postinstallは禁止。共有quota lock inodeは使用中にunlinkしない。
 
 | 目的 | コマンド |
 |---|---|
