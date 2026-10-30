@@ -1,5 +1,13 @@
 <h1 align="center">🧠mindcraft⛏️</h1>
 
+## この fork について
+
+これは [Mindcraft](https://github.com/mindcraft-bots/mindcraft) の個人開発 fork です。Minecraft の bot に目的を渡し、Codex を使って作業と失敗からの回復を自律的に進める実験を行っています。upstream の stable commit `b36eaf7e61b3f6bd031fdb531812b2e3c42b6c73` を基に、native Codex session、Minecraft 操作用 SDK、移動・採掘・設置、管理 UI などを拡張しています。詳細は [Codex task session](#opt-in-codex-task-session) と以下の各節を参照してください。
+
+この fork のデフォルトブランチは `autonomy` です。[導入手順](#install-and-run)では upstream のリリースではなく、このリポジトリを取得してください。通常の Mindcraft の起動方法は引き続き利用でき、Codex session は明示的に選択します。
+
+評価基盤、手動運用ツール、world と実行記録は別管理です。この README 中の `../mindcraft-eval/`、`../mindcraft-tools/`、`../play/` やそれらへのリンクは開発環境の参照であり、公開 clone には含まれません。実験結果は記載された個別条件での観測です。
+
 ## Change entrypoints
 
 | Change area | Main source | Focused existing check | Final check |
@@ -316,7 +324,12 @@ Do not connect this bot to public servers with coding enabled. This project allo
 
 1. Make sure you have the requirements above.
 
-2. Download the [latest release](https://github.com/mindcraft-bots/mindcraft/releases/latest) and unzip it, or clone the repository.
+2. Clone this fork's default `autonomy` branch:
+
+   ```sh
+   git clone https://github.com/hashtagakiaki/mindcraft.git
+   cd mindcraft
+   ```
 
 3. Rename `keys.example.json` to `keys.json` and fill in your API keys (you only need one). The desired model is set in `andy.json` or other profiles. For other models refer to the table below.
 
