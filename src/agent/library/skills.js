@@ -390,6 +390,10 @@ function itemCountInInventory(bot, type, metadata = null) {
         .reduce((count, item) => count + item.count, 0);
 }
 
+function inventoryItemSnapshot(item) {
+    return { type: item.type, metadata: item.metadata ?? 0, count: item.count };
+}
+
 function verifyInventoryDelta(bot, baseline, returnedItems, removedItems = []) {
     const changes = new Map();
     for (const item of returnedItems) {
@@ -805,7 +809,7 @@ export async function smeltItem(bot, itemName, num=1, options=null) {
                             setActionPhase(context, 'collecting-furnace-output');
                             smeltedItem = await furnace.takeOutput();
                             if (smeltedItem) {
-                                returnedItems.push(smeltedItem);
+                                returnedItems.push(inventoryItemSnapshot(smeltedItem));
                                 total += smeltedItem.count;
                                 quietMs = 0;
                             }
@@ -828,12 +832,12 @@ export async function smeltItem(bot, itemName, num=1, options=null) {
                     if (!cancelled && furnace.inputItem()) {
                         setActionPhase(context, 'collecting-furnace-input');
                         const item = await furnace.takeInput();
-                        if (item) returnedItems.push(item);
+                        if (item) returnedItems.push(inventoryItemSnapshot(item));
                     }
                     if (!cancelled && !isActionCancelled(bot, context) && furnace.fuelItem()) {
                         setActionPhase(context, 'collecting-furnace-fuel');
                         const item = await furnace.takeFuel();
-                        if (item) returnedItems.push(item);
+                        if (item) returnedItems.push(inventoryItemSnapshot(item));
                     }
                     if (isActionCancelled(bot, context)) {
                         cancelled = true;
@@ -972,19 +976,19 @@ export async function clearNearestFurnace(bot, options=null) {
         if (furnace && !cancelled && furnace.outputItem()) {
             setActionPhase(context, 'collecting-furnace-output');
             smeltedItem = await furnace.takeOutput();
-            if (smeltedItem) returnedItems.push(smeltedItem);
+            if (smeltedItem) returnedItems.push(inventoryItemSnapshot(smeltedItem));
             if (isActionCancelled(bot, context)) cancelled = true;
         }
         if (furnace && !cancelled && furnace.inputItem()) {
             setActionPhase(context, 'collecting-furnace-input');
             inputItem = await furnace.takeInput();
-            if (inputItem) returnedItems.push(inputItem);
+            if (inputItem) returnedItems.push(inventoryItemSnapshot(inputItem));
             if (isActionCancelled(bot, context)) cancelled = true;
         }
         if (furnace && !cancelled && furnace.fuelItem()) {
             setActionPhase(context, 'collecting-furnace-fuel');
             fuelItem = await furnace.takeFuel();
-            if (fuelItem) returnedItems.push(fuelItem);
+            if (fuelItem) returnedItems.push(inventoryItemSnapshot(fuelItem));
             if (isActionCancelled(bot, context)) cancelled = true;
         }
     } catch (error) {
@@ -2612,7 +2616,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             const previousMovements = bot.pathfinder.movements;
             navigationRecoveryActive.add(bot);
             try {
-                const recoveryTarget = recovery.landing;
+                const recoveryTarget = navigationRecoveryLandingFeet(bot, recovery.landing);
                 const egress = await reachPositionCore(bot, { position: { x: recoveryTarget.x + 0.5, y: recoveryTarget.y,
                     z: recoveryTarget.z + 0.5 }, tolerance: 0.75, allowDig: true,
                     allowScaffold: recovery.scaffoldNames.length > 0,
@@ -3183,6 +3187,7 @@ async function settleReachPositionArrival(bot, target, active, timeoutMs = 1200,
         onPhysicsTick = function onArrivalPhysicsTick() {
             try { active(); } catch (error) { fail(error); return; }
             if (!reachPositionBlockMatches(bot.entity?.position, target)) {
+                if (waitForSafeStart && !safeStartObserved) return;
                 finish(null);
                 return;
             }
@@ -3443,6 +3448,11 @@ function reachPositionFullTopSupport(block) {
         && shape[3] >= 0.99 && shape[4] >= 0.99 && shape[5] >= 0.99);
 }
 
+function navigationRecoveryLandingSupport(block) {
+    return !!block?.shapes?.some(shape => shape[0] <= 0.01 && shape[2] <= 0.01
+        && shape[3] >= 0.99 && shape[4] >= 0.875 && shape[5] >= 0.99);
+}
+
 function reachPositionFullCollisionBlock(block) {
     return !!block?.shapes?.some(shape => shape[0] <= 0.01 && shape[1] <= 0.01 && shape[2] <= 0.01
         && shape[3] >= 0.99 && shape[4] >= 0.99 && shape[5] >= 0.99);
@@ -3573,11 +3583,11 @@ async function navigationRecovery(bot, suppliedMovements, requestedGoal = null) 
         const candidateStructure = !!feet && !!head && !!support && clearanceOrDiggable(feet) && clearanceOrDiggable(head)
             && !unsafeNames.has(feet.name)
             && !unsafeNames.has(head.name) && (!unsafeNames.has(support.name) || supportIsEgressWater);
-        const safe = candidateStructure && feet.type === 0 && head.type === 0 && reachPositionFullTopSupport(support);
+        const safe = candidateStructure && feet.type === 0 && head.type === 0 && navigationRecoveryLandingSupport(support);
         if (candidateDiagnostics.length < 12) candidateDiagnostics.push({ x, y, z,
             feet: feet?.name ?? null, head: head?.name ?? null, support: support?.name ?? null, safe });
         if (!candidateStructure) continue;
-        if (candidateStructure && reachPositionFullTopSupport(support)) {
+        if (candidateStructure && navigationRecoveryLandingSupport(support)) {
             candidates.push(position);
             continue;
         }
@@ -3728,7 +3738,7 @@ async function navigationRecovery(bot, suppliedMovements, requestedGoal = null) 
         const feetClear = feet?.type === 0 && !feet.shapes?.length || plannedBreak(candidate);
         const headPosition = candidate.offset(0, 1, 0);
         const headClear = head?.type === 0 && !head.shapes?.length || plannedBreak(headPosition);
-        const supportSurvives = reachPositionFullTopSupport(support) && !plannedBreak(candidate.offset(0, -1, 0));
+        const supportSurvives = navigationRecoveryLandingSupport(support) && !plannedBreak(candidate.offset(0, -1, 0));
         if (feetClear && headClear && (supportSurvives || placementPlanned)) {
             landing = candidate;
             break;
@@ -3752,6 +3762,13 @@ async function navigationRecovery(bot, suppliedMovements, requestedGoal = null) 
             pathSearchTimeoutMs: NAVIGATION_RECOVERY_SEARCH_TIMEOUT_MS,
             pathSearchTickTimeoutMs: NAVIGATION_RECOVERY_SEARCH_TICK_MS,
             pathSearchSteps: NAVIGATION_RECOVERY_SEARCH_STEPS } };
+}
+
+function navigationRecoveryLandingFeet(bot, landing) {
+    const support = bot.blockAt(landing.offset(0, -1, 0));
+    const top = navigationRecoveryLandingSupport(support)
+        ? Math.max(...support.shapes.map(shape => shape[4])) : 1;
+    return landing.offset(0, Math.min(0, top - 1), 0);
 }
 
 function navigationRecoveryLanded(bot, position) {
@@ -3879,13 +3896,7 @@ function navigationRecoveryPlacementAnchor(bot, target) {
 }
 
 function navigationRecoverySafeLanding(bot, position) {
-    const feet = bot.blockAt(position);
-    const head = bot.blockAt(position.offset(0, 1, 0));
-    const support = bot.blockAt(position.offset(0, -1, 0));
-    return bot.entity.onGround === true && !!feet && !!head && !!support && feet.type === 0 && head.type === 0
-        && !REACH_POSITION_WATER_NAMES.has(feet.name) && !REACH_POSITION_WATER_NAMES.has(head.name)
-        && !REACH_POSITION_EXIT_HAZARDS.has(feet.name) && !REACH_POSITION_EXIT_HAZARDS.has(head.name)
-        && !REACH_POSITION_EXIT_HAZARDS.has(support.name) && reachPositionFullTopSupport(support);
+    return reachPositionSafeArrival(bot, position);
 }
 
 async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = false, skipHazardRecovery = false, retainEmergencyScaffolds = false } = {}) {
@@ -4236,7 +4247,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                 }
                 if (navigationFailure) throw navigationFailure;
                 active();
-                const recoveredPosition = bot.entity.position.floored();
+                const recoveredPosition = navigationRecoveryLandingFeet(bot, recovery.landing).floored();
                 const settled = await settleReachPositionArrival(bot, recoveredPosition, active, 1200, { waitForSafeStart: true });
                 if (!settled || !navigationRecoveryLanded(bot, recoveredPosition)) {
                     resultCode = 'unsafe_state';
