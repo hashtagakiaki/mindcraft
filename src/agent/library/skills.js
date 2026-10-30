@@ -78,7 +78,12 @@ function observeNavigation(bot, record, routeId, { onPlacementResolved = () => {
         try { result = originalPlace.call(this, reference, face, ...args); }
         catch (error) { record('navigation_placement_result', { ...detail, status: 'error', error: String(error) }); throw error; }
         Promise.resolve(result).then(
-            () => { record('navigation_placement_result', { ...detail, status: 'resolved' }); onPlacementResolved(); },
+            () => {
+                record('navigation_placement_result', { ...detail, status: 'resolved' });
+                const ref = detail.reference;
+                const dir = detail.face;
+                onPlacementResolved(ref && dir ? { x: ref.x + dir.x, y: ref.y + dir.y, z: ref.z + dir.z } : null);
+            },
             error => record('navigation_placement_result', { ...detail, status: 'error', error: String(error) }));
         return result;
     };
@@ -2723,6 +2728,16 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     let lastPathUpdate = null;
     let lastPathRecordAt = 0;
     const seenRouteSegments = new Set();
+    // A route edit renews the stall clock only at a block not edited before in
+    // this call; pathfinder can place and dig the same block indefinitely.
+    const editedPositions = new Set();
+    const firstEditAt = position => {
+        if (!position || ![position.x, position.y, position.z].every(Number.isFinite)) return false;
+        const key = `${Math.floor(position.x)},${Math.floor(position.y)},${Math.floor(position.z)}`;
+        if (editedPositions.has(key)) return false;
+        editedPositions.add(key);
+        return true;
+    };
     let activeRouteNodes = [];
     // The pathfinder shifts this array in place as nodes are reached.
     let livePath = [];
@@ -2824,7 +2839,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         // Bot event listeners run outside the owned async context; the interval
         // below reports a completed dig or server-confirmed route placement as progress.
         let digProgressPending = false;
-        navigationObserver = observeNavigation(bot, record, navigationRouteId, { onPlacementResolved: () => { digProgressPending = true; } });
+        navigationObserver = observeNavigation(bot, record, navigationRouteId, { onPlacementResolved: position => { if (firstEditAt(position)) digProgressPending = true; } });
         setActionPhase(cancellation, 'navigation');
         // Emergency reachPosition already owns and confirms its edits. A second
         // segment would reapply the normal policy and enqueue placement twice.
@@ -2837,7 +2852,10 @@ export async function goToGoal(bot, goal, movementOverride=null) {
         // toward the goal; the stall check still ends routes without progress.
         let digCompletedSinceStart = false;
         let attemptStartedAt = Date.now();
-        const onDigCompleted = () => { digCompletedSinceStart = true; digProgressPending = true; };
+        const onDigCompleted = block => {
+            digCompletedSinceStart = true;
+            if (firstEditAt(block?.position)) digProgressPending = true;
+        };
         bot.on?.('diggingCompleted', onDigCompleted);
         removeDigListener = () => bot.removeListener?.('diggingCompleted', onDigCompleted);
         let navigation = startNavigation();

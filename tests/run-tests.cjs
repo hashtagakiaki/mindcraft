@@ -437,6 +437,26 @@ async function testNavigation(root) {
   assert.equal(stalledCall.result.diagnostics.phase, 'movement')
   assert.ok(Number.isFinite(stalledCall.result.diagnostics.position.x), 'the stall records the final position')
 
+  // A route edit renews the stall clock only at a block not edited before in this call:
+  // pathfinder placing and digging the same block in a loop still ends in no_progress.
+  for (const distinct of [false, true]) {
+    bot = makeBot()
+    let rejectEdit
+    bot.pathfinder.goto = goal => { bot.pathfinder.goal = goal; return new Promise((resolve, reject) => { rejectEdit = reject }) }
+    bot.pathfinder.setGoal = goal => { bot.pathfinder.goal = goal; rejectEdit(new Error('stalled while editing')) }
+    let edits = 0
+    const editTimer = setInterval(() => {
+      if (++edits > 12) return clearInterval(editTimer)
+      bot.emit('diggingCompleted', { position: { x: distinct ? edits : 5, y: 0, z: 0 } })
+    }, 5)
+    const editStartedAt = Date.now()
+    await assert.rejects(skills.goToGoal(bot, { heuristic: () => 10 }), error => error.navigation?.code === 'no_progress')
+    clearInterval(editTimer)
+    const editElapsed = Date.now() - editStartedAt
+    if (distinct) assert.ok(editElapsed >= 60, `edits at new blocks are progress (${editElapsed}ms)`)
+    else assert.ok(editElapsed < 50, `repeated edits at one block do not renew the stall clock (${editElapsed}ms)`)
+  }
+
   // A dig with a finite deadline pauses the stall clock; it restarts when the dig ends.
   bot = makeBot()
   stopCalls = 0
