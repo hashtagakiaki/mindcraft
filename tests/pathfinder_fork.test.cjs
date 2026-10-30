@@ -44,6 +44,28 @@ function gotoBot () {
 }
 
 async function testGotoContract () {
+  {
+    // A full-block landing at y=64 is not already at y=65. The former
+    // unconditional +1 shortcut resolved collectBlock one level too early.
+    const bot = gotoBot()
+    bot.entity.onGround = true
+    bot.pathfinder.movements = { emptyBlocks: new Set([0]) }
+    bot.blockAt = () => ({ type: 0 })
+    const goal = { isEnd: p => p.y === 65 }
+    const moving = goto(bot, goal)
+    let settled = false
+    moving.then(() => { settled = true })
+    await sleep(0)
+    assert.equal(settled, false)
+    bot.entity.position.y = 65
+    bot.emit('goal_reached', goal)
+    await moving
+
+    // A grounded partial block uses the same start node as path search.
+    bot.entity.position.y = 64.5
+    bot.blockAt = () => ({ type: 1 })
+    await goto(bot, goal)
+  }
   // goto rejects failure statuses, ignores empty partial paths and stale reached events, and resolves next tick.
   {
     const bot = gotoBot()

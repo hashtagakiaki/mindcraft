@@ -29,6 +29,7 @@ function inject (bot) {
   let digging = false
   let placing = false
   let placingBlock = null
+  let awaitingPillarLanding = false
   let lastNodeTime = performance.now()
   let returningPos = null
   let stopPathing = false
@@ -140,6 +141,7 @@ function inject (bot) {
       bot.stopDigging()
     }
     placing = false
+    if (reason === 'goal_updated' || reason === 'movements_updated') awaitingPillarLanding = false
     pathUpdated = false
     astarContext = null
     lockEquipItem.release()
@@ -413,6 +415,12 @@ function inject (bot) {
 
   function monitorMovement () {
     if (bot.pathfinder.tickPaused()) return
+    // A confirmed pillar can leave the player airborne above its landing.
+    // Starting A* from that transient height skips the next scaffold.
+    if (awaitingPillarLanding) {
+      if (!bot.entity.onGround && !bot.entity.isInWater) return
+      awaitingPillarLanding = false
+    }
     // Test freemotion
     if (stateMovements && stateMovements.allowFreeMotion && stateGoal && stateGoal.entity) {
       const target = stateGoal.entity
@@ -452,7 +460,7 @@ function inject (bot) {
     if (path.length === 0) {
       lastNodeTime = performance.now()
       if (stateGoal && stateMovements) {
-        if (stateGoal.isEnd(bot.entity.position.floored())) {
+        if (stateGoal.isEnd(gotoUtil.goalPosition(bot))) {
           if (!dynamicGoal) {
             bot.emit('goal_reached', stateGoal)
             stateGoal = null
@@ -514,6 +522,18 @@ function inject (bot) {
     // TODO: sneak when placing or make sure the block is not interactive
     if (placing || nextPoint.toPlace.length > 0) {
       if (!placing) {
+        const edit = nextPoint.toPlace[0]
+        if (edit.jump && edit.dx === 0 && edit.dy === 1 && edit.dz === 0) {
+          // A new search may start at a column boundary and finish after the
+          // player has drifted into its neighbor. Center before pillar work;
+          // fullStop otherwise snaps the player into the wrong column.
+          const center = new Vec3(edit.x + 0.5, bot.entity.position.y, edit.z + 0.5)
+          if (Math.abs(center.x - p.x) > 0.2 || Math.abs(center.z - p.z) > 0.2) {
+            bot.lookAt(center)
+            bot.setControlState('forward', true)
+            return
+          }
+        }
         placing = true
         placingBlock = nextPoint.toPlace.shift()
         fullStop()
@@ -563,6 +583,9 @@ function inject (bot) {
                 // Dont release Sneak if the block placement was not successful
                 bot.setControlState('sneak', false)
                 bot.setControlState('jump', false)
+                if (placingBlock.jump && placingBlock.dx === 0 && placingBlock.dy === 1 && placingBlock.dz === 0 && !bot.entity.isInWater) {
+                  awaitingPillarLanding = true
+                }
                 if (bot.pathfinder.LOSWhenPlacingBlocks && placingBlock.returnPos) returningPos = placingBlock.returnPos.clone()
               })
               .catch(err => {
@@ -598,7 +621,7 @@ function inject (bot) {
       if (path.length === 0) { // done
         // If the block the bot is standing on is not a full block only checking for the floored position can fail as
         // the distance to the goal can get greater then 0 when the vector is floored.
-        if (!dynamicGoal && stateGoal && (stateGoal.isEnd(p.floored()) || stateGoal.isEnd(p.floored().offset(0, 1, 0)))) {
+        if (!dynamicGoal && stateGoal && stateGoal.isEnd(gotoUtil.goalPosition(bot))) {
           bot.emit('goal_reached', stateGoal)
           stateGoal = null
         }

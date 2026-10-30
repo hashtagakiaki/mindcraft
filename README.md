@@ -189,6 +189,7 @@ Stage-four navigation evidence is in [the D03 report](docs/navigation-progress-s
 pathfinderは `src/vendor/mineflayer-pathfinder/` のfork（mineflayer-pathfinder 2.4.5、MIT）を使う。共有のread-only `node_modules` は変更せず、sourceは相対pathでforkを読み込む。collectblock・pvp・toolは先に読み込んだforkの `bot.pathfinder` を使う（goalsとMovementsは各自の依存のものをそのまま渡す）。upstreamからの変更は次のとおりで、以前sourceが外側から補っていた処理もforkへ移した。
 
 - 足場設置・掘削を伴うノードは座標がブロック中央に補正されないため、その手前の移動ノードを「通過済み」と誤判定して捨て、隣の列から足場を積んでは掘るループになっていた（2026-10-30の手動play）。編集ノードの手前の移動は実際に到着したときだけ捨てる（`lib/trim.js`）。
+- 真上への足場設置は先に対象列の中央へ移動し、設置確認後は着地してから次の経路を探索する。ジャンプ中の高さから探索して次の足場を飛ばすことを防ぐ。水中では着地待ちをしない。到着判定は探索と同じ足元座標を使い、通常のブロック上で無条件に1段上を到着扱いしない。
 - つた・はしご: 全探索で同じ高さのまま登れるブロックへ入る移動にコスト2を加え（A*で適用するので他pluginのMovementsにも効く）、実行中は登れるブロック内で次ノードが上にない場合にジャンプ入力を、0.5ブロックを超えて上にずれた場合は前進・ダッシュ入力も解除する。予定された登りは変えない（`lib/climbable.js`、旧 `climbable_navigation.js`）。
 - `goto` は観測した結果だけで終わる。noPath・timeout・goalを満たさない空経路・botの切断/死亡で失敗して自分のgoalを解除し、別goalのgoal_reachedや空のpartial経路では終わらない（`lib/goto.js`、旧mining_syncの契約）。
 - 経路上の装備・採掘・設置の失敗を握りつぶさず `path_edit_error` を出し、`goto` は元のエラーで失敗する。装備失敗で装備ロックと設置中状態が残り続ける問題も解消した（旧 `navigateWithEditErrors`）。

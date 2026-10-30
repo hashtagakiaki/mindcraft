@@ -15,12 +15,19 @@ function error (name, message) {
   return err
 }
 
-function goalSatisfied (goal, bot) {
-  if (!goal || typeof goal.isEnd !== 'function' || !bot.entity?.position) return false
+function goalPosition (bot) {
   const position = bot.entity.position
   const floored = typeof position.floored === 'function' ? position.floored() : position
+  const block = bot.blockAt?.(floored)
+  const empty = bot.pathfinder.movements?.emptyBlocks
+  if (bot.entity.onGround && position.y - floored.y > 0.001 && block && empty && !empty.has(block.type)) floored.y++
+  return floored
+}
+
+function goalSatisfied (goal, bot) {
+  if (!goal || typeof goal.isEnd !== 'function' || !bot.entity?.position) return false
   try {
-    return goal.isEnd(floored) || goal.isEnd(floored.offset?.(0, 1, 0) ?? floored)
+    return goal.isEnd(goalPosition(bot))
   } catch {
     return false
   }
@@ -84,3 +91,4 @@ function goto (bot, goal) {
 }
 
 module.exports = goto
+module.exports.goalPosition = goalPosition
