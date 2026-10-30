@@ -46,8 +46,8 @@ export function getPosition(bot) { return bot.entity.position }
   await write(root, 'node_modules/vec3/index.js', `
 export default function Vec3(x, y, z) { return { x, y, z, distanceTo(other) { return Math.hypot(x-other.x, y-other.y, z-other.z) }, clone() { return this }, floored() { return Vec3(Math.floor(x),Math.floor(y),Math.floor(z)) }, offset(dx,dy,dz) { return Vec3(x+dx,y+dy,z+dz) }, minus(other) { return Vec3(x-other.x,y-other.y,z-other.z) }, norm() { return Math.hypot(x,y,z) }, normalize() { const n = Math.hypot(x,y,z) || 1; return Vec3(x/n,y/n,z/n) } } }
 `)
-  await write(root, 'node_modules/mineflayer-pathfinder/package.json', '{"type":"module","exports":"./index.js"}')
-  await write(root, 'node_modules/mineflayer-pathfinder/index.js', `
+  await write(root, 'src/vendor/mineflayer-pathfinder/package.json', '{"type":"module","exports":"./index.js"}')
+  await write(root, 'src/vendor/mineflayer-pathfinder/index.js', `
 class GoalNear { constructor(x,y,z,distance) { Object.assign(this,{x,y,z,distance}) } }
 class Movements { constructor() { this.blocksCantBreak = new Set() } }
 export default { goals: { GoalNear }, Movements }

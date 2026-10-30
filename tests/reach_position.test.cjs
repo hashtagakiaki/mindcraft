@@ -7,7 +7,7 @@ const os = require('node:os')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { createRequire } = require('node:module')
-const { moduleRoot } = require('./dependency_root.cjs')
+const { moduleRoot, pathfinderFork } = require('./dependency_root.cjs')
 const { withAcceleratedClock } = require('./accelerated_clock.cjs')
 
 // Shortens unconfirmed-edit and chunk waits; pathfinder search budgets use
@@ -21,9 +21,9 @@ const registry = req('prismarine-registry')('1.21.1')
 const Block = req('prismarine-block')(registry)
 const WorldSync = req('prismarine-world/src/worldsync')
 const Vec3 = req('vec3').Vec3
-const AStar = req('mineflayer-pathfinder/lib/astar')
-const Move = req('mineflayer-pathfinder/lib/move')
-const pathfinder = req('mineflayer-pathfinder')
+const AStar = pathfinderFork('./lib/astar')
+const Move = pathfinderFork('./lib/move')
+const pathfinder = pathfinderFork()
 
 const key = p => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -41,6 +41,7 @@ async function setup(root) {
   for (const name of ['skills', 'block_placement', 'block_interaction', 'operation_context', 'navigation_policy', 'crafting_sync', 'native_sdk']) {
     await write(root, `src/agent/library/${name}.js`, await readFile(path.join(repo, `src/agent/library/${name}.js`)))
   }
+  require('node:fs').cpSync(path.join(repo, 'src/vendor'), path.join(root, 'src/vendor'), { recursive: true })
   await write(root, 'src/agent/library/world.js', `
 export function getNearestBlocksWhere() { return []; }
 export function getNearestBlock() { return null; }

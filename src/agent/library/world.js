@@ -1,5 +1,5 @@
 import settings from '../settings.js';
-import pf from 'mineflayer-pathfinder';
+import pf from '../../vendor/mineflayer-pathfinder/index.js';
 import Vec3 from 'vec3';
 import * as mc from '../../utils/mcdata.js';
 import { resolveBlockInteraction } from './block_interaction.js';

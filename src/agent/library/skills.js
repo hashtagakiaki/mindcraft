@@ -1,6 +1,6 @@
 import * as mc from "../../utils/mcdata.js";
 import * as world from "./world.js";
-import pf from 'mineflayer-pathfinder';
+import pf from '../../vendor/mineflayer-pathfinder/index.js';
 import Vec3 from 'vec3';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';

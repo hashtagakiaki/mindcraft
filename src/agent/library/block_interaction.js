@@ -1,4 +1,4 @@
-import pf from 'mineflayer-pathfinder';
+import pf from '../../vendor/mineflayer-pathfinder/index.js';
 import Vec3 from 'vec3';
 
 export const BLOCK_INTERACTION_REACH = 4.5;

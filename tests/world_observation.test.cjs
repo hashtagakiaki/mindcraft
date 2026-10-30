@@ -27,6 +27,7 @@ export function getAllBiomes() { return [{ name: 'plains' }]; }
       await fs.copyFile(path.join(repo, 'src/agent/library', file), path.join(root, 'src/agent/library', file))
     }
     await fs.symlink(moduleRoot(), path.join(root, 'node_modules'))
+    require('node:fs').cpSync(path.join(__dirname, '../src/vendor'), path.join(root, 'src/vendor'), { recursive: true })
     const load = relative => import(pathToFileURL(path.join(root, relative)))
     const world = await load('src/agent/library/world.js')
     const { createObservationScope } = await load('src/agent/library/observation_scope.js')

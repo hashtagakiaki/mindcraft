@@ -25,6 +25,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 async function setup(root) {
   await writeFile(path.join(root, 'package.json'), '{"type":"module"}')
   await symlink(deps, path.join(root, 'node_modules'))
+  require('node:fs').cpSync(path.join(__dirname, '../src/vendor'), path.join(root, 'src/vendor'), { recursive: true })
   await writeFile(path.join(root, 'settings.js'), 'export default { navigation_stall_timeout_ms: 300, navigation_check_interval_ms: 25 };')
   await mkdir(path.join(root, 'src/agent/library'), { recursive: true })
   await writeFile(path.join(root, 'src/agent/settings.js'), 'export default {};')

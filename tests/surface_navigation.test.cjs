@@ -6,14 +6,14 @@ const path = require('node:path')
 const os = require('node:os')
 const { pathToFileURL } = require('node:url')
 const { createRequire } = require('node:module')
-const { moduleRoot } = require('./dependency_root.cjs')
+const { moduleRoot, pathfinderFork } = require('./dependency_root.cjs')
 const repo = path.resolve(__dirname, '..')
 const deps = moduleRoot()
 const req = createRequire(path.join(deps, 'package.json'))
 const registry = req('prismarine-registry')('1.21.1')
 const Block = req('prismarine-block')(registry)
 const Vec3 = req('vec3').Vec3
-const { goals } = req('mineflayer-pathfinder')
+const { goals } = pathfinderFork()
 const key = (x, y, z) => `${x},${y},${z}`
 
 async function write(root, file, content) {
@@ -29,6 +29,7 @@ async function setup(root) {
   for (const name of ['skills', 'block_placement', 'block_interaction', 'operation_context', 'navigation_policy', 'crafting_sync']) {
     await write(root, `src/agent/library/${name}.js`, await readFile(path.join(repo, `src/agent/library/${name}.js`)))
   }
+  require('node:fs').cpSync(path.join(repo, 'src/vendor'), path.join(root, 'src/vendor'), { recursive: true })
   await write(root, 'src/utils/mcdata.js', 'export const getBlockId = () => 1;')
   await write(root, 'src/agent/library/world.js', 'export function getNearestBlocksWhere(bot, predicate) { return [...bot.blocks.values()].filter(predicate); }')
 }

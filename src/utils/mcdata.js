@@ -2,7 +2,7 @@ import minecraftData from 'minecraft-data';
 import settings from '../agent/settings.js';
 import { createBot } from 'mineflayer';
 import prismarine_items from 'prismarine-item';
-import { pathfinder } from 'mineflayer-pathfinder';
+import { pathfinder } from '../vendor/mineflayer-pathfinder/index.js';
 import { plugin as pvp } from 'mineflayer-pvp';
 import { plugin as collectblock } from 'mineflayer-collectblock';
 import { plugin as autoEat } from 'mineflayer-auto-eat';

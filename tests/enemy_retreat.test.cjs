@@ -6,10 +6,10 @@ const path = require('node:path')
 const os = require('node:os')
 const { pathToFileURL } = require('node:url')
 const { createRequire } = require('node:module')
-const { moduleRoot } = require('./dependency_root.cjs')
+const { moduleRoot, pathfinderFork } = require('./dependency_root.cjs')
 const deps = moduleRoot(), req = createRequire(path.join(deps, 'package.json'))
-const { goals, Movements } = req('mineflayer-pathfinder')
-const AStar = req('mineflayer-pathfinder/lib/astar'), Move = req('mineflayer-pathfinder/lib/move')
+const { goals, Movements } = pathfinderFork()
+const AStar = pathfinderFork('./lib/astar'), Move = pathfinderFork('./lib/move')
 const registry = req('prismarine-registry')('1.21.1'), Block = req('prismarine-block')(registry), Vec3 = req('vec3').Vec3
 const WorldSync = req('prismarine-world/src/worldsync')
 async function setup(root) {
@@ -23,6 +23,7 @@ async function setup(root) {
   for (const name of ['skills', 'world', 'block_placement', 'block_interaction', 'operation_context', 'navigation_policy', 'crafting_sync'])
     await writeFile(path.join(root, `src/agent/library/${name}.js`), await readFile(path.join(__dirname, `../src/agent/library/${name}.js`)))
   await writeFile(path.join(root, 'src/agent/modes.js'), await readFile(path.join(__dirname, '../src/agent/modes.js')))
+  require('node:fs').cpSync(path.join(__dirname, '../src/vendor'), path.join(root, 'src/vendor'), { recursive: true })
 }
 function makeBot({ enclosed = false, raised = false, gap = false } = {}) {
   const bot = new EventEmitter()

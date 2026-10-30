@@ -6,7 +6,7 @@ const path = require('node:path')
 const os = require('node:os')
 const { pathToFileURL } = require('node:url')
 const { createRequire } = require('node:module')
-const { moduleRoot } = require('./dependency_root.cjs')
+const { moduleRoot, pathfinderFork } = require('./dependency_root.cjs')
 const repo = path.resolve(__dirname, '..')
 const deps = moduleRoot()
 const req = createRequire(path.join(deps, 'package.json'))
@@ -14,9 +14,9 @@ const Vec3 = req('vec3').Vec3
 const registry = req('prismarine-registry')('1.21.1')
 const Block = req('prismarine-block')(registry)
 const WorldSync = req('prismarine-world/src/worldsync')
-const { goals, Movements } = req('mineflayer-pathfinder')
-const AStar = req('mineflayer-pathfinder/lib/astar')
-const Move = req('mineflayer-pathfinder/lib/move')
+const { goals, Movements } = pathfinderFork()
+const AStar = pathfinderFork('./lib/astar')
+const Move = pathfinderFork('./lib/move')
 const key = p => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`
 async function write(root, file, content) {
   const target = path.join(root, file)
@@ -30,6 +30,7 @@ async function setup(root) {
   for (const name of ['skills', 'block_placement', 'block_interaction', 'operation_context', 'navigation_policy', 'crafting_sync', 'index']) {
     await write(root, `src/agent/library/${name}.js`, await readFile(path.join(repo, `src/agent/library/${name}.js`)))
   }
+  require('node:fs').cpSync(path.join(repo, 'src/vendor'), path.join(root, 'src/vendor'), { recursive: true })
   await write(root, 'src/utils/mcdata.js', 'export const getBlockId = () => 1;')
   await write(root, 'src/agent/library/world.js', 'export function getNearestBlocksWhere(bot, predicate) { return [...bot.blocks.values()].filter(predicate).sort((a,b) => bot.entity.position.distanceTo(a.position)-bot.entity.position.distanceTo(b.position)); }')
 }

@@ -27,6 +27,7 @@ async function write(root, relative, text) {
 async function setup(root) {
   await write(root, 'package.json', '{"type":"module"}')
   await symlink(dependencies, path.join(root, 'node_modules'))
+  require('node:fs').cpSync(path.join(__dirname, '../src/vendor'), path.join(root, 'src/vendor'), { recursive: true })
   await write(root, 'settings.js', 'export default { block_place_delay: 0 };')
   await write(root, 'src/agent/settings.js', 'export default { narrate_behavior: false };')
   await write(root, 'src/utils/mcdata.js', `

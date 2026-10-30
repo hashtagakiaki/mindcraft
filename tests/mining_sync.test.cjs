@@ -82,10 +82,14 @@ async function main() {
   fixtureRuntime = await mkdtemp(path.join(os.tmpdir(), 'mc-mining-sync-'))
   await writeFile(path.join(fixtureRuntime, 'package.json'), '{"type":"module"}')
   await symlink(moduleRoot(), path.join(fixtureRuntime, 'node_modules'))
+  // Keep the source layout so library imports of the vendored pathfinder resolve.
+  const library = path.join(fixtureRuntime, 'src/agent/library')
+  require('node:fs').mkdirSync(library, { recursive: true })
   for (const name of ['mining_sync.js', 'block_interaction.js', 'operation_context.js']) {
-    await writeFile(path.join(fixtureRuntime, name), await readFile(path.join(path.dirname(helper), name)))
+    await writeFile(path.join(library, name), await readFile(path.join(path.dirname(helper), name)))
   }
-  mining = await import(require('node:url').pathToFileURL(path.join(fixtureRuntime, 'mining_sync.js')))
+  require('node:fs').cpSync(path.resolve(path.dirname(helper), '../../vendor'), path.join(fixtureRuntime, 'src/vendor'), { recursive: true })
+  mining = await import(require('node:url').pathToFileURL(path.join(library, 'mining_sync.js')))
 
   // Correct only the returned block instance; harvest rules still govern eligibility.
   const registry = registryLoader('1.21.1')

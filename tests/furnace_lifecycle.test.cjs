@@ -35,6 +35,7 @@ async function loadRuntime() {
   tempDirs.add(dir)
   await writeFile(path.join(dir, 'package.json'), '{"type":"module"}')
   await symlink(sharedNodeModules, path.join(dir, 'node_modules'))
+  require('node:fs').cpSync(path.join(__dirname, '../src/vendor'), path.join(dir, 'src/vendor'), { recursive: true })
   await mkdir(path.join(dir, 'src/agent/library'), { recursive: true })
   await mkdir(path.join(dir, 'src/agent'), { recursive: true })
   await mkdir(path.join(dir, 'src/utils'), { recursive: true })

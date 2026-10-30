@@ -32,6 +32,7 @@ async function write(root, relative, text) {
 async function setup(root) {
   await write(root, 'package.json', '{"type":"module"}')
   await symlink(dependencies, path.join(root, 'node_modules'))
+  require('node:fs').cpSync(path.join(__dirname, '../src/vendor'), path.join(root, 'src/vendor'), { recursive: true })
   await write(root, 'settings.js', 'export default { block_place_delay: 0 };')
   await write(root, 'src/agent/settings.js', 'export default { allow_insecure_coding: false, generated_code_fail_on_false: [], code_timeout_mins: 1 };')
   await write(root, 'src/agent/mindserver_proxy.js', 'export function sendOutputToServer() {}');

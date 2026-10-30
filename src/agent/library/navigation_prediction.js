@@ -5,7 +5,7 @@
 //
 // lib/physics is not part of mineflayer-pathfinder's public exports; the
 // dependency is pinned (2.4.5) and read-only.
-import Physics from 'mineflayer-pathfinder/lib/physics.js'
+import Physics from '../../vendor/mineflayer-pathfinder/lib/physics.js'
 import prismarinePhysics from 'prismarine-physics'
 
 const { PlayerState } = prismarinePhysics

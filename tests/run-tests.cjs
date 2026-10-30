@@ -143,8 +143,8 @@ export default function Vec3(x, y, z) {
   return { x, y, z, plus(v) { return Vec3(x + v.x, y + v.y, z + v.z); }, offset(dx, dy, dz) { return Vec3(x + dx, y + dy, z + dz); }, toString() { return '(' + x + ', ' + y + ', ' + z + ')'; } };
 }
 `)
-  await write(root, 'node_modules/mineflayer-pathfinder/package.json', '{"type":"module","exports":"./index.js"}')
-  await write(root, 'node_modules/mineflayer-pathfinder/index.js', `export default {
+  await write(root, 'src/vendor/mineflayer-pathfinder/package.json', '{"type":"module","exports":"./index.js"}')
+  await write(root, 'src/vendor/mineflayer-pathfinder/index.js', `export default {
     goals: { GoalNear: class { constructor(x,y,z,range) { Object.assign(this,{x,y,z,range}) }
       heuristic(p) { return Math.max(Math.abs(p.x-this.x),Math.abs(p.y-this.y),Math.abs(p.z-this.z))-this.range }
     }, GoalLookAtBlock: class { constructor(position, world) { Object.assign(this,{position,world}) }
@@ -190,8 +190,8 @@ export function getNearestFreeSpace(bot) { return bot.navigation.freeSpace || { 
 `)
   await write(root, 'node_modules/vec3/package.json', '{"type":"module","exports":"./index.js"}')
   await write(root, 'node_modules/vec3/index.js', 'export default function Vec3(x, y, z) { return { x, y, z, floored() { return Vec3(Math.floor(x), Math.floor(y), Math.floor(z)); }, plus(v) { return Vec3(x + v.x, y + v.y, z + v.z); }, offset(dx, dy, dz) { return Vec3(x + dx, y + dy, z + dz); }, distanceTo(v) { return Math.hypot(x - v.x, y - v.y, z - v.z); }, equals(v) { return x === v.x && y === v.y && z === v.z; }, toString() { return `(${x}, ${y}, ${z})`; } }; }')
-  await write(root, 'node_modules/mineflayer-pathfinder/package.json', '{"type":"module","exports":"./index.js"}')
-  await write(root, 'node_modules/mineflayer-pathfinder/index.js', `
+  await write(root, 'src/vendor/mineflayer-pathfinder/package.json', '{"type":"module","exports":"./index.js"}')
+  await write(root, 'src/vendor/mineflayer-pathfinder/index.js', `
 class GoalNear {
   constructor(x, y, z, range) { this.x = Math.floor(x); this.y = Math.floor(y); this.z = Math.floor(z); this.rangeSq = range * range; }
   heuristic(node) { const dx = this.x - node.x; const dy = this.y - node.y; const dz = this.z - node.z; return Math.hypot(dx, dz) + Math.abs(dy); }
