@@ -65,7 +65,7 @@ function scenarioFor(block, collect) {
 
 async function main() {
   const root = path.resolve(process.argv[2])
-  const { collectBlock } = await import(pathToFileURL(path.join(root, 'src/agent/library/skills.js')))
+  const { collectBlock, pickupNearbyItems } = await import(pathToFileURL(path.join(root, 'src/agent/library/skills.js')))
 
   // An inventory increase alone or another player's pickup is not a target collection.
   for (const pickup of ['none', 'other-player']) {
@@ -396,6 +396,19 @@ async function main() {
     assert.equal(await withAcceleratedClock(() => collectBlock(bot, 'iron_ore')), false)
     assert.match(bot.output, /Could not pick up nearby items/)
     assert.doesNotMatch(bot.output, /Failed to collect/)
+  }
+  // Pickup enters an open item cell (hole bottom) but stands on top of a partial block instead of digging it.
+  for (const [boundingBox, rangeSq] of [['empty', 0], ['block', 1]]) {
+    const scenario = scenarioFor(ore(), async () => {})
+    const bot = createBot(scenario)
+    let item = { name: 'item', position: { x: 2, y: 0.9375, z: 0 } }
+    bot.nearestEntity = () => item
+    bot.blockAt = position => ({ name: 'farmland', type: 60, position, boundingBox })
+    let goal = null
+    bot.pathfinder.goto = async next => { goal = next; item = null }
+    await withAcceleratedClock(() => pickupNearbyItems(bot))
+    assert.equal(goal.constructor.name, 'GoalFollow')
+    assert.equal(goal.rangeSq, rangeSq, `item cell boundingBox ${boundingBox}`)
   }
   // The block is re-read after the approach, so a state change does not reach dig as a stale target.
   {

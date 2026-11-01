@@ -1515,8 +1515,11 @@ export async function pickupNearbyItems(bot) {
     let pickedUp = 0;
     while (nearestItem) {
         // Range 1 can stop at the rim of a mined hole, outside the pickup box of
-        // an item at its bottom; enter the item's own cell.
-        await goToGoal(bot, new pf.goals.GoalFollow(nearestItem, 0));
+        // an item at its bottom, so enter the item's own cell. An item resting on
+        // a partial block (farmland, slab) shares that block's cell; standing on
+        // top is within range 1, while range 0 would dig the block out.
+        const itemCellBlocked = bot.blockAt(nearestItem.position)?.boundingBox === 'block';
+        await goToGoal(bot, new pf.goals.GoalFollow(nearestItem, itemCellBlocked ? 1 : 0));
         let prev = nearestItem;
         // A fresh drop cannot be picked up for its first 10 ticks.
         const pickupDeadline = Date.now() + ITEM_PICKUP_WAIT_MS;
