@@ -144,6 +144,9 @@ const NAVIGATION_RECOVERY_MAX_HAZARD_BLOCKS = 2048;
 const NAVIGATION_RECOVERY_MAX_CANDIDATES = 4096;
 const NAVIGATION_RECOVERY_MAX_DURATION_MS = 30_000;
 const NAVIGATION_LANDING_WAIT_MS = 5_000;
+// More than a straight line within block reach can cross.
+const COLLECT_MAX_LINE_CLEARS = 8;
+const COLLECT_DROP_WAIT_MS = 1_000;
 const NAVIGATION_RECOVERY_SEARCH_TIMEOUT_MS = 6_000;
 const NAVIGATION_RECOVERY_SEARCH_TICK_MS = 50;
 const NAVIGATION_RECOVERY_SEARCH_STEPS = 2048;
@@ -427,7 +430,9 @@ function trackBlockCollection(bot, block, expectedItemIds) {
     const trackedDrops = new Map();
     const collectedItems = {};
     let collectedTargetDrop = false;
-    let targetAirObserved = false;
+    let targetGoneObserved = false;
+    // Blocks with no listed drops are confirmed by the server update alone.
+    const dropRequired = expectedItemIds.size > 0;
     const onItemDrop = entity => {
         const center = block.position.offset(0.5, 0.5, 0.5);
         if (!entity.position?.distanceTo || entity.position.distanceTo(center) > COLLECT_DROP_RADIUS) return;
@@ -443,19 +448,27 @@ function trackBlockCollection(bot, block, expectedItemIds) {
     };
     const onBlockUpdate = (oldBlock, newBlock) => {
         if (oldBlock?.position?.x === block.position.x && oldBlock.position.y === block.position.y &&
-            oldBlock.position.z === block.position.z && (newBlock?.type === 0 || newBlock?.name === 'air')) targetAirObserved = true;
+            oldBlock.position.z === block.position.z && newBlock && newBlock.name !== block.name) targetGoneObserved = true;
     };
     bot.on('itemDrop', onItemDrop);
     bot.on('playerCollect', onPlayerCollect);
     bot.on('blockUpdate', onBlockUpdate);
     return {
         collectedItems,
+        // The drop entity arrives after the block update that completes the dig.
+        async waitForDrop(timeoutMs) {
+            const startedAt = Date.now();
+            while (dropRequired && !bot.interrupt_code && !collectedTargetDrop && trackedDrops.size === 0 && Date.now() - startedAt < timeoutMs) {
+                await new Promise(resolve => setTimeout(resolve, 25));
+            }
+        },
         async wait(timeoutMs) {
             const startedAt = Date.now();
             while (!bot.interrupt_code && Date.now() - startedAt < timeoutMs) {
                 const currentBlock = bot.blockAt?.(block.position);
-                const targetAir = targetAirObserved || currentBlock?.type === 0 || currentBlock?.name === 'air';
-                if (collectedTargetDrop && targetAir) return true;
+                // Kelp, ice and waterlogged blocks become water rather than air.
+                const targetGone = targetGoneObserved || (currentBlock != null && currentBlock.name !== block.name);
+                if ((collectedTargetDrop || !dropRequired) && targetGone) return true;
                 await new Promise(resolve => setTimeout(resolve, 25));
             }
             return false;
@@ -1263,6 +1276,20 @@ export async function defendSelf(bot, range=9) {
 }
 
 
+// The route's goal can end with terrain between the bot and a buried target
+// (GoalNear has no line-of-sight condition); dig what the sight line hits.
+async function clearLineToBlock(bot, block) {
+    for (let i = 0; i < COLLECT_MAX_LINE_CLEARS; i++) {
+        const hit = resolveBlockInteraction(bot, block);
+        if (hit.status !== 'blocked' || !hit.obstruction) return;
+        const obstruction = bot.blockAt(new Vec3(hit.obstruction.x, hit.obstruction.y, hit.obstruction.z));
+        if (!obstruction) return;
+        await bot.tool.equipForBlock(obstruction);
+        await bot.dig(obstruction);
+        await awaitNavigationLanding(bot);
+    }
+}
+
 export async function collectBlock(bot, blockType, num=1, exclude=null) {
     /**
      * Collect one of the given block type.
@@ -1284,8 +1311,10 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
         return skillFailure('invalid_quantity', `Invalid number of blocks to collect: ${num}.`);
     }
     let blocktypes = [blockType];
-    if (blockType === 'coal' || blockType === 'diamond' || blockType === 'emerald' || blockType === 'iron' || blockType === 'gold' || blockType === 'lapis_lazuli' || blockType === 'redstone')
-        blocktypes.push(blockType+'_ore');
+    if (blockType === 'coal' || blockType === 'diamond' || blockType === 'emerald' || blockType === 'iron' || blockType === 'gold' || blockType === 'lapis_lazuli' || blockType === 'redstone') {
+        const ore = blockType === 'lapis_lazuli' ? 'lapis_ore' : blockType+'_ore';
+        blocktypes.push(ore, 'deepslate_'+ore);
+    }
     if (blockType.endsWith('ore'))
         blocktypes.push('deepslate_'+blockType);
     if (blockType === 'dirt')
@@ -1312,23 +1341,29 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
 
     const movements = navigationMovements(bot);
     movements.dontMineUnderFallingBlock = false;
-    movements.dontCreateFlow = true;
+    // A released liquid is recoverable; excluding the target would report it as not found.
+    movements.dontCreateFlow = false;
 
     // Blocks to ignore safety for, usually next to lava/water
     const unsafeBlocks = ['obsidian'];
 
-    for (let i=0; i<num; i++) {
+    // Targets that disappeared during the approach; they do not use up the count.
+    const skipped = [...(exclude ?? [])];
+    const isCancelled = () => !!bot.interrupt_code || operationContext()?.signal?.aborted === true;
+    while (collected + unconfirmed < num) {
+        if (isCancelled()) {
+            stop = { code: 'cancelled', reason: 'Collection was interrupted.' };
+            break;
+        }
         let blocks = world.getNearestBlocksWhere(bot, block => {
             if (!blocktypes.includes(block.name)) {
                 return false;
             }
             // Palette entries have no position; defer coordinate and terrain checks to the positioned pass.
             if (!block.position) return true;
-            if (exclude) {
-                for (let position of exclude) {
-                    if (block.position.x === position.x && block.position.y === position.y && block.position.z === position.z) {
-                        return false;
-                    }
+            for (let position of skipped) {
+                if (block.position.x === position.x && block.position.y === position.y && block.position.z === position.z) {
+                    return false;
                 }
             }
             if (isLiquid) {
@@ -1364,8 +1399,11 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
         const expectedItemIds = new Set();
         for (const drop of block.drops ?? []) {
             const id = typeof drop === 'number' ? drop : typeof drop.drop === 'number' ? drop.drop : drop.drop?.id;
-            if (Number.isInteger(id)) expectedItemIds.add(id);
+            // minecraft-data lists "air" (item 0) for some blocks that drop nothing.
+            if (Number.isInteger(id) && id > 0) expectedItemIds.add(id);
         }
+        // minecraft-data lists only gravel, but gravel can drop flint instead.
+        if (block.name === 'gravel') for (const id of itemIdsForNames(bot, ['flint'])) expectedItemIds.add(id);
         const silkTouch = bot.heldItem?.enchants?.some(enchant => enchant.name === 'silk_touch' && enchant.lvl > 0);
         if (silkTouch) {
             const blockItemId = bot.registry?.itemsByName?.[block.name]?.id;
@@ -1376,32 +1414,56 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
         }
         const crop = CROPS[block.name];
         for (const id of itemIdsForNames(bot, [...(crop?.produce ?? []), ...(crop ? [crop.seed] : [])])) expectedItemIds.add(id);
+        if (!isLiquid && expectedItemIds.size > 0 && bot.inventory.emptySlotCount() === 0 &&
+            !bot.inventory.items().some(item => expectedItemIds.has(item.type) && item.count < item.stackSize)) {
+            stop = { code: 'inventory_full', reason: `Failed to collect ${blockType}: Inventory full, no room for its drops.` };
+            log(bot, stop.reason);
+            break;
+        }
         const collectionTracker = !isLiquid ? trackBlockCollection(bot, block, expectedItemIds) : null;
         try {
             let success = false;
             if (isLiquid) {
                 success = await useToolOnBlock(bot, 'bucket', block);
-            }
-            else if (mc.mustCollectManually(blockType)) {
-                if (await goToPosition(bot, block.position.x, block.position.y, block.position.z, 2)) {
-                    await trackNavigationSegment(bot, () => bot.dig(block), { workTarget: block.position });
-                    await pickupNearbyItems(bot);
-                    success = true;
+                if (!success) {
+                    stop = { code: 'collect_error', reason: `Failed to collect ${blockType}: could not use a bucket on it.`, failedPhase: 'collect',
+                        target: { name: block.name, position: { x: block.position.x, y: block.position.y, z: block.position.z } } };
+                    log(bot, stop.reason);
+                    break;
                 }
             }
             else {
+                let targetGone = false;
                 // mineflayer-collectblock's collect() waits for its drop entity
                 // without a deadline or cancellation; a missed entityGone hung
                 // the action until the stop watchdog restarted the bot.
                 await trackNavigationSegment(bot, async () => {
-                    await goToGoal(bot, block.name.endsWith('_ore')
+                    await goToGoal(bot, block.name.endsWith('_ore') || mc.mustCollectManually(blockType)
                         ? new pf.goals.GoalNear(block.position.x, block.position.y, block.position.z, 2)
                         : new pf.goals.GoalLookAtBlock(block.position, bot.world), movements);
+                    await clearLineToBlock(bot, block);
+                    // The target's state or the block itself may have changed during the approach.
+                    const current = bot.blockAt(block.position);
+                    if (!blocktypes.includes(current?.name)) {
+                        targetGone = true;
+                        return;
+                    }
                     // Navigation scaffolding can change the held item.
-                    await bot.tool.equipForBlock(block);
-                    await bot.dig(block);
+                    await bot.tool.equipForBlock(current);
+                    await bot.dig(current);
                 }, { workTarget: block.position });
-                await pickupNearbyItems(bot);
+                if (targetGone) {
+                    skipped.push(block.position);
+                    continue;
+                }
+                // The block is already broken; a drop that cannot be reached must not end the collection.
+                try {
+                    await collectionTracker.waitForDrop(COLLECT_DROP_WAIT_MS);
+                    await pickupNearbyItems(bot);
+                }
+                catch (err) {
+                    log(bot, `Could not pick up nearby items: ${err}.`);
+                }
                 success = true;
             }
             if (success && !isLiquid) {
@@ -1419,15 +1481,9 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             await autoLight(bot);
         }
         catch (err) {
-            if (err.name === 'NoChests') {
-                stop = { code: 'inventory_full', reason: `Failed to collect ${blockType}: Inventory full, no place to deposit.` };
-                log(bot, stop.reason);
-                break;
-            }
             // Retrying would pick the same nearest block; return the observed cause
             // with the confirmed quantity and let the caller choose the next step.
-            const cancelled = !!bot.interrupt_code || operationContext()?.signal?.aborted === true;
-            stop = { code: cancelled ? 'cancelled' : err.navigation?.code ?? 'collect_error',
+            stop = { code: isCancelled() ? 'cancelled' : err.navigation?.code ?? 'collect_error',
                 reason: `Failed to collect ${blockType}: ${err}.`, failedPhase: err.navigation ? 'approach' : 'collect',
                 target: { name: block.name, position: { x: block.position.x, y: block.position.y, z: block.position.z } },
                 finalPosition: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
@@ -1438,11 +1494,6 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
         finally {
             if (collectionTracker) for (const [name, count] of Object.entries(collectionTracker.collectedItems)) collectedItems[name] = (collectedItems[name] ?? 0) + count;
             collectionTracker?.cleanup();
-        }
-        
-        if (bot.interrupt_code) {
-            stop = { code: 'cancelled', reason: 'Collection was interrupted.' };
-            break;
         }
     }
     log(bot, `Collected ${collected} ${blockType}.`);
@@ -1462,9 +1513,6 @@ export async function pickupNearbyItems(bot) {
     let nearestItem = getNearestItem(bot);
     let pickedUp = 0;
     while (nearestItem) {
-        let movements = navigationMovements(bot);
-        movements.canDig = false;
-        bot.pathfinder.setMovements(movements);
         await goToGoal(bot, new pf.goals.GoalFollow(nearestItem, 1));
         await new Promise(resolve => setTimeout(resolve, 200));
         let prev = nearestItem;

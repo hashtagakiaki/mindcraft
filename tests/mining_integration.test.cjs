@@ -15,10 +15,10 @@ function createBot(scenario) {
   bot.registry.items[20] = { name: 'iron_ore' }
   bot.registry.items[30] = { name: 'wheat' }
   bot.registry.items[31] = { name: 'wheat_seeds' }
-  bot.entity = { id: 1, position: { x: 0, y: 0, z: 0, floored() { return this } } }
+  bot.entity = { id: 1, position: { x: 0, y: 0, z: 0, floored() { return this }, offset() { return this } }, onGround: true }
   bot.pathfinder = { goals: [], setMovements() {}, getPathTo: () => ({ status: 'success' }),
     async goto(goal) { this.goals.push(goal) } }
-  bot.inventory = { items: () => scenario.items ?? [], slots: scenario.items ?? [] }
+  bot.inventory = { items: () => scenario.items ?? [], slots: scenario.items ?? [], emptySlotCount: () => scenario.emptySlots ?? 1 }
   bot.modes = { isOn: () => true }
   bot.tool = { async equipForBlock() { bot.heldItem = scenario.heldItem ?? { type: 1, enchants: [] } } }
   // collectBlock digs directly; the plugin's unbounded collect() is not used.
@@ -29,9 +29,9 @@ function createBot(scenario) {
     scenario.collectBlocks.shift()
   }
   bot.nearestEntity = () => null
-  bot.blockAt = () => scenario.currentAir
-    ? { name: 'air', type: 0 }
-    : { name: scenario.collectBlocks[0]?.name ?? 'iron_ore', type: 15 }
+  bot.blockAt = position => scenario.currentAir
+    ? { name: 'air', type: 0, position }
+    : { name: scenario.collectBlocks[0]?.name ?? 'iron_ore', type: 15, position }
   bot.chat = () => {}
   return bot
 }
@@ -383,6 +383,101 @@ async function main() {
     assert.deepEqual(result.target.position, { x: 1, y: 0, z: 0 })
     assert.equal(result.navigation.code, 'route_not_found')
     assert.deepEqual([result.confirmedQuantity, result.remainingQuantity], [0, 3])
+  }
+
+  // A drop that cannot be reached leaves the broken block unconfirmed and does not end the collection.
+  {
+    const scenario = scenarioFor(ore(), async () => { scenario.currentAir = true })
+    const bot = createBot(scenario)
+    bot.nearestEntity = () => ({ name: 'item', position: { x: 2, y: 0, z: 0 } })
+    bot.pathfinder.goto = async goal => {
+      if (goal.constructor.name === 'GoalFollow') throw new Error('item is unreachable')
+    }
+    assert.equal(await withAcceleratedClock(() => collectBlock(bot, 'iron_ore')), false)
+    assert.match(bot.output, /Could not pick up nearby items/)
+    assert.doesNotMatch(bot.output, /Failed to collect/)
+  }
+  // The block is re-read after the approach, so a state change does not reach dig as a stale target.
+  {
+    const scenario = scenarioFor(ore(), async block => {
+      assert.equal(block.stateId, 2)
+      spawnAndPickup(bot)
+      scenario.currentAir = true
+    })
+    const bot = createBot(scenario)
+    const blockAt = bot.blockAt
+    bot.blockAt = position => ({ ...blockAt(position), stateId: 2 })
+    assert.equal(await collectBlock(bot, 'iron_ore'), true)
+  }
+  // A target that disappears during the approach is skipped without using up the count.
+  {
+    const first = ore()
+    const second = ore()
+    second.position = { x: 2, y: 0, z: 0, offset(dx, dy, dz) { return { x: 2 + dx, y: dy, z: dz } } }
+    const dug = []
+    const scenario = {
+      collectBlocks: [first, second], currentAir: false,
+      async collect(block, bot) {
+        dug.push(block.position.x)
+        spawnAndPickup(bot, droppedItem(10, 2.5))
+      }
+    }
+    const bot = createBot(scenario)
+    // The first target is already gone; the second one is gone once it is dug.
+    bot.blockAt = position => position.x === 2 && dug.length === 0
+      ? { name: 'iron_ore', type: 15, position }
+      : { name: 'air', type: 0, position }
+    assert.equal(await collectBlock(bot, 'iron_ore'), true)
+    assert.deepEqual(dug, [2])
+  }
+  // Blocks with no listed drops, or only "air", are confirmed by the server update alone.
+  for (const drops of [[], [0]]) {
+    const scenario = scenarioFor(ore({ drops }), async () => { scenario.currentAir = true })
+    assert.equal(await collectBlock(createBot(scenario), 'iron_ore'), true)
+  }
+  // A block replaced by water counts as removed.
+  {
+    const scenario = scenarioFor(ore({ drops: [] }), async () => { scenario.water = true })
+    const bot = createBot(scenario)
+    const blockAt = bot.blockAt
+    bot.blockAt = position => scenario.water ? { name: 'water', type: 26, position } : blockAt(position)
+    assert.equal(await collectBlock(bot, 'iron_ore'), true)
+  }
+  // A full inventory stops before digging; a stack with room for the drop does not.
+  {
+    const scenario = scenarioFor(ore(), async () => { throw new Error('must not dig with no room') })
+    scenario.emptySlots = 0
+    scenario.items = [{ type: 10, count: 64, stackSize: 64 }]
+    const bot = createBot(scenario)
+    assert.equal(await collectBlock(bot, 'iron_ore'), false)
+    assert.match(bot.output, /Inventory full/)
+  }
+  {
+    const scenario = scenarioFor(ore(), async (_block, bot) => {
+      spawnAndPickup(bot)
+      scenario.currentAir = true
+    })
+    scenario.emptySlots = 0
+    scenario.items = [{ type: 10, count: 63, stackSize: 64 }]
+    assert.equal(await collectBlock(createBot(scenario), 'iron_ore'), true)
+  }
+  // A failed approach to a hand-collected block returns its cause and does not retry.
+  {
+    const scenario = scenarioFor(ore({ name: 'wheat', drops: [31] }), async () => { throw new Error('must not dig') })
+    const bot = createBot(scenario)
+    let approaches = 0
+    bot.pathfinder.goto = async () => { approaches++; throw new Error('no route') }
+    assert.equal(await collectBlock(bot, 'wheat', 3), false)
+    assert.equal(approaches, 1)
+    assert.match(bot.output, /Failed to collect wheat/)
+  }
+  // Short ore names include both real ore variants.
+  for (const [short, name] of [['lapis_lazuli', 'lapis_ore'], ['lapis_lazuli', 'deepslate_lapis_ore'], ['iron', 'deepslate_iron_ore']]) {
+    const scenario = scenarioFor(ore({ name }), async (_block, bot) => {
+      spawnAndPickup(bot)
+      scenario.currentAir = true
+    })
+    assert.equal(await collectBlock(createBot(scenario), short), true, `${short} finds ${name}`)
   }
 
   console.log('mining integration tests passed')

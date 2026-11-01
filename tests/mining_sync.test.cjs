@@ -194,6 +194,15 @@ async function main() {
     assert.equal(bot.listenerCount(`blockUpdate:${block.position}`), 0)
     assert.equal(bot.targetDigBlock, null)
   }
+  // A block the server replaces with water completes the dig.
+  {
+    const { bot, block } = fixture({ digMs: 5_000, confirmationGraceMs: 2_000 })
+    const digging = bot.dig(block, 'ignore')
+    await sleep(0)
+    bot.emit(`blockUpdate:${block.position}`, block, { type: 26, name: 'water', position: block.position })
+    await digging
+    assert.equal(bot.listenerCount(`blockUpdate:${block.position}`), 0)
+  }
   // A long dig records its expected duration and finite server-confirmation deadline.
   {
     const { bot, block } = fixture({ digMs: 30_000, confirmationGraceMs: 2_000 })

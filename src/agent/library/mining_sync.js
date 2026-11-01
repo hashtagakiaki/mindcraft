@@ -315,6 +315,13 @@ function installDigContract (bot, state, options) {
         if (!operation.serverConfirmed) record('bot_dig_server_confirmation', { stage: 'target_block_update', status: 'air',
           position: operation.position, afterStartMs: Date.now() - operation.startedAt })
         operation.serverConfirmed = true
+      } else if (newBlock && newBlock.type !== block.type && operation.startedAt != null) {
+        // Kelp, ice and waterlogged blocks become water, but mineflayer's dig
+        // only completes on air (and the client's inferred air was held back).
+        record('bot_dig_server_confirmation', { stage: 'target_block_update', status: newBlock.name,
+          position: operation.position, afterStartMs: Date.now() - operation.startedAt })
+        operation.serverConfirmed = true
+        bot.emit(eventName, _oldBlock, { type: 0, name: 'air', position: newBlock.position })
       }
     }
     bot.prependListener('blockUpdate', onGlobalServerUpdate)
