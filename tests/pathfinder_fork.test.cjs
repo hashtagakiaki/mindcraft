@@ -26,6 +26,11 @@ function testTrimKeepsMoveBeforeEditNode () {
   const plain = [move(0.5, 64, 0.5), move(1.5, 64, 0.5), move(2.5, 64, 0.5)]
   trimPassedNodes(plain, new Vec3(0.9, 64, 0.5))
   assert.equal(plain[0].x, 1.5, 'between plain nodes the passed node is still dropped')
+
+  // Replanning mid-jump: y=66 is still above the bot, and without it the next node is out of jump reach.
+  const climb = [move(-144.5, 66, -109.5), move(-143.5, 67, -108.5), move(-142.5, 68, -107.5)]
+  trimPassedNodes(climb, new Vec3(-144.69, 65.75, -108.53))
+  assert.equal(climb[0].y, 66, 'a node above the bot is not passed')
 }
 
 const { EventEmitter } = require('node:events')

@@ -33,7 +33,10 @@ function trimPassedNodes (path, position) {
     const n2Edits = n2.toBreak.length > 0 || n2.toPlace.length > 0
     const d2 = position.distanceSquared(n2)
     const d12 = n1.distanceSquared(n2)
-    minI += reached || (!n2Edits && d12 > d2) ? 1 : 0
+    // A node above the bot has not been passed: mid-jump the next step up can look
+    // closer, and dropping this node would leave one that is two blocks too high.
+    const passed = !n2Edits && d12 > d2 && position.y >= n1.y
+    minI += reached || passed ? 1 : 0
   }
 
   path.splice(0, minI)
