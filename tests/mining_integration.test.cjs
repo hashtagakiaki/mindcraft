@@ -15,7 +15,7 @@ function createBot(scenario) {
   bot.registry.items[20] = { name: 'iron_ore' }
   bot.registry.items[30] = { name: 'wheat' }
   bot.registry.items[31] = { name: 'wheat_seeds' }
-  bot.entity = { id: 1, position: { x: 0, y: 0, z: 0, floored() { return this }, offset() { return this } }, onGround: true }
+  bot.entity = { id: 1, position: { x: 0, y: 0, z: 0, floored() { return this }, offset() { return this }, clone() { return this } }, onGround: true }
   bot.pathfinder = { goals: [], setMovements() {}, getPathTo: () => ({ status: 'success' }),
     async goto(goal) { this.goals.push(goal) } }
   bot.inventory = { items: () => scenario.items ?? [], slots: scenario.items ?? [], emptySlotCount: () => scenario.emptySlots ?? 1 }
@@ -478,6 +478,18 @@ async function main() {
       scenario.currentAir = true
     })
     assert.equal(await collectBlock(createBot(scenario), short), true, `${short} finds ${name}`)
+  }
+
+  // Pickup enters the item's own cell: range 1 can stop at the rim above an item in a mined hole.
+  {
+    const scenario = scenarioFor(ore(), async (_block, bot) => {
+      spawnAndPickup(bot)
+      scenario.currentAir = true
+    })
+    const bot = createBot(scenario)
+    bot.nearestEntity = () => ({ name: 'item', position: { x: 1.5, y: -1, z: 0.5 } })
+    assert.equal(await collectBlock(bot, 'iron_ore'), true)
+    assert.deepEqual(scenario.followRanges, [0])
   }
 
   console.log('mining integration tests passed')

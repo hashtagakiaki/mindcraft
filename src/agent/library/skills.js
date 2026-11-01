@@ -147,6 +147,7 @@ const NAVIGATION_LANDING_WAIT_MS = 5_000;
 // More than a straight line within block reach can cross.
 const COLLECT_MAX_LINE_CLEARS = 8;
 const COLLECT_DROP_WAIT_MS = 1_000;
+const ITEM_PICKUP_WAIT_MS = 750;
 const NAVIGATION_RECOVERY_SEARCH_TIMEOUT_MS = 6_000;
 const NAVIGATION_RECOVERY_SEARCH_TICK_MS = 50;
 const NAVIGATION_RECOVERY_SEARCH_STEPS = 2048;
@@ -1513,10 +1514,16 @@ export async function pickupNearbyItems(bot) {
     let nearestItem = getNearestItem(bot);
     let pickedUp = 0;
     while (nearestItem) {
-        await goToGoal(bot, new pf.goals.GoalFollow(nearestItem, 1));
-        await new Promise(resolve => setTimeout(resolve, 200));
+        // Range 1 can stop at the rim of a mined hole, outside the pickup box of
+        // an item at its bottom; enter the item's own cell.
+        await goToGoal(bot, new pf.goals.GoalFollow(nearestItem, 0));
         let prev = nearestItem;
-        nearestItem = getNearestItem(bot);
+        // A fresh drop cannot be picked up for its first 10 ticks.
+        const pickupDeadline = Date.now() + ITEM_PICKUP_WAIT_MS;
+        do {
+            await new Promise(resolve => setTimeout(resolve, 50));
+            nearestItem = getNearestItem(bot);
+        } while (nearestItem === prev && !bot.interrupt_code && Date.now() < pickupDeadline);
         if (prev === nearestItem) {
             break;
         }
