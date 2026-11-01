@@ -538,11 +538,16 @@ async function testNavigation(root) {
   const detour = skills.goToGoal(bot, { heuristic: () => 10 })
   const detourRejected = assert.rejects(detour, /made no goal or new route-segment progress/)
   await delay(12)
+  // A partial search emits path_update every tick, ahead of the stall check.
+  const emitDetourUpdate = () => bot.emit('path_update', { status: 'partial', path: [0, 1, 2, 3].map(x => ({ x, y: 0, z: 0 })) })
   bot.entity.position.x = 1
+  emitDetourUpdate()
   await delay(12)
   bot.entity.position.x = 2
+  emitDetourUpdate()
   await delay(12)
   bot.entity.position.x = 3
+  emitDetourUpdate()
   await delay(12)
   assert.equal(stopCalls, 0, 'reaching new finite route segments keeps a necessary detour alive')
   await detourRejected

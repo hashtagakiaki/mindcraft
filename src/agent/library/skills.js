@@ -2828,12 +2828,6 @@ export async function goToGoal(bot, goal, movementOverride=null) {
                 pathNodeCount: activeRouteNodes.length, routeNodes: activeRouteNodes.slice(0, 32),
                 omittedNodeCount: Math.max(0, activeRouteNodes.length - 32) });
         }
-        const position = bot.entity.position;
-        for (const node of activeRouteNodes) {
-            if (Math.abs(position.x - node.x) <= 0.5 && Math.abs(position.z - node.z) <= 0.5 && Math.abs(position.y - node.y) < 1) {
-                seenRouteSegments.add(positionKey(node));
-            }
-        }
     };
     const onPathReset = reason => {
         recordNavigationDiagnostic(bot, 'navigation_path_reset', { routeId: navigationRouteId,
