@@ -58,7 +58,7 @@ const key = p => `${p.x},${p.y},${p.z}`
 function block(name, position, properties = {}) {
   return { name, position, type: registry.blocksByName[name]?.id ?? 0,
     boundingBox: ['air', 'cave_air', 'void_air'].includes(name) ? 'empty' : 'block',
-    shapes: name === 'air' ? [] : [[0, 0, 0, 1, 1, 1]],
+    shapes: ['air', 'water'].includes(name) ? [] : [[0, 0, 0, 1, 1, 1]],
     getProperties: () => ({ ...properties }) }
 }
 
@@ -131,8 +131,8 @@ function makeBot({ initial = null, result = { name: 'furnace', properties: { fac
   bot.chat = command => {
     state.commands.push(command)
     if (!command.startsWith('/setblock ') || state.update === 'absent') return
-    const match = command.match(/^\/setblock (-?\d+) (-?\d+) (-?\d+) ([a-z_]+)(?:\[([^\]]*)\])? keep$/)
-    assert.ok(match, 'cheat uses safe registry-derived block state and keep')
+    const match = command.match(/^\/setblock (-?\d+) (-?\d+) (-?\d+) ([a-z_]+)(?:\[([^\]]*)\])? (keep|replace)$/)
+    assert.ok(match, 'cheat uses safe registry-derived block state and an explicit mode')
     const p = new Vec3(Number(match[1]), Number(match[2]), Number(match[3]))
     const properties = Object.fromEntries((match[5] || '').split(',').filter(Boolean).map(entry => entry.split('=')))
     const name = state.update === 'wrong' ? 'stone' : match[4]
@@ -232,6 +232,19 @@ async function main() {
       assert.equal(bot.state.digs, 0)
       assert.ok(ownedResult.result.unconfirmedChanges.length)
     }
+
+    // Vanilla replaces a fluid in place and the server waterlogs eligible blocks.
+    bot = makeBot({ initial: { name: 'water', properties: { level: '0' } }, item: 'oak_slab', result: { name: 'oak_slab', properties: { type: 'bottom', waterlogged: 'true' } } })
+    assert.equal(await invoke(bot, 'oak_slab', { half: 'bottom' }), true, 'a slab can be placed into water')
+    assert.equal(bot.state.packets.filter(([name]) => name === 'block_place').length, 1)
+    assert.equal(bot.state.digs, 0)
+    bot = makeBot({ initial: { name: 'water', properties: { level: '0' } }, cheat: true })
+    assert.equal(await invoke(bot), true, 'cheat placement also replaces water')
+    assert.deepEqual(bot.state.commands, ['/setblock 0 65 0 furnace[facing=north] replace'])
+    bot = makeBot({ support: false })
+    bot.state.world.set('0,64,0', block('water', new Vec3(0, 64, 0), { level: '0' }))
+    assert.equal(await invoke(bot), false, 'water is not a placement support')
+    assert.equal(bot.state.pluginCalls, 0)
 
     for (const [name, options] of [
       ['furnace', { facing: 'northeast' }], ['furnace', { axis: 'x' }],

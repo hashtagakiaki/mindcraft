@@ -11,7 +11,9 @@ const DIRECTIONS = {
     top: [0, 1, 0], bottom: [0, -1, 0],
 };
 const OPPOSITE = { north: 'south', south: 'north', east: 'west', west: 'east', up: 'down', down: 'up' };
-const EMPTY = new Set(['air', 'cave_air', 'void_air', 'short_grass', 'tall_grass', 'fern', 'dead_bush', 'snow']);
+const AIR = new Set(['air', 'cave_air', 'void_air']);
+// Vanilla placement replaces these in place; they cannot support a block.
+const REPLACEABLE = new Set([...AIR, 'short_grass', 'tall_grass', 'fern', 'dead_bush', 'snow', 'water', 'lava', 'bubble_column', 'seagrass', 'tall_seagrass']);
 const SIX_WAY = new Set(['observer', 'piston', 'sticky_piston', 'dispenser', 'dropper']);
 const HORIZONTAL_BLOCKS = new Set(['furnace', 'blast_furnace', 'smoker', 'chest', 'trapped_chest', 'repeater', 'comparator']);
 const TORCH_ITEMS = new Set(['torch', 'redstone_torch', 'soul_torch']);
@@ -133,7 +135,7 @@ function assertEmpty(bot, targets) {
     for (const target of targets) {
         const block = bot.blockAt(target.position);
         if (!block) throw new Error(`Placement target is not observed at ${target.position}.`);
-        if (!EMPTY.has(block.name)) throw new Error(`Placement target is occupied by ${block.name} at ${target.position}; it was not replaced.`);
+        if (!REPLACEABLE.has(block.name)) throw new Error(`Placement target is occupied by ${block.name} at ${target.position}; it was not replaced.`);
     }
 }
 
@@ -185,7 +187,7 @@ function headingFor(request) {
 export function makePlacementGoal(bot, request, targets = expectedBlocks(request)) {
     const faces = supportDirections(request).map(side => new Vec3(...DIRECTIONS[side])).filter(direction => {
         const block = bot.blockAt(request.position.plus(direction));
-        return block && !EMPTY.has(block.name) && block.shapes?.length;
+        return block && !REPLACEABLE.has(block.name) && block.shapes?.length;
     });
     if (!faces.length) throw new Error('No observed usable support for the requested placement.');
     const heading = headingFor(request);
@@ -230,12 +232,12 @@ export function makePlacementGoal(bot, request, targets = expectedBlocks(request
 
 function supportRequirements(bot, request, targets) {
     const supports = supportDirections(request).map(side => bot.blockAt(request.position.plus(new Vec3(...DIRECTIONS[side]))));
-    if (!supports.some(block => block && !EMPTY.has(block.name) && block.shapes?.length)) throw new Error('Required support is missing or unobserved.');
+    if (!supports.some(block => block && !REPLACEABLE.has(block.name) && block.shapes?.length)) throw new Error('Required support is missing or unobserved.');
     if (request.family === 'bed' || request.family === 'door' || ['repeater', 'comparator'].includes(request.name)) {
         const floorTargets = request.family === 'bed' ? targets : targets.slice(0, 1);
         for (const target of floorTargets) {
             const block = bot.blockAt(target.position.offset(0, -1, 0));
-            if (!block || EMPTY.has(block.name) || !block.shapes?.length) throw new Error(`Required floor support is missing or unobserved at ${target.position}.`);
+            if (!block || REPLACEABLE.has(block.name) || !block.shapes?.length) throw new Error(`Required floor support is missing or unobserved at ${target.position}.`);
         }
     }
 }
@@ -327,7 +329,9 @@ export async function placeBlockOriented(bot, blockType, position, options, dont
                 if (cancelled(bot)) return fail('Action cancelled during cheat placement.');
                 const state = Object.entries(target.properties).map(([key, value]) => `${key}=${value}`).join(',');
                 const { x, y, z } = target.position;
-                bot.chat(`/setblock ${x} ${y} ${z} ${target.name}${state ? `[${state}]` : ''} keep`);
+                // `keep` only writes over air; assertEmpty already admitted any other target.
+                const mode = AIR.has(bot.blockAt(target.position).name) ? 'keep' : 'replace';
+                bot.chat(`/setblock ${x} ${y} ${z} ${target.name}${state ? `[${state}]` : ''} ${mode}`);
             }
         } else {
             let item = bot.inventory.findInventoryItem(request.item);
