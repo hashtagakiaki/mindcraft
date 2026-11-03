@@ -398,8 +398,7 @@ function nativeExecutionSafety(windowMs, metadata) {
             const failed = action && (result === false || result?.ok === false || incomplete)
                 || method === 'skills.approachBlock' && workResult?.status !== 'ready'
                 || method === 'skills.fellTree' && workResult?.status !== 'complete'
-                || method === 'skills.goToPosition' && (result?.status !== 'reached' || result?.ok !== true)
-                || method === 'skills.reachPosition' && (result?.status !== 'reached' || result?.ok !== true);
+                || method === 'skills.goToPosition' && (result?.status !== 'reached' || result?.ok !== true);
             if (failed) throw fail(method, new Error(`${method} failed: ${result === false ? "returned false" : result?.status ?? "ok:false"}${result?.code ? ` (${result.code}${result.reason ? `: ${result.reason}` : ''})` : ''}`), result);
             return result;
         },

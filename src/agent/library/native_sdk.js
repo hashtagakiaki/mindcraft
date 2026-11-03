@@ -18,28 +18,19 @@ const optional = descriptor => Object.freeze({ ...descriptor, optional: true });
 const enumeration = (values, options = {}) => field('enum', { values, ...options });
 const quantity = options => field('quantity', options);
 const placeKinds = ['base', 'farm', 'storage', 'forest', 'village', 'mine', 'resource', 'other'];
-const PRESERVE_ROUTE = Object.freeze({ allowDig: false, scaffold: 'forbid', scaffoldBlocks: Object.freeze([]) });
-const PRESERVE_WITH_CLEANUP = Object.freeze({ allowDig: false, scaffold: 'temporary', scaffoldBlocks: Object.freeze(['dirt', 'cobblestone']) });
-const EDIT_ROUTE = Object.freeze({ allowDig: true, scaffold: 'leave', scaffoldBlocks: Object.freeze(['dirt', 'cobblestone']) });
-const EXPLORE_ROUTE = Object.freeze({ allowDig: true, scaffold: 'forbid', scaffoldBlocks: Object.freeze([]) });
-const COMBAT_ROUTE = Object.freeze({ allowDig: false, scaffold: 'leave', scaffoldBlocks: Object.freeze(['dirt', 'cobblestone']), allowTowers: false });
-const navigationPolicies = Object.freeze({
-    'skills.goToPosition': PRESERVE_WITH_CLEANUP, 'skills.reachPosition': EDIT_ROUTE,
-    'skills.craftItem': PRESERVE_ROUTE, 'skills.smeltItem': PRESERVE_ROUTE, 'skills.clearNearestFurnace': PRESERVE_ROUTE,
-    'skills.attackNearest': COMBAT_ROUTE, 'skills.attackEntity': COMBAT_ROUTE, 'skills.defendSelf': COMBAT_ROUTE,
-    'skills.collectBlock': EDIT_ROUTE, 'skills.pickupNearbyItems': PRESERVE_ROUTE,
-    'skills.breakBlockAt': PRESERVE_ROUTE, 'skills.approachBlock': PRESERVE_ROUTE, 'skills.inspectChest': PRESERVE_ROUTE,
-    'skills.putInChest': PRESERVE_ROUTE, 'skills.takeFromChest': PRESERVE_ROUTE,
-    'skills.giveToPlayer': PRESERVE_ROUTE, 'skills.receiveFromPlayer': PRESERVE_ROUTE, 'skills.goToNearestBlock': PRESERVE_ROUTE, 'skills.goToNearestEntity': PRESERVE_ROUTE, 'skills.exploreUntilBlock': EXPLORE_ROUTE,
-    'skills.goToPlayer': PRESERVE_ROUTE, 'skills.followPlayer': PRESERVE_ROUTE,
-    'skills.moveAway': COMBAT_ROUTE, 'skills.moveAwayFromEntity': COMBAT_ROUTE, 'skills.avoidEnemies': COMBAT_ROUTE,
-    'skills.skipNight': PRESERVE_ROUTE, 'skills.useDoor': PRESERVE_ROUTE, 'skills.tillAndSow': PRESERVE_ROUTE,
-    'skills.activateNearestBlock': PRESERVE_ROUTE, 'skills.showVillagerTrades': PRESERVE_ROUTE,
-    'skills.tradeWithVillager': PRESERVE_ROUTE, 'skills.goToSurface': EDIT_ROUTE, 'skills.tendNearbyFarm': PRESERVE_ROUTE,
-    'skills.fellTree': PRESERVE_ROUTE, 'skills.placeBlock': PRESERVE_ROUTE, 'skills.useToolOn': PRESERVE_ROUTE,
-    'skills.useToolOnBlock': PRESERVE_ROUTE,
-    'places.goTo': PRESERVE_ROUTE, 'places.goToAlias': PRESERVE_ROUTE, 'places.tendFarm': PRESERVE_ROUTE,
-});
+// One fixed route policy for every model-facing movement. places.protectArea boxes
+// keep shared builds intact, so routes elsewhere may dig and leave scaffolds.
+const ROUTE_POLICY = Object.freeze({ allowDig: true, scaffold: 'leave', scaffoldBlocks: Object.freeze(['dirt', 'cobblestone']) });
+const navigationPolicies = Object.freeze(Object.fromEntries([
+    'skills.goToPosition', 'skills.craftItem', 'skills.smeltItem', 'skills.clearNearestFurnace', 'skills.attackNearest',
+    'skills.attackEntity', 'skills.defendSelf', 'skills.collectBlock', 'skills.pickupNearbyItems', 'skills.breakBlockAt',
+    'skills.approachBlock', 'skills.inspectChest', 'skills.putInChest', 'skills.takeFromChest', 'skills.giveToPlayer',
+    'skills.receiveFromPlayer', 'skills.goToNearestBlock', 'skills.goToNearestEntity', 'skills.exploreUntilBlock', 'skills.goToPlayer',
+    'skills.followPlayer', 'skills.moveAway', 'skills.moveAwayFromEntity', 'skills.avoidEnemies', 'skills.skipNight', 'skills.useDoor',
+    'skills.tillAndSow', 'skills.activateNearestBlock', 'skills.showVillagerTrades', 'skills.tradeWithVillager', 'skills.goToSurface',
+    'skills.tendNearbyFarm', 'skills.fellTree', 'skills.placeBlock', 'skills.useToolOn', 'skills.useToolOnBlock', 'places.goTo',
+    'places.goToAlias', 'places.tendFarm',
+].map(method => [method, ROUTE_POLICY])));
 const farmFields = Object.freeze({
     scope: enumeration(['connected', 'radius'], { default: 'connected' }),
     searchRadius: optional(radius(undefined, { positive: true, description: 'Connected-plot search radius; effective default 32.' })),
@@ -65,26 +56,20 @@ function define(namespace, name, fields, description, args, options = {}) {
         kind, completion: options.completion ?? (kind === 'query' ? 'data' : 'truthy'),
         bindBot: namespace === 'skills' || namespace === 'world', ...options }));
 }
-const policyDescription = policy => (policy === EDIT_ROUTE
-    ? 'Its route may dig and leave confirmed dirt/cobblestone scaffolds; the selected work target keeps this skill’s own permissions.'
-    : policy === EXPLORE_ROUTE
-        ? 'Its route may dig through obstacles such as leaves and vines but places no scaffolds.'
-    : policy === COMBAT_ROUTE
-        ? 'Its route cannot dig or use one-block towers and may place confirmed dirt/cobblestone bridge scaffolds that may remain; the existing target/follow/retreat goal is preserved.'
-        : 'Its ordinary route preserves existing blocks and leaves no route scaffolds; an unreachable target returns this skill’s normal failure result.')
+const routePolicyDescription = 'Its route may dig and leave confirmed dirt/cobblestone scaffolds; the selected work target keeps this skill’s own permissions.'
     + ' Routes never dig or place scaffolds inside places.protectArea boxes.'
-    + ' If the bot starts in an observed hazard, survival egress may dig or place confirmed blocks to reach a safe landing before the ordinary route policy resumes.';
+    + ' If the bot starts in an observed hazard, survival egress may dig or place confirmed blocks to reach a safe landing before the ordinary route resumes.';
 const s = (name, fields, description, args, options = {}) => {
     const navigationPolicy = navigationPolicies[`skills.${name}`];
     return define('skills', name, fields,
-        navigationPolicy ? `${description} ${policyDescription(navigationPolicy)}` : description, args,
+        navigationPolicy ? `${description} ${routePolicyDescription}` : description, args,
         { ...options, ...(navigationPolicy ? { navigationPolicy } : {}) });
 };
 const w = (name, fields, description, args, options) => define('world', name, fields, description, args, options);
 const p = (name, fields, description, args, options = {}) => {
     const navigationPolicy = navigationPolicies[`places.${name}`];
     return define('places', name, fields,
-        navigationPolicy ? `${description} ${policyDescription(navigationPolicy)}` : description, args,
+        navigationPolicy ? `${description} ${routePolicyDescription}` : description, args,
         { bindBot: false, ...options, ...(navigationPolicy ? { navigationPolicy } : {}) });
 };
 const coords = input => [input.position.x, input.position.y, input.position.z];
@@ -124,10 +109,7 @@ for (const name of ['putInChest', 'takeFromChest']) s(name, {
 s('consume', { itemName: field('stringValue', { default: '', description: 'Empty string selects the inventory food with the most food points, excluding rotten_flesh, spider_eye, poisonous_potato, pufferfish, chorus_fruit, suspicious_stew and golden apples; an explicit itemName uses only that item.' }) }, 'Consume food or a potion. Completion requires an observed inventory decrease; no_food, missing_item, food_full and effect_unconfirmed are distinct failure codes.', a => [a.itemName]);
 s('giveToPlayer', { itemName: text(), playerName: text(), quantity: positiveInt({ default: 1 }), timeoutMs: positiveInt({ default: 30000, description: 'Maximum wait for a receiving bot to start receiveFromPlayer.' }) }, 'Give quantity items to the visible player. confirmedQuantity counts items thrown from this inventory; receivedQuantity is observed pickup by that player, or null when receipt was not observed (code:"receipt_unconfirmed"). When playerName is another bot, timing is negotiated automatically: this waits until that bot calls receiveFromPlayer for the same itemName (code:"receiver_not_ready" after timeoutMs), then throws, and receivedQuantity is the receiver\'s reported inventory increase. Either bot may call first.', a => [a.itemName, a.playerName, a.quantity, a.timeoutMs]);
 s('receiveFromPlayer', { itemName: text(), playerName: text(), quantity: positiveInt({ default: 1 }), timeoutMs: positiveInt({ default: 30000, description: 'Maximum wait for the giver and the items.' }) }, 'Receive items the visible player or bot gives with giveToPlayer: collect dropped items of that type. When playerName is another bot, timing is negotiated automatically: this waits until that bot calls giveToPlayer for the same itemName (code:"giver_not_ready" after timeoutMs), then collects until the thrown count arrives. Either bot may call first; agree on who gives what before calling. confirmedQuantity is the observed inventory increase; fewer than quantity is partial, none is code:"receipt_unconfirmed" or code:"giver_cancelled".', a => [a.itemName, a.playerName, a.quantity, a.timeoutMs]);
-s('goToPosition', { position: position() }, 'Reach the requested Minecraft feet block (floor(x), floor(y), floor(z)); the exact coordinate within that block is not required. Success requires a loaded, grounded, safe arrival confirmed across two physics ticks. Confirmed dirt/cobblestone route scaffolds are removed before success; emergency egress scaffolds are retained. Returns {ok,status,arrivalReached,finalPosition,reason,code,diagnostics}; only status:reached is complete, and other statuses stop the code batch. Read diagnostics: search_limit is a bounded search limit, no_progress is the stall condition, and target_unloaded means terminal observations are unavailable. already_at_goal means the safe target block was already occupied; it does not mean movement occurred. route_not_found means no route was found with current loaded chunks, movement policy and search limits, not that the world destination is impossible. After a no-dig noPath, a search-only probe of at most 250ms can return digging_required when a route with digging is found; it never executes that route. A probe timeout returns search_limit. Consider reachPosition only if the requested route itself is allowed to dig; emergency egress may dig or place confirmed blocks to escape an observed hazard first. A found digging candidate does not prove successful passage or that digging is the only option. Missing scaffold materials reject routes needing them; scaffold-free routes remain available. Existing safe-drop, liquid and unknown-terrain limits still apply.', a => [{
-    position: a.position, allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt', 'cobblestone'],
-}]);
-s('reachPosition', { position: position() }, 'Reach the requested Minecraft feet block (floor(x), floor(y), floor(z)); the exact coordinate within that block is not required. Success requires a loaded, grounded, safe arrival confirmed across two physics ticks. Route digging and confirmed dirt/cobblestone scaffolds may remain; route edits must be server-confirmed. Returns {ok,status,arrivalReached,finalPosition,reason,code,diagnostics}; only status:reached is complete, and other statuses stop the code batch. Read diagnostics: search_limit is a bounded search limit, no_progress is the stall condition, and target_unloaded means terminal observations are unavailable. already_at_goal means the safe target block was already occupied; it does not mean movement occurred. route_not_found means no route was found with current loaded chunks, movement policy and search limits, not that the world destination is impossible. Missing scaffold materials reject routes needing them; scaffold-free routes remain available. Existing safe-drop, liquid and unknown-terrain limits still apply.', a => [{
+s('goToPosition', { position: position() }, 'Reach the requested Minecraft feet block (floor(x), floor(y), floor(z)); the exact coordinate within that block is not required. Success requires a loaded, grounded, safe arrival confirmed across two physics ticks. Route digging and confirmed dirt/cobblestone scaffolds may remain; route edits must be server-confirmed. Returns {ok,status,arrivalReached,finalPosition,reason,code,diagnostics}; only status:reached is complete, and other statuses stop the code batch. Read diagnostics: search_limit is a bounded search limit, no_progress is the stall condition, and target_unloaded means terminal observations are unavailable. already_at_goal means the safe target block was already occupied; it does not mean movement occurred. route_not_found means no route was found with current loaded chunks, movement policy and search limits, not that the world destination is impossible. Missing scaffold materials reject routes needing them; scaffold-free routes remain available. Existing safe-drop, liquid and unknown-terrain limits still apply.', a => [{
     position: a.position, allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false, cleanupOwnedScaffolds: false,
 }]);
 s('goToNearestBlock', { blockType: text(), minDistance: distance({ default: 2 }), radius: radius(64) }, 'Navigate to the nearest matching block within radius.', a => [a.blockType, a.minDistance, a.radius]);
@@ -137,7 +119,7 @@ s('exploreUntilBlock', {
     searchRadius: radius(64, { positive: true, description: 'Loaded-block observation radius checked before each step.' }),
     stepDistance: positiveInt({ default: 32, description: 'Horizontal blocks per wander step.' }),
     timeoutMs: positiveInt({ default: 300000, description: 'Search time budget; the host action timeout still applies.' }),
-}, 'Wander away from the start in stepDistance steps, each aimed at the dry-ground surface of the next column (also when starting underground), until a listed block is loaded within searchRadius. Water, lava, trunks and unreachable directions make it try other headings; it does not approach the block. One call keeps exploring until timeoutMs; it is not shortened by execution_window_ms, so pass the whole search budget instead of repeating short calls. A call starting where the previous call ended continues that call\u2019s origin and heading. Returns {ok:true,status:"found",block:{name,position},steps,travelled,elapsedMs}; otherwise ok:false with status not_found (code timeout), blocked (no route progress in seven directions, or code no_progress with navigation details when a step stalls) or cancelled, plus the same counters; unexpected navigation errors are raised instead of changing heading; travelled is measured from the trail origin. Use found block.position with goToPosition or reachPosition to go there.', a => [{ blockTypes: a.blockTypes, searchRadius: a.searchRadius, stepDistance: a.stepDistance, timeoutMs: a.timeoutMs }]);
+}, 'Wander away from the start in stepDistance steps, each aimed at the dry-ground surface of the next column (also when starting underground), until a listed block is loaded within searchRadius. Water, lava, trunks and unreachable directions make it try other headings; it does not approach the block. One call keeps exploring until timeoutMs; it is not shortened by execution_window_ms, so pass the whole search budget instead of repeating short calls. A call starting where the previous call ended continues that call\u2019s origin and heading. Returns {ok:true,status:"found",block:{name,position},steps,travelled,elapsedMs}; otherwise ok:false with status not_found (code timeout), blocked (no route progress in seven directions, or code no_progress with navigation details when a step stalls) or cancelled, plus the same counters; unexpected navigation errors are raised instead of changing heading; travelled is measured from the trail origin. Use found block.position with goToPosition to go there.', a => [{ blockTypes: a.blockTypes, searchRadius: a.searchRadius, stepDistance: a.stepDistance, timeoutMs: a.timeoutMs }]);
 s('goToPlayer', { playerName: text(), minDistance: distance({ default: 3 }) }, 'Navigate near a visible player.', a => [a.playerName, a.minDistance]);
 s('followPlayer', { playerName: text(), minDistance: distance({ default: 4 }) }, 'Follow a player until interrupted.', a => [a.playerName, a.minDistance]);
 s('moveAway', { distance: distance() }, 'Move distance blocks away from current position.', a => [a.distance]);
@@ -384,6 +366,7 @@ const RETIRED_METHODS = Object.freeze({
     'world.isEntityType': 'compare names from world.getNearbyEntityTypes() or Entity.name',
     'world.getNearestBlock': 'world.getNearestBlocks({blockTypes:["chest"], radius:16, limit:1})[0]',
     'world.getNearestBlocksWhere': 'world.getNearestBlocks({predicate: block => ..., radius, limit})',
+    'skills.reachPosition': 'skills.goToPosition({position}), which may dig and leave scaffolds',
 });
 
 export function getRetiredNativeSdkReplacement(method) {
@@ -398,21 +381,15 @@ export function getNativeSdkExecutionMetadata() {
     return Object.freeze(Object.fromEntries(definitions.map(d => [`${d.namespace}.${d.name}`, Object.freeze({ kind: d.kind, completion: d.completion })])));
 }
 
-const movementResultMethods = new Set(['goToPosition', 'reachPosition']);
+const movementResultMethods = new Set(['goToPosition']);
 
-function compactNavigationResult(value, requireCleanup = false) {
+function compactNavigationResult(value) {
     if (!objectLike(value)) return value;
     const result = { ...value };
     if (Array.isArray(value.edits)) delete result.edits;
     if (Array.isArray(value.cleanupRequired)) delete result.cleanupRequired;
     if (objectLike(value.result) && (Array.isArray(value.result.edits) || Array.isArray(value.result.cleanupRequired))) {
         result.result = compactNavigationResult(value.result);
-    }
-    if (requireCleanup && value.cleanupRequired?.length && value.ok === true) {
-        result.ok = false;
-        result.status = 'blocked';
-        result.code = 'cleanup_incomplete';
-        result.reason = 'Required scaffold cleanup is incomplete.';
     }
     return result;
 }
@@ -424,7 +401,8 @@ export function createNativeSdk(bindings, config = {}) {
         const namespace = namespaces[definition.namespace] ??= {};
         namespace[definition.name] = (...callArgs) => {
             const input = validateInput(definition, callArgs, config);
-            const internalName = definition.namespace === 'skills' && definition.name === 'craftItem' ? 'craftItem'
+            const internalName = definition.namespace === 'skills' && definition.name === 'goToPosition' ? 'reachPosition'
+                : definition.namespace === 'skills' && definition.name === 'craftItem' ? 'craftItem'
                 : definition.namespace === 'skills' && definition.name === 'inspectChest' ? 'inspectChest'
                 : definition.namespace === 'world' && definition.name === 'getBlockAtOffset' ? 'getBlockAtPosition'
                 : definition.namespace === 'world' && definition.name === 'getNearestBlocks' && has(input, 'predicate') ? 'getNearestBlocksWhere'
@@ -440,9 +418,6 @@ export function createNativeSdk(bindings, config = {}) {
             if (typeof internal !== 'function') throw new Error(`${definition.namespace}.${definition.name} is unavailable in this runtime.`);
             let args;
             if (definition.namespace === 'skills' && definition.name === 'goToPosition') {
-                const policy = definition.navigationPolicy;
-                args = [{ position: input.position, arrivalMode: 'block', allowDig: policy.allowDig, scaffold: policy.scaffold, scaffoldBlocks: [...policy.scaffoldBlocks] }];
-            } else if (definition.namespace === 'skills' && definition.name === 'reachPosition') {
                 const policy = definition.navigationPolicy;
                 args = [{ position: input.position, arrivalMode: 'block', allowDig: policy.allowDig, allowScaffold: policy.scaffold !== 'forbid', scaffoldBlocks: [...policy.scaffoldBlocks], safeWater: false, cleanupOwnedScaffolds: false }];
             } else if (definition.namespace === 'skills' && definition.name === 'craftItem') {
@@ -494,7 +469,7 @@ export function createNativeSdk(bindings, config = {}) {
             const result = definition.navigationPolicy && !isPositionMove
                 ? runWithNavigationPolicy(bindings.bot, definition.navigationPolicy, invoke) : invoke();
             if (!(definition.namespace === 'skills' && movementResultMethods.has(definition.name))) return result;
-            const compact = value => compactNavigationResult(value, definition.name === 'goToPosition');
+            const compact = value => compactNavigationResult(value);
             return result?.then ? result.then(compact) : compact(result);
         };
     }

@@ -320,16 +320,11 @@ async function main() {
 
     if (runPart(1)) {
       const digOnlyRoute = makeBot({ wall, scaffoldInventory: {} })
-      const noDigMovement = digOnlyRoute.pathfinder.movements
-      const digHint = await createNativeSdk({ bot: digOnlyRoute, skills }).skills.goToPosition({
+      const dugThrough = await createNativeSdk({ bot: digOnlyRoute, skills }).skills.goToPosition({
         position: { x: 6.5, y: 64, z: 0.5 },
       })
-      assert.equal(digHint.ok, false)
-      assert.equal(digHint.code, 'digging_required', JSON.stringify(digHint))
-      assert.deepEqual(digOnlyRoute.testState.edits, [], 'diagnostic search does not dig or place')
-      assert.equal(digOnlyRoute.pathfinder.movements, noDigMovement, 'diagnostic search does not install its movements')
-      assert.ok(digOnlyRoute.testState.paths.every(route => route.path.every(node => !node.toBreak?.length)),
-        'no route with digging is passed to goto')
+      assert.equal(dugThrough.ok, true, JSON.stringify(dugThrough))
+      assert.ok(digOnlyRoute.testState.edits.some(edit => edit.kind === 'server_dig'), 'native goToPosition digs through a wall')
 
       // Bedrock reaches down to the world floor so no route can tunnel under it.
       const bedrockBelowWall = []
@@ -338,27 +333,9 @@ async function main() {
       const unbreakable = await createNativeSdk({ bot: unbreakableRoute, skills }).skills.goToPosition({
         position: { x: 6.5, y: 64, z: 0.5 },
       })
-      // Digging searches have no cost cap, so the bounded probe may also end on its time limit.
+      // Digging searches have no cost cap, so the search may also end on its time limit.
       assert.ok(['route_not_found', 'search_limit'].includes(unbreakable.code), JSON.stringify(unbreakable))
       assert.deepEqual(unbreakableRoute.testState.edits, [])
-
-      for (const diagnosticStatus of ['timeout', 'partial']) {
-        const limitedProbe = makeBot({ scaffoldInventory: {} })
-        const probes = []
-        limitedProbe.pathfinder.getPathFromTo = function* (movements, _start, _goal, options) {
-          probes.push({ canDig: movements.canDig, options })
-          yield { result: { status: movements.canDig ? diagnosticStatus : 'noPath', path: [] } }
-        }
-        const limitedHint = await createNativeSdk({ bot: limitedProbe, skills }).skills.goToPosition({
-          position: { x: 6.5, y: 64, z: 0.5 },
-        })
-        assert.equal(limitedHint.code, 'search_limit', JSON.stringify(limitedHint))
-        assert.equal(limitedHint.ok, false)
-        assert.equal(probes.filter(probe => probe.canDig).length, 1, 'one bounded diagnostic search')
-        assert.ok(probes.find(probe => probe.canDig).options.timeout <= 250)
-        assert.deepEqual(limitedProbe.testState.edits, [])
-        assert.deepEqual(limitedProbe.entity.position, new Vec3(0.5, 64, 0.5))
-      }
 
       // Use the installed pathfinder plugin here so its default postProcessPath
       // (including half-block/shape-aware feet positions) is part of the check.
@@ -486,8 +463,7 @@ async function main() {
       assert.equal(sdkRouteResult.status, 'reached')
       assert.equal(Object.hasOwn(sdkRouteResult, 'edits'), false)
       assert.equal(Object.hasOwn(sdkRouteResult, 'cleanupRequired'), false)
-      assert.ok(sdkTemporary.testState.edits.some(edit => edit.kind === 'server_place'), 'native goToPosition may use temporary route scaffolds')
-      assert.ok(sdkTemporary.testState.edits.some(edit => edit.kind === 'server_dig'), 'native goToPosition removes its confirmed route scaffolds before success')
+      assert.ok(sdkTemporary.testState.edits.some(edit => edit.kind === 'server_place'), 'native goToPosition may place route scaffolds')
 
       const inTargetBlock = makeBot()
       const sameBlock = await createNativeSdk({ bot: inTargetBlock, skills }).skills.goToPosition({
@@ -499,7 +475,7 @@ async function main() {
 
       const alreadyAtTargetBlock = makeBot()
       alreadyAtTargetBlock.entity.position = new Vec3(5.99, 64, 0.99)
-      const alreadyThere = await createNativeSdk({ bot: alreadyAtTargetBlock, skills }).skills.reachPosition({
+      const alreadyThere = await createNativeSdk({ bot: alreadyAtTargetBlock, skills }).skills.goToPosition({
         position: { x: 5.01, y: 64, z: 0.01 },
       })
       assert.equal(alreadyThere.ok, true, JSON.stringify(alreadyThere))
@@ -513,7 +489,7 @@ async function main() {
         { x: 1.5, y: 64, z: 0.5 }, { x: 0.5, y: 64, z: 0.5 },
       ] })
       const listenersBeforeSettle = leavesAndReturns.listenerCount('physicsTick')
-      const oneTickDeparture = await createNativeSdk({ bot: leavesAndReturns, skills }).skills.reachPosition({
+      const oneTickDeparture = await createNativeSdk({ bot: leavesAndReturns, skills }).skills.goToPosition({
         position: { x: 0.5, y: 64, z: 0.5 },
       })
       assert.equal(oneTickDeparture.ok, false, 'one tick outside the requested block breaks consecutive arrival confirmation')
@@ -524,7 +500,7 @@ async function main() {
 
       const cancelledArrival = makeBot({ arrivalTickPositions: [] })
       const arrivalListenerCount = cancelledArrival.listenerCount('physicsTick')
-      const pendingArrival = createNativeSdk({ bot: cancelledArrival, skills }).skills.reachPosition({
+      const pendingArrival = createNativeSdk({ bot: cancelledArrival, skills }).skills.goToPosition({
         position: { x: 0.5, y: 64, z: 0.5 },
       })
       await delay(40)
@@ -536,7 +512,7 @@ async function main() {
 
       const timedOutArrival = makeBot({ arrivalTickPositions: [] })
       const timeoutListenerCount = timedOutArrival.listenerCount('physicsTick')
-      const timedOutArrivalResult = await createNativeSdk({ bot: timedOutArrival, skills }).skills.reachPosition({
+      const timedOutArrivalResult = await createNativeSdk({ bot: timedOutArrival, skills }).skills.goToPosition({
         position: { x: 0.5, y: 64, z: 0.5 },
       })
       assert.equal(timedOutArrivalResult.status, 'blocked', 'missing physics ticks time out without confirming arrival')
@@ -544,7 +520,7 @@ async function main() {
         'timeout removes the pending physicsTick observer')
 
       const adjacentBlockTarget = makeBot()
-      const adjacentBlockResult = await createNativeSdk({ bot: adjacentBlockTarget, skills }).skills.reachPosition({
+      const adjacentBlockResult = await createNativeSdk({ bot: adjacentBlockTarget, skills }).skills.goToPosition({
         position: { x: 1.001, y: 64, z: 0.5 },
       })
       assert.equal(adjacentBlockResult.ok, true, JSON.stringify(adjacentBlockResult))
@@ -562,7 +538,7 @@ async function main() {
       const halfBlockStanding = makeBot()
       halfBlockStanding.testState.setBlock(new Vec3(5, 64, 0), 'stone_slab')
       halfBlockStanding.entity.position = new Vec3(5.5, 64.5, 0.5)
-      const halfBlockArrival = await createNativeSdk({ bot: halfBlockStanding, skills }).skills.reachPosition({
+      const halfBlockArrival = await createNativeSdk({ bot: halfBlockStanding, skills }).skills.goToPosition({
         position: { x: 5.9, y: 64.9, z: 0.1 },
       })
       assert.equal(halfBlockArrival.ok, true, JSON.stringify(halfBlockArrival))
@@ -572,7 +548,7 @@ async function main() {
       const stairStanding = makeBot()
       stairStanding.testState.setBlock(new Vec3(5, 64, 0), 'stone_brick_stairs')
       stairStanding.entity.position = new Vec3(5.5, 64.5, 0.8)
-      const stairArrival = await createNativeSdk({ bot: stairStanding, skills }).skills.reachPosition({
+      const stairArrival = await createNativeSdk({ bot: stairStanding, skills }).skills.goToPosition({
         position: { x: 5.9, y: 64.1, z: 0.1 },
       })
       assert.equal(stairArrival.ok, true, JSON.stringify(stairArrival))
@@ -580,13 +556,13 @@ async function main() {
 
       const nativeLeave = makeBot({ gap: [2, 3, 4], corridor: true })
       const nativeReachSdk = createNativeSdk({ bot: nativeLeave, skills })
-      const nativeLeaveResult = await nativeReachSdk.skills.reachPosition({ position: { x: 6.5, y: 64, z: 0.5 } })
+      const nativeLeaveResult = await nativeReachSdk.skills.goToPosition({ position: { x: 6.5, y: 64, z: 0.5 } })
       assert.equal(nativeLeaveResult.status, 'reached', JSON.stringify(nativeLeaveResult))
       assert.equal(nativeLeaveResult.ok, true)
       assert.equal(nativeLeaveResult.arrivalReached, true)
       assert.equal(Object.hasOwn(nativeLeaveResult, 'cleanupRequired'), false)
-      assert.ok(nativeLeave.testState.edits.some(edit => edit.kind === 'server_place'), 'native reachPosition leaves confirmed scaffolds in place')
-      assert.equal(nativeLeave.testState.edits.some(edit => edit.kind === 'server_dig'), false, 'native reachPosition does no route cleanup')
+      assert.ok(nativeLeave.testState.edits.some(edit => edit.kind === 'server_place'), 'native goToPosition leaves confirmed scaffolds in place')
+      assert.equal(nativeLeave.testState.edits.some(edit => edit.kind === 'server_dig'), false, 'native goToPosition does no route cleanup')
       assert.ok(nativeLeave.testState.inventory.dirt < 16, 'left scaffolds remain in the world and consume only the blocks actually placed')
       assert.deepEqual(nativeLeave.testState.placementPreparation,
         nativeLeave.testState.placementPreparation.filter(event => event.kind === 'place')
@@ -598,9 +574,6 @@ async function main() {
       noScaffoldMaterials.testState.inventory.cobblestone = 0
       const noMaterialSdk = createNativeSdk({ bot: noScaffoldMaterials, skills })
       assert.equal((await noMaterialSdk.skills.goToPosition({ position: { x: 5.5, y: 64, z: 0.5 } })).ok, true,
-        'preservation movement succeeds on a clear route without scaffold materials')
-      noScaffoldMaterials.entity.position = new Vec3(0.5, 64, 0.5)
-      assert.equal((await noMaterialSdk.skills.reachPosition({ position: { x: 5.5, y: 64, z: 0.5 } })).ok, true,
         'editable movement succeeds on a clear route without scaffold materials')
 
       const nativeTemporaryIncomplete = makeBot({ gap: [2, 3, 4], corridor: true, rejectScaffoldRemoval: true })
@@ -611,15 +584,6 @@ async function main() {
       assert.equal(nativeTemporaryIncompleteResult.ok, false)
       assert.ok(nativeTemporaryIncompleteResult.cleanupRequired.length > 0)
       assert.equal(nativeTemporaryIncompleteResult.arrivalReached, true, 'arrival remains recorded independently from failed cleanup')
-
-      const sdkTemporaryIncomplete = makeBot({ gap: [2, 3, 4], corridor: true, rejectScaffoldRemoval: true })
-      const sdkIncompleteResult = await createNativeSdk({ bot: sdkTemporaryIncomplete, skills }).skills.goToPosition({
-        position: { x: 6.5, y: 64, z: 0.5 },
-      })
-      assert.equal(sdkIncompleteResult.ok, false, JSON.stringify(sdkIncompleteResult))
-      assert.equal(sdkIncompleteResult.status, 'blocked')
-      assert.equal(sdkIncompleteResult.arrivalReached, true,
-        'the public native mapping preserves confirmed arrival while reporting unfinished temporary cleanup')
 
       const open = makeBot()
       const openMovements = open.pathfinder.movements
@@ -862,7 +826,7 @@ async function main() {
         position: { x: 6.5, y: 64, z: 0.5 }, allowDig: false, allowScaffold: false,
       }))
       const diagnosticOperation = operationResult(diagnosticOwner)
-      assert.equal(diagnosticOperation.skillResults[0].result.code, 'digging_required')
+      assert.equal(diagnosticOperation.skillResults[0].result.code, 'route_not_found')
       assert.equal(diagnosticOperation.skillResults[0].result.diagnostics.lastSearch.status, 'noPath')
       assert.equal(Object.hasOwn(diagnosticOperation.skillResults[0].result.diagnostics.lastSearch, 'path'), false,
         'public diagnostics omit the full search path')
@@ -871,9 +835,8 @@ async function main() {
       const obstructed = await skills.reachPosition(blockedTarget, {
         position: { x: 2.5, y: 64, z: 0.5 }, arrivalMode: 'block', allowDig: false, allowScaffold: false,
       })
-      // Digging the target block out is a route when digging is allowed.
-      assert.equal(obstructed.code, 'digging_required', JSON.stringify(obstructed))
-      assert.equal(obstructed.diagnostics.phase, 'search')
+      assert.equal(obstructed.code, 'target_obstructed', JSON.stringify(obstructed))
+      assert.equal(obstructed.diagnostics.phase, 'target')
       assert.equal(obstructed.diagnostics.lastSearch.targetBlocker.code, 'target_obstructed')
       const rangeLimited = await skills.reachPosition(makeBot(), {
         position: { x: 600, y: 64, z: 0.5 }, allowScaffold: false,

@@ -278,7 +278,7 @@ async function main() {
     Object.assign(settings, { agent_runtime:'codex-session', codex_session:{max_search_radius:16} })
     const nativeDocs = getNativeSdkDocs(settings)
     const nativeNames = new Set(nativeDocs.map(doc=>doc.split('\n')[0]))
-    const internalOnlyNativeHelpers = new Set(['skills.goToGoal','skills.reachPositionWithScaffoldCleanup',
+    const internalOnlyNativeHelpers = new Set(['skills.goToGoal','skills.reachPosition','skills.reachPositionWithScaffoldCleanup',
       'skills.craftRecipe','skills.inspectChestAt','skills.viewChest','world.getBlockAtPosition','world.shouldPlaceTorch',
       // Retired native duplicates: log(bot, message), getNearestBlocks({predicate|blockTypes, limit}) and observed Entity names.
       'skills.log','world.getNearestBlock','world.getNearestBlocksWhere','world.isEntityType'])
@@ -286,7 +286,7 @@ async function main() {
     assert.ok(nativeDocs.every(doc=>!doc.includes('(bot,')), 'native examples use the public argument contract')
     const placeNavigationDocs = nativeDocs.filter(doc => ['places.goTo\n','places.goToAlias\n','places.tendFarm\n'].some(prefix => doc.startsWith(prefix)))
     assert.equal(placeNavigationDocs.length,3)
-    assert.ok(placeNavigationDocs.every(doc => doc.includes('Its ordinary route preserves existing blocks')
+    assert.ok(placeNavigationDocs.every(doc => doc.includes('Its route may dig and leave confirmed')
       && doc.includes('survival egress may dig or place confirmed blocks')))
     let scans=0, rpcCalls=0, looks=0
     bot.state.visible=true
@@ -341,9 +341,7 @@ async function main() {
     assert.equal(blocked.success,false)
     assert.equal(blocked.sdkFailure.method,'skills.goToPosition')
     assert.equal(blocked.skillResults.some(call=>call.skill==='skills.breakBlockAt'),false,'blocked navigation prevents the next edit')
-    const failedReach=await run('await skills.reachPosition({position:{x:0.5,y:64,z:0.5}}); await skills.breakBlockAt({position:{x:1,y:64,z:0}});')
-    assert.equal(failedReach.success,false,'a structured non-reached navigation result fails the native execution')
-    assert.equal(failedReach.sdkFailure.method,'skills.reachPosition')
+    const failedReach=blocked
     assert.equal(failedReach.sdkFailure.result.status,'blocked')
     assert.equal(failedReach.sdkFailure.result.ok,false)
     assert.equal(typeof failedReach.sdkFailure.result.code, 'string')

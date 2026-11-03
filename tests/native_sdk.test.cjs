@@ -35,8 +35,8 @@ async function main() {
   const execution = getNativeSdkExecutionMetadata()
   assert.deepEqual(docs.map(doc => doc.split('\n')[0]), methodNames)
   assert.ok(docs.every(doc => !/Signature:.*\(bot[,)]/.test(doc)))
-  assert.equal(methodNames.length, 83)
-  for (const retired of ['skills.log', 'world.isEntityType', 'world.getNearestBlock', 'world.getNearestBlocksWhere']) {
+  assert.equal(methodNames.length, 82)
+  for (const retired of ['skills.log', 'world.isEntityType', 'world.getNearestBlock', 'world.getNearestBlocksWhere', 'skills.reachPosition']) {
     assert.ok(!methodNames.includes(retired), `${retired} is not model-facing`)
     assert.ok(getRetiredNativeSdkReplacement(retired), `${retired} names its replacement`)
   }
@@ -52,7 +52,7 @@ async function main() {
   assert.equal(execution['places.tendFarm'].completion, 'farm')
   assert.equal(execution['places.listProtectedAreas'].kind, 'query')
   assert.equal(execution['places.protectArea'].kind, 'action')
-  assert.ok(docs.find(doc => doc.startsWith('skills.reachPosition\n')).includes('places.protectArea'), 'route policies name protected areas')
+  assert.ok(docs.find(doc => doc.startsWith('skills.goToPosition\n')).includes('places.protectArea'), 'route policies name protected areas')
 
   // Every model-facing function has an explicit adapter. A small set of raw pathfinder
   // helpers stays available to internal legacy code but is never model-facing.
@@ -154,14 +154,12 @@ async function main() {
   invalid(sdk.skills.exploreUntilBlock, [{}], 'blockTypes')
   invalid(sdk.skills.followPlayer, [{ playerName: 'Steve', preserveEnvironment: false }], 'preserveEnvironment')
   assert.deepEqual(sdk.skills.goToPosition({ position: input.position }), [botA, {
-    position: input.position, arrivalMode: 'block', allowDig: false, scaffold: 'temporary', scaffoldBlocks: ['dirt', 'cobblestone'],
-  }])
-  invalid(sdk.skills.goToPosition, [{ position: input.position, minDistance: 2 }], 'minDistance')
-  invalid(sdk.skills.goToPosition, [{ position: input.position, allowDig: true }], 'allowDig')
-  assert.deepEqual(sdk.skills.reachPosition({ position: input.position }), [botA, {
     position: input.position, arrivalMode: 'block', allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false, cleanupOwnedScaffolds: false,
   }])
-  invalid(sdk.skills.reachPosition, [{ position: input.position, allowScaffold: false }], 'allowScaffold')
+  invalid(sdk.skills.goToPosition, [{ position: input.position, minDistance: 2 }], 'minDistance')
+  invalid(sdk.skills.goToPosition, [{ position: input.position, allowDig: false }], 'allowDig')
+  invalid(sdk.skills.goToPosition, [{ position: input.position, allowScaffold: false }], 'allowScaffold')
+  assert.equal(sdk.skills.reachPosition, undefined)
   assert.equal(sdk.skills.goToGoal, undefined)
   assert.equal(sdk.skills.reachPositionWithScaffoldCleanup, undefined)
 
@@ -177,34 +175,30 @@ async function main() {
     code: 'arrived', diagnostics: { phase: 'arrival', observedAt: '2026-10-22T00:00:00.000Z' },
     reason: 'Reached the target; 1 scaffold remains in cleanupRequired.',
   }
-  const incompletePreservedMove = {
-    ok: false, status: 'blocked', arrivalReached: true, finalPosition: input.position,
-    code: 'cleanup_incomplete', diagnostics: { phase: 'arrival', observedAt: '2026-10-22T00:00:00.000Z' },
-    reason: 'Required scaffold cleanup is incomplete.',
-  }
   const movementSdk = createNativeSdk({ bot: botA, skills: {
-    goToPosition: () => detailedMove,
     reachPosition: async () => detailedMove,
   }, places: { goTo: async () => detailedMove } })
-  assert.deepEqual(movementSdk.skills.goToPosition({ position: input.position }), incompletePreservedMove)
-  assert.deepEqual(await movementSdk.skills.reachPosition({ position: input.position }), compactMove)
+  assert.deepEqual(await movementSdk.skills.goToPosition({ position: input.position }), compactMove,
+    'remaining route scaffolds do not fail native coordinate movement')
   const placeMovement = await movementSdk.places.goTo({ placeId: 'base' })
   assert.deepEqual(placeMovement, detailedMove, 'fixed navigation scope keeps the place method result shape')
   assert.equal(detailedMove.edits.length, 1, 'public projection preserves internal tracking')
   assert.equal(detailedMove.cleanupRequired.length, 1)
-  assert.ok(docs.find(doc => doc.startsWith('skills.collectBlock\n')).includes('Its route may dig and leave confirmed'))
-  assert.ok(docs.find(doc => doc.startsWith('skills.breakBlockAt\n')).includes('Its ordinary route preserves existing blocks'))
-  assert.ok(docs.find(doc => doc.startsWith('skills.attackEntity\n')).includes('Its route cannot dig'))
+  for (const name of ['collectBlock', 'breakBlockAt', 'attackEntity', 'exploreUntilBlock']) {
+    assert.ok(docs.find(doc => doc.startsWith(`skills.${name}\n`)).includes('Its route may dig and leave confirmed'), `${name} uses the shared route policy`)
+  }
   for (const name of ['breakBlockAt', 'attackEntity', 'collectBlock', 'goToPosition']) {
     assert.ok(docs.find(doc => doc.startsWith(`skills.${name}\n`)).includes('survival egress may dig or place confirmed blocks'),
       `${name} documents the shared emergency exception`)
   }
   const definitions = new Map(NATIVE_SDK_DEFINITIONS.map(definition => [`${definition.namespace}.${definition.name}`, definition]))
-  assert.deepEqual(definitions.get('skills.collectBlock').navigationPolicy, { allowDig: true, scaffold: 'leave', scaffoldBlocks: ['dirt', 'cobblestone'] })
-  assert.deepEqual(definitions.get('skills.craftItem').navigationPolicy, { allowDig: false, scaffold: 'forbid', scaffoldBlocks: [] },
-    'the public craftItem entry owns the preserving route policy')
-  assert.deepEqual(definitions.get('skills.attackEntity').navigationPolicy, { allowDig: false, scaffold: 'leave', scaffoldBlocks: ['dirt', 'cobblestone'], allowTowers: false })
-  assert.deepEqual(definitions.get('skills.breakBlockAt').navigationPolicy, { allowDig: false, scaffold: 'forbid', scaffoldBlocks: [] })
+  const routePolicy = { allowDig: true, scaffold: 'leave', scaffoldBlocks: ['dirt', 'cobblestone'] }
+  for (const definition of NATIVE_SDK_DEFINITIONS.filter(entry => entry.navigationPolicy)) {
+    assert.deepEqual(definition.navigationPolicy, routePolicy, `${definition.namespace}.${definition.name} uses the shared route policy`)
+  }
+  for (const name of ['skills.craftItem', 'skills.attackEntity', 'skills.breakBlockAt', 'skills.goToPosition', 'places.goTo']) {
+    assert.ok(definitions.get(name).navigationPolicy, `${name} has a fixed route policy`)
+  }
 
 
   assert.deepEqual(sdk.skills.stay({ seconds: -1 }), [botA, -1])
@@ -220,7 +214,7 @@ async function main() {
   assert.deepEqual(sdk.places.find({ text: 'chest' }), [{ text: 'chest', limit: 20 }])
   for (const method of ['goTo', 'goToAlias', 'tendFarm']) {
     const doc = docs.find(value => value.startsWith(`places.${method}\n`))
-    assert.ok(doc.includes('Its ordinary route preserves existing blocks'), `${method} documents its fixed route policy`)
+    assert.ok(doc.includes('Its route may dig and leave confirmed'), `${method} documents its fixed route policy`)
   }
   const placeGo = await sdk.places.goTo({ placeId: 'place-1' })
   assert.deepEqual(placeGo, ['place-1'])
