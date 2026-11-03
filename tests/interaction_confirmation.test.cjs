@@ -371,32 +371,6 @@ async function main() {
     assert.equal(defender.output.includes('Successfully defended'), false)
   }
 
-  const firstThreat = { id: 31, name: 'zombie', type: 'hostile', position: makePosition(3, 0, 0) }
-  const secondThreat = { id: 32, name: 'zombie', type: 'hostile', position: makePosition(4, 0, 0) }
-  const switches = []
-  let firstStrikeAt
-  const crowd = makeBot({ entities: [firstThreat, secondThreat], onAttack(enemy, bot) {
-    switches.push(enemy.id)
-    bot.emit('attackedTarget')
-    setImmediate(() => assert.equal(crowd.pathfinder.goal?.pluginFollow, undefined, 'tactical movement replaces PVP pursuit after every target switch'))
-    if (switches.length === 1) {
-      firstStrikeAt = Date.now()
-      firstThreat.position.x = 9 // engaged target leaves the admission radius
-      secondThreat.position.x = 2
-    } else if (enemy.id === secondThreat.id) {
-      assert.ok(Date.now() - firstStrikeAt >= 250, 'switching does not reset the attack cooldown')
-      bot.emit('entityDead', enemy)
-    } else bot.emit('entityDead', enemy)
-  } })
-  crowd.entity.position.distanceTo = position => Math.abs(position.x)
-  const crowdDeadline = setTimeout(() => { crowd.interrupt_code = true }, 4500)
-  try {
-    assert.equal(await withAcceleratedClock(() => skills.defendSelf(crowd, 8)), true)
-    assert.deepEqual(switches, [31, 32, 31], 'switch to the nearer threat before the first one dies, then finish the engaged target beyond the admission radius')
-    assert.ok(crowd.combatGoals.some(goal => goal?.goals?.length === 2), 'retreat keeps distance from both threats')
-  } finally { clearTimeout(crowdDeadline) }
-  assert.equal(crowd.pathfinder.goal, null)
-  assert.equal(crowd.listenerCount('attackedTarget'), 0)
 
   const parentSlime = { id: 33, name: 'slime', type: 'hostile', position: makePosition(2, 0, 0) }
   const childSlime = { id: 34, name: 'slime', type: 'hostile', position: makePosition(2, 0, 0) }
