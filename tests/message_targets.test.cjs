@@ -163,7 +163,10 @@ async function main() {
     callback(failSend ? { success: false, error: 'Unavailable recipient' } : { success: true, recipients: Array.isArray(targets) ? Array.from(targets) : [targets] })
   })
   const chatRecords = []
-  const ui = vm.createContext({ socket: uiSocket, currentAgents: agents, agentsDiv, document, appendChatRecord: record => chatRecords.push(record) })
+  const storage = new Map()
+  const window = { location: { pathname: '/' }, localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) } }
+  storage.set('mindcraft.recipients:/', '["Bot3"]')
+  const ui = vm.createContext({ socket: uiSocket, currentAgents: [], agentsDiv, document, window, appendChatRecord: record => chatRecords.push(record) })
   const uiStart = html.indexOf('        // Individual control buttons')
   const uiEnd = html.indexOf("        const recipientMenu = document.getElementById('recipientMenu');", uiStart)
   assert.ok(uiStart > 0 && uiEnd > uiStart, 'UI selection section is present')
@@ -172,6 +175,9 @@ async function main() {
   const sendBtn = elements.chatSendBtn
   const typeText = text => { input.value = text; input.emit('input') }
   const clickCard = (name, interactive = false) => agentsDiv.emit('click', { target: { closest: selector => selector === '.agent' ? { dataset: { agentName: name } } : interactive ? {} : null } })
+  vm.runInContext('updateSelectionUI()', ui)
+  assert.equal(elements.recipientSummary.textContent.startsWith('To: Bot3'), true, 'saved selection survives until the first agent list arrives')
+  vm.runInContext('currentAgents = agentList; clearRecipients()', Object.assign(ui, { agentList: agents }))
   typeText('build together')
   assert.equal(sendBtn.disabled, true, 'no recipients means nothing to send')
   vm.runInContext("toggleRecipient('Bot2'); toggleRecipient('Bot3'); toggleRecipient('Bot4')", ui)
@@ -209,6 +215,10 @@ async function main() {
   vm.runInContext("currentAgents = currentAgents.filter(agent => agent.name !== 'Bot3'); updateSelectionUI()", ui)
   sendBtn.click()
   assert.deepEqual(uiDelivery.targets, ['Bot2'], 'removed recipients leave the selection')
+  vm.runInContext('clearRecipients()', ui)
+  assert.equal(storage.get('mindcraft.recipients:/'), '[]')
+  vm.runInContext("toggleRecipient('Bot2')", ui)
+  assert.equal(storage.get('mindcraft.recipients:/'), '["Bot2"]', 'selection changes are saved')
   vm.runInContext('clearRecipients()', ui)
   typeText('@Bot2 addressed')
   assert.equal(sendBtn.disabled, false, 'an explicit address prefix can send without a selection')

@@ -1129,14 +1129,23 @@
         }
 
         // Chat recipients: chosen from the right-click menu or by clicking status cards.
-        const selectedBots = new Set();
+        const recipientsKey = `mindcraft.recipients:${window.location.pathname}`;
+        function loadSavedRecipients() {
+            try { return JSON.parse(window.localStorage.getItem(recipientsKey) || '[]'); }
+            catch { return []; }
+        }
+        function saveRecipients() {
+            try { window.localStorage.setItem(recipientsKey, JSON.stringify([...selectedBots])); } catch {}
+        }
+        const selectedBots = new Set(loadSavedRecipients());
         const chatInput = document.getElementById('chatInput');
         const chatSendBtn = document.getElementById('chatSendBtn');
         function isRecipientAvailable(name) {
             return currentAgents.some(agent => agent.name === name && agent.in_game && agent.socket_connected);
         }
         function updateSelectionUI() {
-            for (const name of selectedBots) if (!isRecipientAvailable(name)) selectedBots.delete(name);
+            // Keep the restored selection until the first agent list arrives.
+            if (currentAgents.length) for (const name of selectedBots) if (!isRecipientAvailable(name)) selectedBots.delete(name);
             const summary = document.getElementById('recipientSummary');
             summary.textContent = selectedBots.size ? `To: ${[...selectedBots].join(', ')} ▾` : 'No recipients — tap to choose ▾';
             summary.classList.toggle('empty', !selectedBots.size);
@@ -1147,14 +1156,17 @@
             if (selectedBots.has(name)) selectedBots.delete(name);
             else if (isRecipientAvailable(name)) selectedBots.add(name);
             updateSelectionUI();
+            saveRecipients();
         }
         function selectAllRecipients() {
             currentAgents.filter(agent => agent.in_game && agent.socket_connected).forEach(agent => selectedBots.add(agent.name));
             updateSelectionUI();
+            saveRecipients();
         }
         function clearRecipients() {
             selectedBots.clear();
             updateSelectionUI();
+            saveRecipients();
         }
         function onChatInputChange() {
             const text = chatInput.value;
