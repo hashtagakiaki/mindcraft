@@ -35,7 +35,7 @@ async function main() {
   const execution = getNativeSdkExecutionMetadata()
   assert.deepEqual(docs.map(doc => doc.split('\n')[0]), methodNames)
   assert.ok(docs.every(doc => !/Signature:.*\(bot[,)]/.test(doc)))
-  assert.equal(methodNames.length, 82)
+  assert.equal(methodNames.length, 84)
   for (const retired of ['skills.log', 'world.isEntityType', 'world.getNearestBlock', 'world.getNearestBlocksWhere', 'skills.reachPosition']) {
     assert.ok(!methodNames.includes(retired), `${retired} is not model-facing`)
     assert.ok(getRetiredNativeSdkReplacement(retired), `${retired} names its replacement`)
@@ -236,6 +236,11 @@ async function main() {
   invalid(sdk.vision.lookAtPlayer, [{ playerName: 'Steve', direction: 'left' }], 'direction')
   invalid(sdk.communication.sendToBot, [{ recipient: 'B', message: 'x'.repeat(2001) }], 'message')
   assert.deepEqual(sdk.communication.sendToBot({ recipient: 'B', message: 'hello' }), ['B', 'hello'])
+  assert.deepEqual(sdk.wiki.read({ title: 'Farmland' }), [{ title: 'Farmland', lang: 'en' }])
+  assert.deepEqual(sdk.wiki.search({ query: 'farm', lang: 'ja' }), [{ query: 'farm', lang: 'ja', limit: 10 }])
+  invalid(sdk.wiki.read, [{ title: 'Farmland', lang: 'de' }], 'lang')
+  invalid(sdk.wiki.search, [{ query: 'farm', limit: 51 }], 'limit')
+  assert.equal(execution['wiki.read'].kind, 'query')
 
   const limited = createNativeSdk({ ...namespaces, bot: botA }, { codex_session: { max_search_radius: 10 } })
   invalid(limited.world.getNearbyBlockTypes, [{ radius: 11 }], 'radius')

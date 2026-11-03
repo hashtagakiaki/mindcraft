@@ -53,7 +53,7 @@ export function mustCollectManually() { return false; }
     'src/agent/library/crafting_sync.js', 'src/agent/library/mining_sync.js',
     'src/agent/library/operation_context.js', 'src/agent/library/navigation_policy.js', 'src/agent/library/world.js',
     'src/agent/library/index.js', 'src/agent/library/skill_library.js',
-    'src/agent/library/sdk_capabilities.js', 'src/agent/library/lockdown.js', 'src/agent/library/native_sdk.js',
+    'src/agent/library/sdk_capabilities.js', 'src/agent/library/lockdown.js', 'src/agent/library/native_sdk.js', 'src/agent/library/wiki.js',
     'src/agent/commands/actions.js', 'src/agent/commands/queries.js',
     'src/agent/commands/index.js', 'src/agent/coder.js', 'src/agent/action_manager.js', 'src/agent/task_diagnostics.js',
     'bots/execTemplate.js', 'bots/lintTemplate.js', 'eslint.config.js'

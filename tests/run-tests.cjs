@@ -973,6 +973,7 @@ async function main() {
     'tree_felling.test.cjs',
     'block_interaction.test.cjs',
     'native_sdk.test.cjs',
+    'wiki.test.cjs',
     'codex_session.test.cjs',
     'ollama_contract.test.cjs',
     'state_poller.test.cjs',

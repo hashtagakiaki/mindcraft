@@ -4,6 +4,7 @@ import * as skills from './library/skills.js';
 import * as world from './library/world.js';
 import settings from './settings.js';
 import { Vec3 } from 'vec3';
+import { createWiki } from './library/wiki.js';
 import {ESLint} from "eslint";
 import { trackSkill, operationContext, operationCallContext, registerOwnedPromise, NATIVE_EXECUTION_WINDOW_MS } from './library/operation_context.js';
 
@@ -260,6 +261,9 @@ export class Coder {
                 lastTask: () => this.agent.codexRuntime?.getLastTaskDiagnostics()
                     ?? { available: false, reason: 'native task diagnostic unavailable' },
             } : undefined,
+            // One instance per coder keeps the version cutoff and article cache across executions.
+            wiki: settings.agent_runtime === 'codex-session'
+                ? (this.wiki ??= createWiki({ getVersion: () => this.agent.bot.version })) : undefined,
             places: this.agent.places?.sdk,
         };
         const api = settings.agent_runtime === 'codex-session'

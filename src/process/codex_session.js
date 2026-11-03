@@ -35,8 +35,7 @@ export class CodexSession {
         const instructions = await readFile(instructionsPath, 'utf8');
         await writeFile(path.join(this.cwd, 'AGENTS.md'), instructions + (this.catalog ? '\n' + this.catalog + '\n' : ''));
         if (signal?.aborted) throw new Error('Session cancelled');
-        const args = ['app-server', '--strict-config', '--listen', 'stdio://', '--disable', 'shell_tool', '-c', 'web_search="live"',
-            '-c', 'tools.web_search.allowed_domains=["minecraft.wiki","ja.minecraft.wiki"]',
+        const args = ['app-server', '--strict-config', '--listen', 'stdio://', '--disable', 'shell_tool', '-c', 'web_search="disabled"',
             '-c', `model_auto_compact_token_limit=${AUTO_COMPACT_TOKEN_LIMIT}`,
             '-c', 'features.code_mode.direct_only_tool_namespaces=["functions"]',
             '-c', 'features.apps=false', '-c', 'features.plugins=false', '-c', 'features.multi_agent=false',

@@ -372,6 +372,7 @@ async function runCoderPrompterFixtures(sandbox) {
       'stubs/skills.js': 'export function unused() {}',
       'stubs/settings.js': 'export default { generated_code_fail_on_false: [] };',
       'library/operation_context.js': await readFile(path.resolve(previousCwd, 'src/agent/library/operation_context.js'), 'utf8'),
+      'library/wiki.js': await readFile(path.resolve(previousCwd, 'src/agent/library/wiki.js'), 'utf8'),
       'stubs/world.js': 'export function unused() {}',
       'stubs/vec3.js': 'export class Vec3 {}',
       'stubs/eslint.js': 'export class ESLint { async lintText() { return []; } }'

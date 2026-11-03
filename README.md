@@ -41,7 +41,7 @@ Run focused fixtures while iterating and the required suite once for final verif
 
 bot用AGENTSには行動方針・SDK文書の読み方・共通の実行境界を置く。個別メソッドの引数・動作・戻り値・固定経路方針は [`native_sdk.js`](src/agent/library/native_sdk.js) の遅延文書に集約し、使用前に必要な文書を読む。実行時にAGENTSへ追加するSDK一覧はメソッド名のみとする。
 
-native botはCodex標準のlive Web検索で [Minecraft Wiki](https://minecraft.wiki/) と[日本語版](https://ja.minecraft.wiki/) のゲーム仕様を参照する。検索対象ドメインはbot専用CLIの起動引数で設定し、global設定は変更しない。初めて扱う作業では疑問や失敗がなくても関連する概要・チュートリアルから成立・維持条件を読み、Java Editionとserver versionへの適用を確認する。SDKの操作方法は従来の遅延文書を使う。検索・閲覧操作はtask traceの `web_search` に記録する。記事の取得可否はWiki・検索サービス側にも依存し、取得失敗を確認済みにはしない。
+native botはSDKの `wiki.search` / `wiki.read`（`src/agent/library/wiki.js`）で [Minecraft Wiki](https://minecraft.wiki/) と[日本語版](https://ja.minecraft.wiki/) のゲーム仕様を参照する。`wiki.read` は接続中のserver version（mineflayerの `bot.version`）を [Mojangのversion manifest](https://piston-meta.mojang.com/mc/game/version_manifest_v2.json) で引き、次に公開された版（releaseまたはsnapshot）の日時より前の最新revisionをMediaWiki APIで取得する。例えば1.21.1では24w33a（2024-08-15）より前の版になる。最新版のserverでは現在の記事を読む。取得結果はrevision単位でprocess内にcacheする。Wikiのrobots.txtはAI検索crawlerを拒否するため、Codex標準Web検索は `web_search="disabled"` で止めている。検索 (`wiki.search`) は現在のindexを使い、本文だけが版に固定される。ページ・section・該当版がなければ `WikiError` を返し、最新版へ自動で切り替えない。
 
 2026-10-30の隔離確認ではCLI 0.166.0 / gpt-6-lunaでWiki検索の完了と、耕地の水和・維持条件を参照URL付きで回答することを確認した。実ゲームでの畑づくりと1.21.1の個別差分確認は行っていない。
 

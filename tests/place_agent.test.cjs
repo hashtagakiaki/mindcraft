@@ -69,6 +69,7 @@ ${namedExports(actionsSource, 'skills', (name) => `export async function ${name}
   await copy(root, 'src/agent/coder.js')
   await copy(root, 'src/agent/library/lockdown.js')
   await copy(root, 'src/agent/library/sdk_capabilities.js')
+  await copy(root, 'src/agent/library/wiki.js')
   await copy(root, 'src/agent/library/operation_context.js')
   await write(root, 'src/agent/place_actions.js', `export function createPlaceActions(agent, client) { return {
   async goTo(placeId) { return agent.testTravelResult || { ok: false, status: 'unreachable', placeId }; },
