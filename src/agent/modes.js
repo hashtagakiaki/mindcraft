@@ -413,15 +413,15 @@ async function execute(mode, agent, func, timeout=-1, decision = {}) {
     return code_return;
 }
 
-const NIGHTFALL_NOTICE = 'Night has fallen in the overworld. If you want to sleep through it, call skills.skipNight; whether to stop or continue the current work is your call for this task. Tonight you will not go to bed automatically, even after returning to idle.';
+const NIGHTFALL_NOTICE = 'Night has fallen in the overworld. If you want to sleep through it, call skills.skipNight; whether to stop or continue the current work is your call for this task. If you do not sleep, you will go to bed automatically once you are idle.';
 
-// One decision per night: a busy task gets a single notice, an idle bot sleeps
-// via the sleeping mode, and getting into a bed by any path settles the night.
+// A busy task gets a single notice per night; the sleeping mode still puts the
+// bot to bed once it is idle, and getting into a bed by any path settles the night.
 function notifyNightfall(agent) {
     const bot = agent.bot;
     if (!modes_map.sleeping.on || !agent.codexRuntime?.active) return;
-    if (!world.isSleepableNight(bot) || bot.isSleeping || !(bot.health > 0) || agent.nightHandledDay === bot.time.day) return;
-    if (agent.codexRuntime.acceptSystemEvent(NIGHTFALL_NOTICE).accepted) agent.nightHandledDay = bot.time.day;
+    if (!world.isSleepableNight(bot) || bot.isSleeping || !(bot.health > 0) || agent.nightHandledDay === bot.time.day || agent.nightNoticedDay === bot.time.day) return;
+    if (agent.codexRuntime.acceptSystemEvent(NIGHTFALL_NOTICE).accepted) agent.nightNoticedDay = bot.time.day;
 }
 
 let _agent = null;

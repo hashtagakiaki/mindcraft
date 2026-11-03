@@ -247,14 +247,10 @@ async function main() {
       assert.deepEqual(runs, [], 'a busy bot is not sent to bed')
       agent.codexRuntime.active = false
       await bot.modes.update(); await settle()
-      assert.deepEqual(runs, [], 'after the notice the idle bot does not sleep that night')
-
-      bot.time.day = 2
-      await bot.modes.update(); await settle()
-      assert.deepEqual(runs, ['mode:sleeping'], 'an idle bot goes to bed on a new night')
+      assert.deepEqual(runs, ['mode:sleeping'], 'after the notice the idle bot still goes to bed that night')
       await bot.modes.update(); await settle()
       assert.equal(runs.length, 1, 'a failed attempt waits for the cooldown')
-      assert.equal(agent.codexRuntime.notices.length, 1, 'idle nights send no notice')
+      assert.equal(agent.codexRuntime.notices.length, 1, 'idle nights send no further notice')
 
       bot.emit('sleep')
       bot.modes.setOn('sleeping', true)
