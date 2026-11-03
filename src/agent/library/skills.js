@@ -6119,7 +6119,17 @@ export async function tendNearbyFarm(bot, options = {}) {
     const harvestedItems = new Set();
     let harvested = 0;
 
-    for (const cropBlock of cropPositions) {
+    // Re-sort the remaining crops by current bot position before each pick, instead of
+    // the one-time initial sort, so the harvest walk does not zig-zag back across the plot.
+    // Each dig's drop-collection tracker is kept running (not awaited) and only resolved in
+    // a finalize pass after all digging is done: drops get picked up passively while the bot
+    // moves on to the next crop, so the per-block confirmation wait overlaps with that travel
+    // instead of stalling the whole plot one block at a time.
+    const pendingHarvests = [];
+    const remainingCrops = [...cropPositions];
+    while (remainingCrops.length > 0) {
+        remainingCrops.sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position));
+        const cropBlock = remainingCrops.shift();
         const crop = crops[cropBlock.name];
         const age = cropBlock.getProperties?.().age;
         if (!crop || age == null || Number(age) < crop.mature) continue;
@@ -6135,19 +6145,22 @@ export async function tendNearbyFarm(bot, options = {}) {
         if (current?.name !== cropBlock.name || currentAge == null || Number(currentAge) < crop.mature || bot.interrupt_code) continue;
         const expectedDropIds = itemIdsForNames(bot, [...crop.produce, crop.seed]);
         const collectionTracker = trackBlockCollection(bot, current, expectedDropIds);
+        await trackNavigationSegment(bot, () => bot.dig(current), { workTarget: current.position });
+        pendingHarvests.push({ crop, blockName: cropBlock.name, collectionTracker });
+        if (bot.interrupt_code) break;
+    }
+    for (const { crop, blockName, collectionTracker } of pendingHarvests) {
         try {
-            await trackNavigationSegment(bot, () => bot.dig(current), { workTarget: current.position });
             if (await collectionTracker.wait(HARVEST_CONFIRM_TIMEOUT_MS)) {
                 for (const item of crop.produce) harvestedItems.add(item);
                 harvestedItems.add(crop.seed);
                 harvested++;
             } else {
-                log(bot, `Could not confirm harvest of ${cropBlock.name}; crop items were not marked for storage.`);
+                log(bot, `Could not confirm harvest of ${blockName}; crop items were not marked for storage.`);
             }
         } finally {
             collectionTracker.cleanup();
         }
-        if (bot.interrupt_code) break;
     }
 
     const farmland = soil
@@ -6159,6 +6172,8 @@ export async function tendNearbyFarm(bot, options = {}) {
         const stacks = bot.inventory.items().filter(item => item.name === seed);
         let available = stacks.reduce((total, item) => total + item.count, 0) - seedReserve;
         while (available > 0 && farmland.length > 0 && !bot.interrupt_code) {
+            // Re-sort by current bot position before each pick, same reasoning as the harvest walk above.
+            farmland.sort((a, b) => bot.entity.position.distanceTo(a.position) - bot.entity.position.distanceTo(b.position));
             const soil = farmland.shift();
             const ok = await tillAndSow(bot, soil.position.x, soil.position.y, soil.position.z, seed);
             if (ok) {
