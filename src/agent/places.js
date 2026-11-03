@@ -224,6 +224,20 @@ export function createPlacesFacade(agent, client) {
 			if (!place) throw new Error(`No place with ID '${placeId}' exists.`);
 			return client.setPlacePreference({ homePlaceId: placeId });
 		},
+		listProtectedAreas: async () => {
+			requireEnabled();
+			return client.listProtectedAreas();
+		},
+		protectArea: async (name, from, to, dimension) => {
+			requireEnabled();
+			const response = await client.protectArea({ name, from, to, dimension: dimension ?? normalizedDimension(agent.bot) });
+			return { ok: true, status: 'complete', area: response.value, revision: response.revision };
+		},
+		unprotectArea: async (areaId) => {
+			requireEnabled();
+			const response = await client.unprotectArea(areaId);
+			return { ok: true, status: 'complete', area: response.value, revision: response.revision };
+		},
 		goTo: async (placeId) => {
 			requireEnabled();
 			const result = await client.inspectPlace(placeId);

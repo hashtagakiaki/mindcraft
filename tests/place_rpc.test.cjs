@@ -37,7 +37,8 @@ async function main() {
       })
       attachPlaceRpc(socket, {
         getAgentName: () => registeredName,
-        getPlaceStore: async () => store
+        getPlaceStore: async () => store,
+        onProtectedAreasChanged: areas => io.emit('protected-areas', areas)
       })
     })
     await new Promise((resolve) => httpServer.listen(0, '127.0.0.1', resolve))
@@ -101,6 +102,17 @@ async function main() {
     assert.equal(botBHome.value.id, homeB.id)
     assert.equal(botAPreferences.value.homePlaceId, homeA.id)
     assert.equal(botBPreferences.value.homePlaceId, homeB.id)
+
+    // One bot's protected-area change reaches every connected bot with the full list.
+    const broadcasts = clients.map(client => new Promise(resolve => client.once('protected-areas', resolve)))
+    const protectedArea = await ask(clients[2], 'place:request', { operation: 'protect', payload: { name: 'Base', from: { x: 0, y: 60, z: 0 }, to: { x: 4, y: 70, z: 4 }, recordedBy: 'spoofed' } })
+    assert.ok(protectedArea.ok)
+    assert.equal(protectedArea.value.recordedBy, 'botC', 'the registered agent name is recorded')
+    for (const areas of await Promise.all(broadcasts)) assert.deepEqual(areas, [protectedArea.value])
+    assert.deepEqual((await ask(clients[0], 'place:request', { operation: 'protected_areas', payload: {} })).value, [protectedArea.value])
+    const removals = clients.map(client => new Promise(resolve => client.once('protected-areas', resolve)))
+    assert.equal((await ask(clients[1], 'place:request', { operation: 'unprotect', payload: { areaId: protectedArea.value.id } })).value.id, protectedArea.value.id)
+    for (const areas of await Promise.all(removals)) assert.deepEqual(areas, [])
 
     const farm = (await store.rememberPlace({ name: 'Garden', kind: 'farm', purposes: ['food'], position: { x: 20, y: 64, z: 0 } })).value
     const chest = (await store.rememberPlace({ name: 'Garden storage', kind: 'storage', purposes: ['food'], position: { x: 21, y: 64, z: 0 } })).value

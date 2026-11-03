@@ -146,6 +146,9 @@ export class MindServerProxy {
             }
             void this.agent.cancelWorkerTask(payload, acknowledge);
         });
+        this.socket.on('protected-areas', (areas) => {
+            this.agent?.bot?.navigationProtection?.replace(areas);
+        });
         this.socket.on('agents-status', (agents) => {
             if (!this.managementReady) {
                 this.pendingAgents = agents;
@@ -277,6 +280,8 @@ export class MindServerProxy {
                 if (this.agent?.task) this.agent.task.updateAvailableAgents(this.agents);
             }
             console.log(this.name, 'connected to MindServer');
+            // Broadcasts sent while disconnected were missed; reread the shared list.
+            if (this.agent?.bot?.navigationProtection) this.agent.syncProtectedAreas().catch(error => console.error('Protected area sync failed:', error.message));
             this.initialResolve?.();
             this.initialResolve = null;
             this.initialReject = null;
@@ -400,6 +405,18 @@ export class MindServerProxy {
 
     async setPlacePreference(preference, expectedRevision) {
         return this.requestPlace('preference', preference, expectedRevision);
+    }
+
+    async listProtectedAreas() {
+        return (await this.requestPlace('protected_areas')).value;
+    }
+
+    async protectArea(area) {
+        return this.requestPlace('protect', area);
+    }
+
+    async unprotectArea(areaId) {
+        return this.requestPlace('unprotect', { areaId });
     }
 }
 

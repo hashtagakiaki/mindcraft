@@ -10,6 +10,7 @@ const MAX_TEXT_LENGTH = 240;
 const PLACE_KINDS = new Set(['base', 'farm', 'storage', 'forest', 'village', 'mine', 'resource', 'other']);
 const EXISTENCE_STATES = new Set(['unverified', 'observed', 'missing']);
 const SOURCE_TYPES = new Set(['user', 'observed']);
+const MAX_PROTECTED_AREAS = 64;
 
 export class PlaceStoreError extends Error {
     constructor(code, message) {
@@ -121,6 +122,28 @@ function normalizePlace(input, previous = null) {
     return place;
 }
 
+// A protected area is an inclusive block box in which navigation never digs or places.
+function normalizeProtectedArea(input, previous = null) {
+    requireRecord(input, 'protected area');
+    const name = requireText(input.name ?? previous?.name, 'name', MAX_NAME_LENGTH);
+    const dimension = normalizeDimension(input.dimension ?? previous?.dimension ?? 'overworld');
+    const from = normalizePosition(input.from ?? previous?.min, 'from');
+    const to = normalizePosition(input.to ?? previous?.max, 'to');
+    const min = {}, max = {};
+    for (const axis of ['x', 'y', 'z']) {
+        min[axis] = Math.floor(Math.min(from[axis], to[axis]));
+        max[axis] = Math.floor(Math.max(from[axis], to[axis]));
+    }
+    const id = input.id ?? previous?.id ?? randomUUID();
+    if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(id)) fail('INVALID_INPUT', 'id must contain only letters, numbers, underscore, or hyphen');
+    const recordedBy = input.recordedBy ?? previous?.recordedBy;
+    return {
+        id, name, dimension, min, max,
+        ...(recordedBy ? { recordedBy: requireText(recordedBy, 'recordedBy', 80) } : {}),
+        recordedAt: normalizeTimestamp(input.recordedAt ?? previous?.recordedAt ?? new Date().toISOString(), 'recordedAt')
+    };
+}
+
 function normalizeTimestamp(value, label = 'timestamp') {
     const text = requireText(value, label, 40);
     if (!Number.isFinite(Date.parse(text))) fail('INVALID_INPUT', `${label} must be a valid timestamp`);
@@ -139,13 +162,13 @@ function validateWorldId(worldId) {
 }
 
 function newDocument(worldId) {
-    return { schemaVersion: SCHEMA_VERSION, worldId, revision: 0, places: [], relations: [], agentPreferences: {} };
+    return { schemaVersion: SCHEMA_VERSION, worldId, revision: 0, places: [], relations: [], agentPreferences: {}, protectedAreas: [] };
 }
 
 function validateDocument(document, worldId) {
     if (!isRecord(document) || document.schemaVersion !== SCHEMA_VERSION || document.worldId !== worldId ||
         !Number.isSafeInteger(document.revision) || document.revision < 0 || !Array.isArray(document.places) ||
-        !Array.isArray(document.relations) || !isRecord(document.agentPreferences)) {
+        !Array.isArray(document.relations) || !isRecord(document.agentPreferences) || !Array.isArray(document.protectedAreas)) {
         fail('CORRUPT_STORE', `Place store for world ${worldId} has an invalid schema or scope`);
     }
     const placeIds = new Set();
@@ -168,6 +191,13 @@ function validateDocument(document, worldId) {
         if (!isRecord(preferences) || typeof agentName !== 'string' || !isRecord(preferences.aliases)) fail('CORRUPT_STORE', 'Place store contains invalid agent preferences');
         if (preferences.homePlaceId !== undefined && !placeIds.has(preferences.homePlaceId)) fail('CORRUPT_STORE', 'Agent home refers to a missing place');
         for (const placeId of Object.values(preferences.aliases)) if (!placeIds.has(placeId)) fail('CORRUPT_STORE', 'Agent alias refers to a missing place');
+    }
+    const areaIds = new Set();
+    if (document.protectedAreas.length > MAX_PROTECTED_AREAS) fail('CORRUPT_STORE', 'Place store contains too many protected areas');
+    for (const area of document.protectedAreas) {
+        if (!isRecord(area) || typeof area.id !== 'string' || areaIds.has(area.id)) fail('CORRUPT_STORE', 'Place store contains an invalid or duplicate protected area ID');
+        areaIds.add(area.id);
+        try { normalizeProtectedArea(area, area); } catch (error) { fail('CORRUPT_STORE', `Place store contains an invalid protected area: ${error.message}`); }
     }
     return document;
 }
@@ -254,6 +284,8 @@ export class PlaceStore {
                 }
                 document = newDocument(normalizedWorldId);
             }
+            // Ledgers written before protected areas existed have no such field.
+            if (isRecord(document) && document.protectedAreas === undefined) document.protectedAreas = [];
             validateDocument(document, normalizedWorldId);
             return new PlaceStore({ stateDir: normalizedDir, worldId: normalizedWorldId, lockHandle, lockToken, lockPath, filePath, document });
         } catch (error) {
@@ -494,6 +526,28 @@ export class PlaceStore {
     getAgentPreferences(agentName) {
         const name = requireText(agentName, 'agentName', 80);
         return clone(ownValue(this.document.agentPreferences, name) ?? { aliases: {} });
+    }
+
+    listProtectedAreas() {
+        return clone(this.document.protectedAreas);
+    }
+
+    addProtectedArea(input, options = {}) {
+        return this._enqueue((document) => {
+            if (document.protectedAreas.length >= MAX_PROTECTED_AREAS) fail('LIMIT_REACHED', `At most ${MAX_PROTECTED_AREAS} protected areas can be stored`);
+            const area = normalizeProtectedArea({ ...requireRecord(input, 'protected area'), id: undefined, recordedAt: undefined });
+            document.protectedAreas.push(area);
+            return area;
+        }, options.expectedRevision);
+    }
+
+    removeProtectedArea(areaId, options = {}) {
+        const id = requireText(areaId, 'areaId', 128);
+        return this._enqueue((document) => {
+            const index = document.protectedAreas.findIndex((area) => area.id === id);
+            if (index === -1) fail('AREA_NOT_FOUND', `Protected area '${id}' was not found`);
+            return document.protectedAreas.splice(index, 1)[0];
+        }, options.expectedRevision);
     }
 
     async close() {

@@ -131,6 +131,15 @@ async function main() {
     assert.deepEqual(store.getPlace(farmId).purposes, ['wheat', 'food'])
     assert.equal(store.getPlace(farmId).position.x, 4)
 
+    const area = (await store.addProtectedArea({ name: 'Base', from: { x: 10.7, y: 70, z: -3 }, to: { x: 2, y: 60.2, z: 5 }, recordedBy: 'andy' })).value
+    assert.deepEqual([area.dimension, area.min, area.max, area.recordedBy], ['minecraft:overworld', { x: 2, y: 60, z: -3 }, { x: 10, y: 70, z: 5 }, 'andy'], 'corners in any order become inclusive integer block bounds')
+    const temporaryArea = (await store.addProtectedArea({ name: 'Farm', dimension: 'the_nether', from: { x: 0, y: 0, z: 0 }, to: { x: 1, y: 1, z: 1 } })).value
+    assert.equal(temporaryArea.dimension, 'minecraft:the_nether')
+    await assert.rejects(store.addProtectedArea({ name: 'No corner', from: { x: 0, y: 0, z: 0 } }), { code: 'INVALID_INPUT' })
+    assert.equal((await store.removeProtectedArea(temporaryArea.id)).value.id, temporaryArea.id)
+    await assert.rejects(store.removeProtectedArea(temporaryArea.id), { code: 'AREA_NOT_FOUND' })
+    assert.deepEqual(store.listProtectedAreas(), [area])
+
     const snapshot = store.snapshot()
     await store.close()
     store = null
@@ -148,6 +157,13 @@ async function main() {
     const worldBPath = path.join(stateDir, 'worlds', `${WORLD_B}.json`)
     assert.equal(JSON.parse(await readFile(worldAPath, 'utf8')).places[0].id, farmId)
     assert.equal(JSON.parse(await readFile(worldBPath, 'utf8')).places[0].name, 'Other world')
+
+    const legacyDir = path.join(temp, 'legacy-protected-areas')
+    await mkdir(path.join(legacyDir, 'worlds'), { recursive: true })
+    await writeFile(path.join(legacyDir, 'worlds', `${WORLD_B}.json`), JSON.stringify({ schemaVersion: 1, worldId: WORLD_B, revision: 0, places: [], relations: [], agentPreferences: {} }))
+    const legacyStore = await PlaceStore.open({ stateDir: legacyDir, worldId: WORLD_B })
+    assert.deepEqual(legacyStore.listProtectedAreas(), [], 'a ledger written before protected areas loads with none')
+    await legacyStore.close()
 
     // A failed rename must keep memory unchanged and leave the previous durable file readable.
     store = await PlaceStore.open({ stateDir, worldId: WORLD_A })

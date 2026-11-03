@@ -284,6 +284,7 @@ async function makeAgentSourceFixture(root) {
   await put('src/utils/message_targets.js', await fs.readFile(path.resolve(__dirname, '../src/utils/message_targets.js')))
   await put('src/agent/action_manager.js', await fs.readFile(path.resolve(__dirname, '../src/agent/action_manager.js')))
   await put('src/agent/library/operation_context.js', await fs.readFile(path.resolve(__dirname, '../src/agent/library/operation_context.js')))
+  await put('src/agent/library/protected_areas.js', await fs.readFile(path.resolve(__dirname, '../src/agent/library/protected_areas.js')))
   await put('src/agent/commands/actions.js', await fs.readFile(path.resolve(__dirname, '../src/agent/commands/actions.js')))
   const stubs = {
     'src/agent/history.js': 'export class History {}',

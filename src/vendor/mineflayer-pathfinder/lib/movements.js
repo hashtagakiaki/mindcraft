@@ -123,6 +123,11 @@ class Movements {
     this.entityIntersections = {}
   }
 
+  // Host-owned protected areas (bot.navigationProtection) forbid route digs and placements.
+  editProtected (position) {
+    return this.bot.navigationProtection?.contains(position) === true
+  }
+
   exclusionPlace (block) {
     if (this.exclusionAreasPlace.length === 0) return 0
     let weight = 0
@@ -268,7 +273,7 @@ class Movements {
    * @returns
    */
   safeToBreak (block) {
-    if (!this.canDig) {
+    if (!this.canDig || this.editProtected(block.position)) {
       return false
     }
 
@@ -358,6 +363,7 @@ class Movements {
           cost += this.exclusionBreak(blockD)
           toBreak.push(blockD.position)
         }
+        if (this.editProtected(blockD.position)) return
         cost += this.exclusionPlace(blockD)
         toPlace.push({ x: node.x, y: node.y - 1, z: node.z, dx: dir.x, dy: 0, dz: dir.z, returnPos: new Vec3(node.x, node.y, node.z) })
         cost += this.placeCost // additional cost for placing a block
@@ -368,6 +374,7 @@ class Movements {
         cost += this.exclusionBreak(blockC)
         toBreak.push(blockC.position)
       }
+      if (this.editProtected(blockC.position)) return
       cost += this.exclusionPlace(blockC)
       toPlace.push({ x: node.x + dir.x, y: node.y - 1, z: node.z + dir.z, dx: 0, dy: 1, dz: 0 })
       cost += this.placeCost // additional cost for placing a block
@@ -409,6 +416,7 @@ class Movements {
         cost += this.exclusionBreak(blockD)
         toBreak.push(blockD.position)
       }
+      if (this.editProtected(blockD.position)) return
       cost += this.exclusionPlace(blockC)
       toPlace.push({ x: node.x, y: node.y - 1, z: node.z, dx: dir.x, dy: 0, dz: dir.z })
       cost += this.placeCost // additional cost for placing a block
@@ -574,6 +582,7 @@ class Movements {
       const block0 = this.getBlock(node, 0, -1, 0)
       if (block0.physical && block0.height - node.y < -0.2) return // cannot jump-place from a half block
 
+      if (this.editProtected(block1.position)) return
       cost += this.exclusionPlace(block1)
       toPlace.push({ x: node.x, y: node.y - 1, z: node.z, dx: 0, dy: 1, dz: 0, jump: true })
       cost += this.placeCost // additional cost for placing a block

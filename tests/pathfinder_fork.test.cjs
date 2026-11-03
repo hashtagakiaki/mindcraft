@@ -128,9 +128,63 @@ async function testGotoContract () {
   }
 }
 
+// A one-wide corridor at z=0 (walls at z=±1) whose x=2 cell is either a stone wall to dig or a floor gap to bridge.
+async function testProtectedAreasForbidRouteEdits () {
+  const { Movements, goals } = pathfinderFork()
+  const AStar = pathfinderFork('./lib/astar')
+  const Move = pathfinderFork('./lib/move')
+  const registry = req('prismarine-registry')('1.21.1')
+  const Block = req('prismarine-block')(registry)
+  const { createNavigationProtection } = await import(require('node:url').pathToFileURL(path.join(__dirname, '../src/agent/library/protected_areas.js')))
+  const corridor = obstacle => {
+    const blocks = new Map()
+    const key = p => `${p.x},${p.y},${p.z}`
+    for (let x = 0; x <= 4; x++) {
+      blocks.set(key({ x, y: 63, z: 0 }), 'stone')
+      for (const z of [-1, 1]) for (const y of [63, 64, 65]) blocks.set(key({ x, y, z }), 'stone')
+    }
+    if (obstacle === 'wall') for (const y of [64, 65]) blocks.set(key({ x: 2, y, z: 0 }), 'stone')
+    else blocks.delete(key({ x: 2, y: 63, z: 0 }))
+    const dirt = registry.itemsByName.dirt.id
+    const bot = {
+      registry, version: '1.21.1', game: { minY: -64, height: 384, dimension: 'overworld' },
+      entity: { position: new Vec3(0.5, 64, 0.5), onGround: true, effects: {} },
+      inventory: { items: () => [{ type: dirt, name: 'dirt', count: 16 }], slots: [] },
+      pathfinder: { bestHarvestTool: () => null },
+      supportFeature: () => false,
+      blockAt (position) {
+        const p = position.floored()
+        const block = Block.fromStateId(registry.blocksByName[blocks.get(key(p)) ?? 'air'].defaultState, 0)
+        block.position = p
+        return block
+      }
+    }
+    bot.navigationProtection = createNavigationProtection(bot)
+    return bot
+  }
+  const route = bot => {
+    const movements = Object.assign(new Movements(bot), { allowParkour: false, canDig: true, scafoldingBlocks: [registry.itemsByName.dirt.id] })
+    // Stay in the corridor so pillaring over or bridging around x=2 is not an alternative.
+    movements.getNeighbors = function (node) { return Movements.prototype.getNeighbors.call(this, node).filter(move => move.y === 64 && move.z === 0) }
+    return new AStar(new Move(0, 64, 0, movements.countScaffoldingItems(), 0), movements, new goals.GoalBlock(4, 64, 0), 2000, 1000, -1).compute()
+  }
+  const area = dimension => ({ id: 'base', name: 'Base', dimension, min: { x: 2, y: 60, z: -1 }, max: { x: 2, y: 70, z: 1 } })
+  for (const obstacle of ['wall', 'gap']) {
+    const bot = corridor(obstacle)
+    const open = route(bot)
+    assert.equal(open.status, 'success', `${obstacle}: an unprotected route edits through x=2`)
+    assert.ok(open.path.some(node => node.toBreak.length || node.toPlace.length), `${obstacle}: the open route needs an edit`)
+    bot.navigationProtection.replace([area('minecraft:the_nether')])
+    assert.equal(route(bot).status, 'success', `${obstacle}: another dimension's area does not apply`)
+    bot.navigationProtection.replace([area('minecraft:overworld')])
+    assert.notEqual(route(bot).status, 'success', `${obstacle}: no route edits inside a protected area`)
+  }
+}
+
 async function main () {
   testTrimKeepsMoveBeforeEditNode()
   await testGotoContract()
+  await testProtectedAreasForbidRouteEdits()
 }
 
 main().then(() => console.log('pathfinder fork tests passed')).catch(error => { console.error(error); process.exit(1) })

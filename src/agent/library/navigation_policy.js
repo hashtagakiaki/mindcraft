@@ -301,6 +301,8 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
             return originalDig.call(this, block, ...args);
         }
         if (context.policy.allowDig !== true) throw new Error('Navigation policy forbids digging route blocks.');
+        const protectedArea = bot.navigationProtection?.areaAt(block.position);
+        if (protectedArea) throw new Error(`Protected area ${protectedArea.name} forbids digging route blocks.`);
         const result = await originalDig.call(this, block, ...args);
         const observed = bot.blockAt(block.position);
         if (!observed || observed.type !== 0) throw new Error('Route excavation was not server-confirmed.');
@@ -317,6 +319,8 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
         const blockName = bot.heldItem?.name;
         if (!context.policy.scaffoldBlocks.includes(blockName)) throw new Error(`Navigation policy forbids scaffold block ${blockName ?? 'unknown'}.`);
         const target = reference.position.plus(face).floored();
+        const protectedArea = bot.navigationProtection?.areaAt(target);
+        if (protectedArea) throw new Error(`Protected area ${protectedArea.name} forbids scaffolding.`);
         let placement;
         try {
             placement = await placeAndConfirmNavigationScaffold(bot, target, blockName,

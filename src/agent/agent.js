@@ -11,6 +11,7 @@ import { createObservationScope } from './library/observation_scope.js';
 import { NPCContoller } from './npc/controller.js';
 import { MemoryBank } from './memory_bank.js';
 import { createPlacesFacade } from './places.js';
+import { createNavigationProtection } from './library/protected_areas.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { SelfPrompter } from './self_prompter.js';
 import convoManager from './conversation.js';
@@ -428,6 +429,12 @@ export class Agent {
         return true;
     }
 
+    // Other bots' changes arrive as 'protected-areas' broadcasts; this reads the full list.
+    async syncProtectedAreas() {
+        if (!this.bot?.navigationProtection || !this.places.isEnabled()) return;
+        this.bot.navigationProtection.replace((await serverProxy.requestPlace('protected_areas')).value);
+    }
+
     waitForManagementReady() {
         if (this._shutdownStarted) return Promise.resolve(false);
         if (!this.managementPaused) return Promise.resolve(true);
@@ -497,6 +504,8 @@ export class Agent {
         if (this._shutdownStarted) return;
         this.bot = initBot(this.name);
         this.bot.itemHandoff = convoManager.itemHandoff;
+        this.bot.navigationProtection = createNavigationProtection(this.bot);
+        await this.syncProtectedAreas();
         Object.defineProperty(this.bot, 'inventoryUnconfirmed', {
             configurable: true,
             enumerable: false,

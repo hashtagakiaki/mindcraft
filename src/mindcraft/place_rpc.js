@@ -1,5 +1,5 @@
 const MAX_REQUEST_BYTES = 16 * 1024;
-const MUTATION_OPERATIONS = new Set(['remember', 'observation', 'visit', 'relation', 'alias', 'preference']);
+const MUTATION_OPERATIONS = new Set(['remember', 'observation', 'visit', 'relation', 'alias', 'preference', 'protect', 'unprotect']);
 export const DEFAULT_PLACE_RPC_TIMEOUT_MS = 5000;
 
 export class PlaceRpcError extends Error {
@@ -52,7 +52,7 @@ function validRequest(request) {
     }
 }
 
-export function attachPlaceRpc(socket, { getAgentName, getPlaceStore, isClosing = () => false }) {
+export function attachPlaceRpc(socket, { getAgentName, getPlaceStore, isClosing = () => false, onProtectedAreasChanged = () => {} }) {
     socket.on('place:request', async (request, acknowledge) => {
         if (typeof acknowledge !== 'function') return;
         try {
@@ -118,11 +118,21 @@ export function attachPlaceRpc(socket, { getAgentName, getPlaceStore, isClosing 
                 case 'preference':
                     result = await store.setAgentPreference(agentName, payload, { expectedRevision: request.expectedRevision });
                     break;
+                case 'protected_areas':
+                    result = store.listProtectedAreas();
+                    break;
+                case 'protect':
+                    result = await store.addProtectedArea({ ...payload, recordedBy: agentName }, { expectedRevision: request.expectedRevision });
+                    break;
+                case 'unprotect':
+                    result = await store.removeProtectedArea(payload.areaId, { expectedRevision: request.expectedRevision });
+                    break;
                 default:
                     acknowledge(errorResponse(Object.assign(new Error(`Unknown place operation '${request.operation}'`), { code: 'UNKNOWN_OPERATION' })));
                     return;
             }
             const mutation = MUTATION_OPERATIONS.has(request.operation);
+            if (['protect', 'unprotect'].includes(request.operation)) onProtectedAreasChanged(store.listProtectedAreas());
             acknowledge({
                 ok: true,
                 value: mutation ? result.value : result,

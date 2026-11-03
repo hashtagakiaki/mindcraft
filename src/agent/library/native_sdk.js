@@ -72,6 +72,7 @@ const policyDescription = policy => (policy === EDIT_ROUTE
     : policy === COMBAT_ROUTE
         ? 'Its route cannot dig or use one-block towers and may place confirmed dirt/cobblestone bridge scaffolds that may remain; the existing target/follow/retreat goal is preserved.'
         : 'Its ordinary route preserves existing blocks and leaves no route scaffolds; an unreachable target returns this skill’s normal failure result.')
+    + ' Routes never dig or place scaffolds inside places.protectArea boxes.'
     + ' If the bot starts in an observed hazard, survival egress may dig or place confirmed blocks to reach a safe landing before the ordinary route policy resumes.';
 const s = (name, fields, description, args, options = {}) => {
     const navigationPolicy = navigationPolicies[`skills.${name}`];
@@ -207,6 +208,9 @@ p('rememberObservedAt', { name: text(), kind: enumeration(placeKinds), purpose: 
 p('rememberReported', { name: text(), kind: enumeration(placeKinds), purpose: field('stringValue', { default: '' }), position: position(), dimension: optional(text()) }, 'Save user-reported coordinates as unverified; does not observe the target. Returns a structured record.', a => [a.name, a.kind, a.purpose, a.position, a.dimension]);
 p('setOutputStorage', { fromId: text(), storageId: text() }, 'Link an existing place to storage in the same dimension.', a => [a.fromId, a.storageId]);
 p('setAlias', { alias: text(), placeId: text() }, 'Assign a personal alias to an existing stable place ID.', a => [a.alias, a.placeId]);
+p('listProtectedAreas', {}, 'List the shared protected areas: {id,name,dimension,min,max,recordedBy,recordedAt} with inclusive block bounds.', () => [], { kind: 'query' });
+p('protectArea', { name: text(), from: position(), to: position(), dimension: optional(text({ description: 'Defaults to the current dimension.' })) }, 'Add a shared protected box spanning the inclusive blocks between corners from and to (any order), for example around a base. All bots then plan routes that never dig or place scaffolds inside it, including hazard egress; a route needing such an edit fails as route_not_found. Walking, doors and explicit work targets (breakBlockAt, placeBlock, collect targets) are unaffected. Returns {ok,status,area}.', a => [a.name, a.from, a.to, a.dimension]);
+p('unprotectArea', { areaId: text() }, 'Remove a shared protected area by id. Returns {ok,status,area} with the removed area.', a => [a.areaId]);
 p('tendFarm', { farmId: text(), seedReserve: field('nonnegativeInteger', { default: 1, description: 'Items of each seed to retain.' }) }, 'Tend a saved farm and its linked/uniquely resolved storage. The farm and storage records select the scope and output target; use skills.tendNearbyFarm only when selecting a caller-defined nearby scope instead. Returns observed counts and completion status; incomplete work or storage stops the current code batch.', a => [a.farmId, { seedReserve: a.seedReserve }], { completion: 'farm' });
 define('vision', 'lookAtPlayer', { playerName: text(), direction: enumeration(['at', 'with'], { default: 'at' }) }, 'Look at a visible player or align with their view, then capture an image.', a => [a.playerName, a.direction], { bindBot: false });
 define('vision', 'lookAtPosition', { position: position() }, 'Aim at the exact absolute coordinates and return structured aim, capture time and image analysis.', coords, { bindBot: false, completion: 'observed' });

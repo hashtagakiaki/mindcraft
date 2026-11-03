@@ -178,7 +178,10 @@ export function createMindServer(host_public = false, port = 8080) {
                 if (placeStoreError) throw placeStoreError;
                 return placeStorePromise;
             },
-            isClosing: () => placeRpcClosing
+            isClosing: () => placeRpcClosing,
+            onProtectedAreasChanged: areas => {
+                for (const connection of Object.values(agent_connections)) connection.socket?.emit('protected-areas', areas);
+            }
         });
 
         agentsStatusUpdate(socket);

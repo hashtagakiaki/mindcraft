@@ -35,7 +35,7 @@ async function main() {
   const execution = getNativeSdkExecutionMetadata()
   assert.deepEqual(docs.map(doc => doc.split('\n')[0]), methodNames)
   assert.ok(docs.every(doc => !/Signature:.*\(bot[,)]/.test(doc)))
-  assert.equal(methodNames.length, 80)
+  assert.equal(methodNames.length, 83)
   for (const retired of ['skills.log', 'world.isEntityType', 'world.getNearestBlock', 'world.getNearestBlocksWhere']) {
     assert.ok(!methodNames.includes(retired), `${retired} is not model-facing`)
     assert.ok(getRetiredNativeSdkReplacement(retired), `${retired} names its replacement`)
@@ -50,6 +50,9 @@ async function main() {
   assert.equal(execution['skills.takeFromChest'].completion, 'complete')
   assert.equal(execution['skills.tendNearbyFarm'].completion, 'farm')
   assert.equal(execution['places.tendFarm'].completion, 'farm')
+  assert.equal(execution['places.listProtectedAreas'].kind, 'query')
+  assert.equal(execution['places.protectArea'].kind, 'action')
+  assert.ok(docs.find(doc => doc.startsWith('skills.reachPosition\n')).includes('places.protectArea'), 'route policies name protected areas')
 
   // Every model-facing function has an explicit adapter. A small set of raw pathfinder
   // helpers stays available to internal legacy code but is never model-facing.
