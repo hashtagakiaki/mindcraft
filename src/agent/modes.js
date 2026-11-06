@@ -100,8 +100,17 @@ const modes_list = [
             if (!block) block = {name: 'air'}; // hacky fix when blocks are not loaded
             if (!blockAbove) blockAbove = {name: 'air'};
             if (blockAbove.name === 'water') {
-                // does not call execute so does not interrupt other actions
-                if (!bot.pathfinder.goal) {
+                // A solid block over the submerged head stops the bot from
+                // surfacing, so break it; breakBlockAt equips a harvest tool when one is held.
+                const ceiling = bot.blockAt(bot.entity.position.offset(0, 2, 0));
+                if (ceiling?.boundingBox === 'block' && ceiling.diggable) {
+                    const { x, y, z } = ceiling.position;
+                    execute(this, agent, async () => {
+                        await skills.breakBlockAt(bot, x, y, z);
+                    }, -1, modeDecision(this, bot, 'submerged_under_ceiling', { block: ceiling.name, position: { x, y, z } }));
+                }
+                // otherwise does not call execute so does not interrupt other actions
+                else if (!bot.pathfinder.goal) {
                     bot.setControlState('jump', true);
                 }
             }
