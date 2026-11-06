@@ -5,6 +5,7 @@ import Vec3 from 'vec3';
 const log = skills.log;
 const diagnostics = { lastTask: () => ({ available: false }) };
 const communication = { sendToBot: () => Promise.resolve({ accepted: false }) };
+const wiki = { search: () => Promise.resolve({}), read: () => Promise.resolve({}) };
 
 export async function main(bot, places, vision) {
     /* CODE HERE */
