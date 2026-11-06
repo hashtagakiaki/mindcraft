@@ -181,8 +181,82 @@ async function testProtectedAreasForbidRouteEdits () {
   }
 }
 
+// Routes wade and swim at the surface but never plan a node whose head cell is
+// water-filled (2026-11-06 drowning: collectBlock routed through a flooded tunnel).
+function testRoutesDoNotDive () {
+  const { Movements, goals } = pathfinderFork()
+  const AStar = pathfinderFork('./lib/astar')
+  const Move = pathfinderFork('./lib/move')
+  const registry = req('prismarine-registry')('1.21.1')
+  const Block = req('prismarine-block')(registry)
+  const key = p => `${p.x},${p.y},${p.z}`
+  const world = blocks => ({
+    registry, version: '1.21.1', game: { minY: -64, height: 384, dimension: 'overworld' },
+    entity: { position: new Vec3(0.5, 64, 0.5), onGround: true, effects: {} },
+    inventory: { items: () => [], slots: [] },
+    pathfinder: { bestHarvestTool: () => null },
+    supportFeature: () => false,
+    blockAt (position) {
+      const p = position.floored()
+      const block = Block.fromStateId(registry.blocksByName[blocks.get(key(p)) ?? 'air'].defaultState, 0)
+      block.position = p
+      return block
+    }
+  })
+  // One-wide corridor at z=0 from x=0..6 under a stone ceiling at y=66; x=2..4 holds `fill` at y=64 and y=65.
+  const corridor = (fill, { detour = false } = {}) => {
+    const blocks = new Map()
+    for (let x = 0; x <= 6; x++) {
+      for (const y of [63, 66]) blocks.set(key({ x, y, z: 0 }), 'stone')
+      for (const z of [-1, 1]) for (const y of [63, 64, 65, 66]) blocks.set(key({ x, y, z }), 'stone')
+    }
+    for (let x = 2; x <= 4; x++) for (const y of [64, 65]) blocks.set(key({ x, y, z: 0 }), fill[y])
+    if (detour) {
+      // A dry loop through z=1..2 around the flooded cells.
+      for (let x = 1; x <= 5; x++) for (const z of [1, 2]) {
+        blocks.set(key({ x, y: 63, z }), 'stone')
+        for (const y of [64, 65]) blocks.delete(key({ x, y, z }))
+        blocks.set(key({ x, y: 66, z }), 'stone')
+      }
+    }
+    return world(blocks)
+  }
+  const route = (bot, configure = () => {}, goal = new goals.GoalBlock(6, 64, 0), start = new Move(0, 64, 0, 0, 0)) => {
+    const movements = Object.assign(new Movements(bot), { allowParkour: false, canDig: false })
+    configure(movements)
+    return new AStar(start, movements, goal, 2000, 1000, -1).compute()
+  }
+  const flooded = { 64: 'water', 65: 'water' }
+
+  assert.notEqual(route(corridor(flooded)).status, 'success', 'the default movements plan no route through a flooded tunnel')
+  assert.equal(route(corridor(flooded), m => { m.allowSubmerged = true }).status, 'success', 'allowSubmerged=true still dives')
+  const around = route(corridor(flooded, { detour: true }))
+  assert.equal(around.status, 'success', 'a dry detour is found')
+  assert.ok(!around.path.some(node => node.z === 0 && node.x >= 2 && node.x <= 4), 'the route avoids the flooded cells')
+  for (const plant of ['kelp', 'seagrass']) {
+    assert.notEqual(route(corridor({ 64: 'water', 65: plant })).status, 'success', `${plant} at head height is water-filled`)
+  }
+  assert.equal(route(corridor({ 64: 'water', 65: 'air' })).status, 'success', 'wading with the head in air is allowed')
+  assert.equal(Movements.isWaterFilled(Block.fromStateId(registry.blocksByName.oak_slab.minStateId, 0)), true,
+    'a waterlogged block is water-filled')
+
+  // From a submerged start only rising moves stay: two underwater steps up to air.
+  const steps = new Map()
+  for (const [x, y, name] of [[0, 63, 'stone'], [0, 64, 'water'], [0, 65, 'water'], [0, 66, 'water'], [1, 64, 'stone'],
+    [1, 65, 'water'], [1, 66, 'water'], [2, 64, 'stone'], [2, 65, 'stone'], [-1, 63, 'stone'], [-1, 64, 'water'], [-1, 65, 'water']]) {
+    steps.set(key({ x, y, z: 0 }), name)
+  }
+  const rising = route(world(steps), () => {}, new goals.GoalBlock(2, 66, 0))
+  assert.equal(rising.status, 'success', `a submerged start can climb out: ${rising.status}`)
+  const sideways = route(world(steps), () => {}, new goals.GoalBlock(-1, 64, 0))
+  assert.notEqual(sideways.status, 'success', 'a submerged start does not travel further under water')
+  assert.equal(route(world(steps), m => { m.allowSubmerged = true }, new goals.GoalBlock(-1, 64, 0)).status, 'success',
+    'the sideways cell is reachable when diving is allowed')
+}
+
 async function main () {
   testTrimKeepsMoveBeforeEditNode()
+  testRoutesDoNotDive()
   await testGotoContract()
   await testProtectedAreasForbidRouteEdits()
 }

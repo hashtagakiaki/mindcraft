@@ -99,10 +99,11 @@ const modes_list = [
             let blockAbove = bot.blockAt(bot.entity.position.offset(0, 1, 0));
             if (!block) block = {name: 'air'}; // hacky fix when blocks are not loaded
             if (!blockAbove) blockAbove = {name: 'air'};
-            if (blockAbove.name === 'water') {
+            const eye = skills.eyeLevelBlock(bot);
+            if (skills.isWaterFilled(eye)) {
                 // A solid block over the submerged head stops the bot from
                 // surfacing, so break it; breakBlockAt equips a harvest tool when one is held.
-                const ceiling = bot.blockAt(bot.entity.position.offset(0, 2, 0));
+                const ceiling = bot.blockAt(eye.position.offset(0, 1, 0));
                 if (ceiling?.boundingBox === 'block' && ceiling.diggable) {
                     const { x, y, z } = ceiling.position;
                     execute(this, agent, async () => {

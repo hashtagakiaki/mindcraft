@@ -8,6 +8,14 @@ const cardinalDirections = [
   { x: 0, z: -1 }, // North
   { x: 0, z: 1 } // South
 ]
+// autonomy fork: the cells the physics engine treats as water around the player
+// (prismarine-physics waterLike plus waterlogged blocks), not only the water block.
+const waterPlantNames = new Set(['kelp', 'kelp_plant', 'seagrass', 'tall_seagrass', 'bubble_column'])
+function isWaterFilled (block) {
+  if (!block || typeof block.name !== 'string') return false
+  return block.name === 'water' || block.name === 'flowing_water' || waterPlantNames.has(block.name) || block.isWaterlogged === true
+}
+
 const diagonalDirections = [
   { x: -1, z: -1 },
   { x: -1, z: 1 },
@@ -119,6 +127,9 @@ class Movements {
 
     this.maxDropDown = 4
     this.infiniteLiquidDropdownDistance = true
+    // autonomy fork: routes wade and swim at the surface but never plan a node
+    // whose head cell is water-filled. Set true only where diving is the intent.
+    this.allowSubmerged = false
 
     this.entityIntersections = {}
   }
@@ -721,6 +732,16 @@ class Movements {
   //  dy
 
   getNeighbors (node) {
+    const neighbors = this.getMoveNeighbors(node)
+    if (this.allowSubmerged) return neighbors
+    // From an already submerged node only rising moves stay, so a route can
+    // leave water it starts in without travelling further under it.
+    const headSubmerged = position => isWaterFilled(this.getBlock(position, 0, 1, 0))
+    const fromSubmerged = headSubmerged(node)
+    return neighbors.filter(next => !headSubmerged(next) || (fromSubmerged && next.y > node.y))
+  }
+
+  getMoveNeighbors (node) {
     const neighbors = []
 
     // Simple moves in 4 cardinal points
@@ -765,5 +786,7 @@ class Movements {
     }
   }
 }
+
+Movements.isWaterFilled = isWaterFilled
 
 module.exports = Movements

@@ -206,6 +206,7 @@ pathfinderは `src/vendor/mineflayer-pathfinder/` のfork（mineflayer-pathfinde
 - 経路上の装備・採掘・設置の失敗を握りつぶさず `path_edit_error` を出し、`goto` は元のエラーで失敗する。装備失敗で装備ロックと設置中状態が残り続ける問題も解消した（旧 `navigateWithEditErrors`）。
 - `bot.pathfinder.tickPaused()` がtrueの間は移動ループを止める。navigation policyは所有する経路編集のサーバー確認待ちの間これを使う（旧 `bot.on` の差し替え）。
 - 次ノード到達予測用に `Physics` を公開する。
+- 既定のMovementsは、頭のマスが水で満たされたノード（水・海草・昆布・気泡柱・waterloggedのブロック。判定は `Movements.isWaterFilled`）を計画しない（`allowSubmerged=false`）。足だけの渡渉と水面の泳ぎは計画し、水没したノードからは上へ向かう移動だけを残す。`allowSubmerged=true` にするのは危険脱出と水生mobとの戦闘だけ。2026-11-06のBot3溺死（`collectBlock` が天井まで水で満たされた横穴を経路に選んだ）の対策。
 - `bot.navigationProtection.contains(position)` が真の位置では、経路の掘削（`safeToBreak`）と足場・塔の設置候補を作らない。保護範囲は後述の共有 protected area で、forkのMovementsを使う探索（危険脱出の探索を含む）に効く。他依存のMovementsを渡すpluginの経路編集は、navigation policyの編集ゲートが同じ範囲で拒否する。
 
 MindServer state polling is single-flight with a per-bot 750ms acknowledgement deadline and explicit fresh/stale/unknown state labels. Late state from a replaced connection or removed listener is discarded. Vision camera capture waits for a ready world view, permits one capture at a time, enforces a 2 MiB JPEG limit, and reports bounded shutdown drain status. See [the D13 lifecycle report](docs/state-polling-camera-lifecycle-stage4-20261005.md); offline fixtures do not measure live rendering performance.
@@ -578,6 +579,8 @@ nativeの座標移動は最大512ブロック・32経路区間・180秒の範囲
 #### Hazard recovery evidence and remaining boundary
 
 共通の局所探索は半径32ブロック、連結危険ブロック2048個、着地点候補4096件、探索全体30秒を上限とします。候補ごとのA*は最大6秒、1回50ms・最大2048回の探索処理を行い、event loopへ戻して取消を確認します。移動距離と必要な掘削・設置の手間で退避先を評価し、先頭8候補だけの切捨てと経路16地点の制限はありません。30秒は探索の予算です。移動・掘削・設置には既存の停滞検知・操作期限・取消を適用し、脱出に進捗があっても一律10秒や30秒で止める制限は設けません。`search_limit`は探索予算への到達、`route_not_found`は観測範囲と移動方針の下で探索を終えても経路を得られなかったことを示し、どちらも世界全体の到達不能を意味しません。チェスト操作などの呼び出し元にも元の失敗理由を保持します。
+
+足だけが水の中（頭・目・足元が水でない）の渡渉は危険にせず、脱出探索をせずに通常の経路を始めます。移動中に目が水中に入り、そのまま酸素が2段階下がると、`goToGoal` は経路を止めて `NavigationHazardError`（code `unsafe_state`、酸素・体力・目と頭上のブロック）で失敗します。native `goToPosition` は次の区間を危険脱出から再開し、他のskillは失敗を返します。脱出は `self_preservation` と、次の移動の開始時の危険脱出が担います。水没の判定は目の高さで行い、水面で上下する間に目が一瞬沈んでも止めません。
 
 浅瀬専用の別探索と、深さ4・設置1個という条件は廃止しました。水中では探索・掘削中も浮上入力を維持し、安全な乾地への接地で解除します。既存pathfinderが接地中にしか採掘を開始しないため、水中では予定された障害物へ接近し、所有するSDKの掘削を実行・確認して経路を更新します。未知chunk、新しい危険、粉雪・気泡柱など未対応の遷移、安全な着地先を得られない状態は明示的に失敗します。取消後は新たな編集やcleanupを開始しません。
 

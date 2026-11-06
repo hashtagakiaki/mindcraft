@@ -150,6 +150,7 @@ export default function Vec3(x, y, z) {
     }, GoalFollow: class { constructor(entity, range) { (globalThis.farmScenario.followRanges ??= []).push(range); Object.assign(this,{entity,rangeSq:range*range}) } }, GoalLookAtBlock: class { constructor(position, world) { Object.assign(this,{position,world}) }
       heuristic(p) { return Math.max(Math.abs(p.x-this.position.x),Math.abs(p.y-this.position.y),Math.abs(p.z-this.position.z)) }
     } }, Movements: class { constructor() { this.blocksCantBreak=new Set() }
+      static isWaterFilled(block) { return block?.name === 'water' }
       safeToBreak() { return true }
     }
   };`)
@@ -213,7 +214,7 @@ class GoalCompositeAll {
   heuristic(node) { return Math.max(...this.goals.map(goal => goal.heuristic(node))); }
 }
 class GoalLookAtBlock { constructor(position, world, options) { this.position = position; this.world = world; this.options = options; } heuristic(node) { return Math.hypot(this.position.x - node.x, this.position.z - node.z) + Math.abs(this.position.y - node.y); } }
-export default { goals: { GoalNear, GoalNearXZ, GoalFollow, GoalInvert, GoalCompositeAll, GoalLookAtBlock }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } } };
+export default { goals: { GoalNear, GoalNearXZ, GoalFollow, GoalInvert, GoalCompositeAll, GoalLookAtBlock }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } static isWaterFilled(block) { return block?.name === 'water'; } } };
 `)
 }
 

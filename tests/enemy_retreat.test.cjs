@@ -161,21 +161,22 @@ async function main() {
     assert.equal(await triggeredMode({ enemies: [enemy(22, 5.5, 'creeper')], health: 8 }), 'cowardice:dangerous_encounter',
       'a low-health bot still retreats from a creeper within the retreat distance')
     // self_preservation in a submerged column (feet and head in water) under the given block.
-    const submerged = async ceilingName => {
+    const submerged = async (ceilingName, { feetY = 64.2, column = { 64: 'water', 65: 'water' } } = {}) => {
       const bot = makeBot(), base = bot.blockAt
-      bot.entity.position = new Vec3(.5, 64.2, .5)
+      bot.entity.position = new Vec3(.5, feetY, .5)
       bot.entity.onGround = false
       bot.blockAt = p => {
         const x = Math.floor(p.x), y = Math.floor(p.y), z = Math.floor(p.z)
         if (x !== 0 || z !== 0 || y < 64 || y > 66) return base(p)
-        const b = Block.fromStateId(registry.blocksByName[y === 66 ? ceilingName : 'water'].defaultState)
+        const b = Block.fromStateId(registry.blocksByName[y === 66 ? ceilingName : column[y]].defaultState)
         b.position = new Vec3(x, y, z)
         return b
       }
       const events = [], chat = [], controls = []
       let digging = null
       Object.assign(bot, { _mindcraftDiagnosticRecord: (type, detail) => events.push({ type, detail }),
-        chat: message => chat.push(message), setControlState: (control, state) => controls.push(`${control}:${state}`) })
+        chat: message => chat.push(message), setControlState: (control, state) => controls.push(`${control}:${state}`),
+        clearControlStates: () => controls.push('clear') })
       initModes({ ...modeAgent, bot, prompter: { getInitModes: () => ({ self_preservation: true, cowardice: false, self_defense: false,
         hunting: false, item_collecting: false, torch_placing: false, elbow_room: false, idle_staring: false, cheat: true }) },
         actions: { currentActionLabel: '', currentAction: null, getCancellationContext: () => null,
@@ -194,7 +195,14 @@ async function main() {
       assert.equal(open.reason, null, `${name} over the head does not start digging`)
       assert.deepEqual(open.controls, ['jump:true'], `${name} over the head keeps the swim-up jump`)
     }
-    console.log('enemy retreat: real wall/scaffold and directional reachability, ranged sight, group escape, failure, progress, cancellation and imminent-threat retreat passed; submerged ceiling digging passed')
+    // Kelp holds water like a water block: the eyes in it are submerged.
+    const inKelp = await submerged('stone', { column: { 64: 'kelp_plant', 65: 'kelp' } })
+    assert.equal(inKelp.reason, 'submerged_under_ceiling', 'kelp at the eyes counts as water')
+    // Floating at the surface: the feet+1 cell is water but the eyes are in the air.
+    const surface = await submerged('air', { feetY: 64.5, column: { 64: 'water', 65: 'water' } })
+    assert.equal(surface.reason, null, 'eyes above the surface do not start a dig')
+    assert.ok(!surface.controls.includes('jump:true'), 'eyes above the surface do not need the swim-up jump')
+    console.log('enemy retreat: real wall/scaffold and directional reachability, ranged sight, group escape, failure, progress, cancellation and imminent-threat retreat passed; submerged ceiling digging and eye-level water passed')
   } finally { await rm(root, { recursive: true, force: true }) }
 }
 main().catch(error => { console.error(error); process.exitCode = 1 })

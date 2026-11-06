@@ -58,6 +58,7 @@ function define(namespace, name, fields, description, args, options = {}) {
 }
 const routePolicyDescription = 'Its route may dig and leave confirmed dirt/cobblestone scaffolds; the selected work target keeps this skill’s own permissions.'
     + ' Routes never dig or place scaffolds inside places.protectArea boxes.'
+    + ' Routes wade and swim at the surface but never plan a step with the head under water; if the eyes stay under water while the air supply falls, the current route stops: goToPosition continues with survival egress, other skills fail with code unsafe_state and the observed hazard.'
     + ' If the bot starts in an observed hazard, survival egress may dig or place confirmed blocks to reach a safe landing before the ordinary route resumes.';
 const s = (name, fields, description, args, options = {}) => {
     const navigationPolicy = navigationPolicies[`skills.${name}`];

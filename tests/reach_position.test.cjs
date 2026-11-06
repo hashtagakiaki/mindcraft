@@ -1289,37 +1289,79 @@ async function main() {
         wall: [{ x: -1, y: 64, z: 0 }, { x: -1, y: 65, z: 0 }],
         solidBlocks: [{ x: 9, y: 63, z: 0, name: 'gravel' }],
         hazards: Array.from({ length: 9 }, (_, x) => ({ x, y: 64, z: 0, name: 'water' })) })
-      const wideWaterRecovery = await skills.goToGoal(wideWaterHazard, new pathfinder.goals.GoalBlock(12, 64, 0))
-      assert.equal(wideWaterRecovery, true, JSON.stringify({ output: wideWaterHazard.output, paths: wideWaterHazard.testState.paths }))
-      // With digging uncapped by pathfinder's cost-based searchRadius, the nearer
-      // exit through the adjacent stone is preferred over swimming nine blocks.
-      assert.match(wideWaterHazard.output, /"policy":"safe-landing-confirmed"/, 'shared recovery confirms a safe landing')
+      const wideWaterWade = await skills.goToGoal(wideWaterHazard, new pathfinder.goals.GoalBlock(12, 64, 0))
+      assert.equal(wideWaterWade, true, JSON.stringify({ output: wideWaterHazard.output, paths: wideWaterHazard.testState.paths }))
+      // Water at the feet only (head, eyes and floor dry) is wading, not a hazard:
+      // the route starts directly instead of searching for an egress first.
+      assert.doesNotMatch(wideWaterHazard.output, /navigation-recovery/, 'wading starts no hazard recovery')
       assert.ok(wideWaterHazard.testState.paths.some(path => path.path.at(-1)?.x === 12),
-        'ordinary navigation reaches the requested goal after recovery')
+        'ordinary navigation reaches the requested goal through the shallow water')
 
+      // Mid-route drowning: the route starts dry, then the bot ends up with its eyes
+      // in water. A falling air supply stops the route with the observation;
+      // eyes under water with steady air (a surface bob) do not.
+      const sinking = (oxygenStep, { staleStart = false } = {}) => {
+        const bot = makeBot({ hazards: [{ x: 3, y: 64, z: 0, name: 'water' }, { x: 3, y: 65, z: 0, name: 'water' },
+          { x: 3, y: 66, z: 0, name: 'stone' }] })
+        bot.oxygenLevel = 20
+        let staleTicks = staleStart ? 3 : 0
+        bot.pathfinder.goto = async function (goal) {
+          this.goal = goal
+          bot.entity.position = new Vec3(3.5, 64.2, 0.5)
+          bot.entity.onGround = false
+          const startedAt = Date.now()
+          while (this.goal === goal) {
+            if (Date.now() - startedAt > 1500) { bot.emit('goal_reached', goal); return }
+            // Mineflayer reports -1 until the first air update after entering water.
+            if (staleTicks > 0) { staleTicks--; bot.oxygenLevel = staleTicks ? -1 : 20 }
+            else bot.oxygenLevel = Math.max(0, bot.oxygenLevel - oxygenStep)
+            await delay(50)
+          }
+          throw Object.assign(new Error('Goal changed'), { name: 'GoalChanged' })
+        }
+        return bot
+      }
+      const drowning = sinking(0.5)
+      await assert.rejects(() => skills.goToGoal(drowning, new pathfinder.goals.GoalBlock(6, 64, 0)), error => {
+        assert.equal(error.name, 'NavigationHazardError', String(error))
+        assert.equal(error.navigation.code, 'unsafe_state')
+        assert.equal(error.navigation.hazard.kind, 'submerged')
+        assert.equal(error.navigation.hazard.aboveEyeBlock, 'stone')
+        assert.ok(error.navigation.hazard.oxygenLevel <= 18, JSON.stringify(error.navigation.hazard))
+        return true
+      })
+      assert.equal(drowning.pathfinder.goal, null, 'the stopped route clears its goal')
+      await assert.rejects(() => skills.goToGoal(sinking(0.5, { staleStart: true }), new pathfinder.goals.GoalBlock(6, 64, 0)),
+        error => error.name === 'NavigationHazardError', 'a stale -1 air reading on entering water does not hide the fall')
+      const steadyAir = sinking(0)
+      await assert.rejects(() => skills.goToGoal(steadyAir, new pathfinder.goals.GoalBlock(6, 64, 0)),
+        error => error.name !== 'NavigationHazardError', 'eyes under water with steady air do not stop the route')
+
+      // Recovery starts only in water deeper than the feet: these pools are two blocks deep.
+      const deep = cells => cells.flatMap(cell => [cell, { ...cell, y: cell.y - 1 }])
       const eightyOneBlockWaterHazard = makeBot({ floorY: 63, startY: 64, loadedMaxX: 16, scaffoldInventory: {},
         solidBlocks: [{ x: 5, y: 63, z: 0, name: 'gravel' }],
-        hazards: Array.from({ length: 9 }, (_, dx) => Array.from({ length: 9 }, (_, dz) => ({
+        hazards: deep(Array.from({ length: 9 }, (_, dx) => Array.from({ length: 9 }, (_, dz) => ({
           x: dx - 4, y: 64, z: dz - 4, name: 'water',
-        }))).flat() })
+        }))).flat()) })
       const eightyOneBlockRecovery = await skills.goToGoal(eightyOneBlockWaterHazard, new pathfinder.goals.GoalBlock(8, 64, 0))
       assert.equal(eightyOneBlockRecovery, true, JSON.stringify({ output: eightyOneBlockWaterHazard.output,
         paths: eightyOneBlockWaterHazard.testState.paths }))
-      assert.match(eightyOneBlockWaterHazard.output, /"hazardBlocks":81/,
-        'shared recovery scans the full connected 81-block water region')
+      assert.match(eightyOneBlockWaterHazard.output, /"hazardBlocks":162/,
+        'shared recovery scans the full connected 81-column water region')
       assert.ok(eightyOneBlockWaterHazard.testState.paths.some(path => path.path.at(-1)?.x === 5),
         'shared recovery reaches the nearby gravel landing after searching the larger region')
 
       const longWater = makeBot({ loadedMaxX: 24, corridor: true, scaffoldInventory: {},
         wall: [{ x: -1, y: 64, z: 0 }, { x: -1, y: 65, z: 0 }],
-        hazards: Array.from({ length: 18 }, (_, x) => ({ x, y: 64, z: 0, name: 'water' })) })
+        hazards: deep(Array.from({ length: 18 }, (_, x) => ({ x, y: 64, z: 0, name: 'water' }))) })
       assert.equal(await skills.goToGoal(longWater, new pathfinder.goals.GoalBlock(22, 64, 0)), true)
       assert.ok(longWater.testState.paths.some(route => route.path.length > 16),
         'emergency execution accepts a real route longer than the old 16-node cap')
 
       const waterPlatform = makeBot({ corridor: true,
         wall: [{ x: -1, y: 64, z: 0, name: 'bedrock' }, { x: -1, y: 65, z: 0, name: 'bedrock' }],
-        hazards: Array.from({ length: 9 }, (_, x) => ({ x, y: 64, z: 0, name: 'water' })) })
+        hazards: deep(Array.from({ length: 9 }, (_, x) => ({ x, y: 64, z: 0, name: 'water' }))) })
       const platformSearch = waterPlatform.pathfinder.getPathFromTo
       waterPlatform.pathfinder.getPathFromTo = function * (...args) {
         for (const step of platformSearch.apply(this, args)) {
@@ -1333,8 +1375,8 @@ async function main() {
         'a water landing requires an actual confirmed support placement, even for centered path nodes')
       assert.ok(waterPlatform.testState.edits.some(edit => edit.kind === 'server_place'))
 
-      const ninthCandidate = makeBot({ hazards: Array.from({ length: 5 }, (_, x) =>
-        Array.from({ length: 5 }, (_, z) => ({ x: x - 2, y: 64, z: z - 2, name: 'water' }))).flat() })
+      const ninthCandidate = makeBot({ hazards: deep(Array.from({ length: 5 }, (_, x) =>
+        Array.from({ length: 5 }, (_, z) => ({ x: x - 2, y: 64, z: z - 2, name: 'water' }))).flat()) })
       const candidateSearch = ninthCandidate.pathfinder.getPathFromTo
       let rejectedCandidates = 0
       ninthCandidate.pathfinder.getPathFromTo = function * (movements, ...args) {

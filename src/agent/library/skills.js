@@ -178,6 +178,10 @@ const REACH_POSITION_NO_PROGRESS_LIMIT = 3;
 const REACH_POSITION_MAX_SAFE_FEET_DROP = 3;
 const reachPositionMovementOwners = new WeakMap();
 const navigationRecoveryActive = new WeakSet();
+const AQUATIC_MOBS = new Set(['drowned', 'cod', 'salmon', 'tropical_fish', 'squid']);
+// Water at the eyes with the air supply falling for this long ends a route
+// (one oxygen level is 15 ticks); a surface bob dips the eyes only briefly.
+const NAVIGATION_DROWNING_OXYGEN_DROP = 2;
 const NAVIGATION_RECOVERY_RADIUS = 32;
 const NAVIGATION_RECOVERY_MAX_HAZARD_BLOCKS = 2048;
 const NAVIGATION_RECOVERY_MAX_CANDIDATES = 4096;
@@ -1117,7 +1121,7 @@ export async function attackNearest(bot, mobType, kill=true) {
      * await skills.attackNearest(bot, "zombie", true);
      **/
     bot.modes.pause('cowardice');
-    if (mobType === 'drowned' || mobType === 'cod' || mobType === 'salmon' || mobType === 'tropical_fish' || mobType === 'squid')
+    if (AQUATIC_MOBS.has(mobType))
         bot.modes.pause('self_preservation'); // so it can go underwater. TODO: have an drowning mode so we don't turn off all self_preservation
     const mob = world.getNearbyEntities(bot, 24).find(entity => entity.name === mobType);
     if (mob) {
@@ -1146,6 +1150,8 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24, defend=fal
     bot.modes.pause('cowardice');
     if (bot.pathfinder) {
         const movements = navigationMovements(bot);
+        // Routes never dive; fighting a water mob is the one intended dive.
+        if (AQUATIC_MOBS.has(entity.name)) movements.allowSubmerged = true;
         bot.pathfinder.setMovements(movements);
         // PVP installs its own movements when an attack starts.
         bot.pvp.movements = movements;
@@ -2687,6 +2693,27 @@ export async function receiveFromPlayer(bot, itemType, username, num=1, timeoutM
     return received >= num;
 }
 
+// Water-filled cells as the physics engine sees them (water, water plants, waterlogged).
+export function isWaterFilled(block) {
+    return pf.Movements.isWaterFilled(block);
+}
+
+// The block at eye height decides breathing; the feet+1 cell can be water while
+// the eyes of a player floating at the surface are in the air.
+export function eyeLevelBlock(bot) {
+    const eyeHeight = Number.isFinite(bot.entity?.eyeHeight) ? bot.entity.eyeHeight : 1.62;
+    return bot.blockAt(bot.entity.position.offset(0, eyeHeight, 0));
+}
+
+// Water only around the feet of a standing bot: ordinary wading, not a hazard.
+function wadingInShallowWater(bot, descriptor) {
+    if (descriptor?.kind !== 'water' || ![...descriptor.names].every(name => REACH_POSITION_WATER_NAMES.has(name))) return false;
+    const feet = bot.entity.position.floored();
+    const headOffset = Math.max(1, Math.ceil((Number.isFinite(bot.entity.height) ? bot.entity.height : 1.8) - 0.01) - 1);
+    return isWaterFilled(bot.blockAt(feet)) && !isWaterFilled(bot.blockAt(feet.offset(0, headOffset, 0)))
+        && !isWaterFilled(bot.blockAt(feet.offset(0, -1, 0))) && !isWaterFilled(eyeLevelBlock(bot));
+}
+
 function navigationGoalPosition(bot) {
     const position = bot.entity.position;
     const node = position.floored();
@@ -2711,10 +2738,12 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     if (!navigationRecoveryActive.has(bot)) {
         await awaitNavigationLanding(bot);
         const startDescriptor = navigationRecoveryDescriptor(bot);
-        const releaseRecoverySwim = startDescriptor?.submerged ? holdNavigationRecoverySwim(bot) : () => {};
+        // Wading starts the route directly; only deeper water needs egress first.
+        const wading = wadingInShallowWater(bot, startDescriptor);
+        const releaseRecoverySwim = startDescriptor?.submerged && !wading ? holdNavigationRecoverySwim(bot) : () => {};
         let recovery;
         try {
-            recovery = await navigationRecovery(bot, movementOverride, goal);
+            recovery = wading ? null : await navigationRecovery(bot, movementOverride, goal);
         } catch (error) {
             releaseRecoverySwim();
             throw error;
@@ -2855,6 +2884,10 @@ export async function goToGoal(bot, goal, movementOverride=null) {
     let bestGoalDistance;
     let lastProgressAt;
     let stallError = null;
+    // Set when the eyes stay under water while the air supply falls.
+    let hazardStop = null;
+    let submergedOxygen = null;
+    const watchDrowning = !navigationRecoveryActive.has(bot) && final_movements.allowSubmerged !== true;
     let navigationError = false;
     let clearOwnedGoalOnFailure = false;
     let lastPathUpdate = null;
@@ -2994,6 +3027,33 @@ export async function goToGoal(bot, goal, movementOverride=null) {
                 timeoutHandle = null;
                 return;
             }
+            if (watchDrowning && !hazardStop) {
+                const eye = eyeLevelBlock(bot);
+                if (isWaterFilled(eye)) {
+                    // Mineflayer can report a stale -1 until the first air update after
+                    // entering water (or after a respawn); measure the fall from the
+                    // highest observed air while the eyes stay under water.
+                    if (Number.isFinite(bot.oxygenLevel) && bot.oxygenLevel >= 0) {
+                        submergedOxygen = Math.max(submergedOxygen ?? bot.oxygenLevel, bot.oxygenLevel);
+                    }
+                    if (submergedOxygen != null && bot.oxygenLevel >= 0
+                        && submergedOxygen - bot.oxygenLevel >= NAVIGATION_DROWNING_OXYGEN_DROP) {
+                        const above = bot.blockAt(eye.position.offset(0, 1, 0));
+                        hazardStop = new Error(`Navigation stopped because the bot is under water: air supply fell from ${submergedOxygen} to ${bot.oxygenLevel} of 20. Surface or reach air before continuing.`);
+                        hazardStop.name = 'NavigationHazardError';
+                        hazardStop.navigation = {
+                            code: 'unsafe_state', phase: 'movement', lastPathUpdate,
+                            hazard: { kind: 'submerged', oxygenLevel: bot.oxygenLevel, oxygenAtSubmersion: submergedOxygen,
+                                health: bot.health ?? null, eyeBlock: eye?.name ?? null, aboveEyeBlock: above?.name ?? null },
+                            position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
+                            observedAt: new Date().toISOString(),
+                        };
+                        navigationError = true;
+                        stopOwnedNavigation();
+                        return;
+                    }
+                } else submergedOxygen = null;
+            }
             const currentGoalDistance = goal.heuristic(navigationGoalPosition(bot));
             // A dig owns its own finite ground/look/break deadlines; restart the
             // stall clock when it ends instead of cutting a slow, normal break.
@@ -3033,7 +3093,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
                     break;
                 } catch (err) {
                     const progressed = digCompletedSinceStart || lastProgressAt > attemptStartedAt;
-                    if (err?.name !== 'Timeout' || !progressed || stallError || owner?.signal.aborted || bot.interrupt_code) throw err;
+                    if (err?.name !== 'Timeout' || !progressed || stallError || hazardStop || owner?.signal.aborted || bot.interrupt_code) throw err;
                     digCompletedSinceStart = false;
                     attemptStartedAt = Date.now();
                     navigation = startNavigation();
@@ -3041,7 +3101,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
             }
         } catch (caught) {
             let err = caught;
-            if (!stallError) {
+            if (!stallError && !hazardStop) {
                 // Stopping the action clears the owned goal, which the goto wrapper
                 // reports as GoalChanged; name the actual stop reason instead.
                 if (err?.name === 'GoalChanged' && owner?.signal.aborted) {
@@ -3063,6 +3123,7 @@ export async function goToGoal(bot, goal, movementOverride=null) {
                 throw err;
             }
         }
+        if (hazardStop) { clearOwnedGoalOnFailure = true; throw hazardStop; }
         if (stallError) { clearOwnedGoalOnFailure = true; throw stallError; }
         const endNode = navigationGoalPosition(bot);
         if (typeof goal.isEnd === 'function' && !goal.isEnd(endNode)) {
@@ -3747,6 +3808,8 @@ async function navigationRecovery(bot, suppliedMovements, requestedGoal = null) 
     movements.digCost = 2;
     movements.placeCost = 2;
     movements.navigationRecoveryKind = descriptor.kind;
+    // Egress starts under water and may have to cross it.
+    movements.allowSubmerged = true;
     const originalGetBlock = movementSource.getBlock;
     movements.getBlock = (position, dx, dy, dz) => {
         const block = originalGetBlock.call(movements, position, dx, dy, dz);
