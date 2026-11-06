@@ -248,6 +248,10 @@ function testRoutesDoNotDive () {
   }
   const rising = route(world(steps), () => {}, new goals.GoalBlock(2, 66, 0))
   assert.equal(rising.status, 'success', `a submerged start can climb out: ${rising.status}`)
+  const swimUp = route(world(steps), m => { m.allowSubmerged = true }, new goals.GoalBlock(0, 66, 0))
+  assert.equal(swimUp.status, 'success', `a submerged start can swim straight up: ${swimUp.status}`)
+  assert.ok(swimUp.path.some(node => node.x === 0 && node.z === 0 && node.y > 64 && node.toPlace.length === 0),
+    'swim-up is a vertical movement and does not require a scaffold')
   const sideways = route(world(steps), () => {}, new goals.GoalBlock(-1, 64, 0))
   assert.notEqual(sideways.status, 'success', 'a submerged start does not travel further under water')
   assert.equal(route(world(steps), m => { m.allowSubmerged = true }, new goals.GoalBlock(-1, 64, 0)).status, 'success',

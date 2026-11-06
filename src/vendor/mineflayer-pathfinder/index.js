@@ -27,6 +27,8 @@ function inject (bot) {
   let path = []
   let pathUpdated = false
   let digging = false
+  let digStarted = false
+  let pathGeneration = 0
   let placing = false
   let placingBlock = null
   let awaitingPillarLanding = false
@@ -104,11 +106,11 @@ function inject (bot) {
     }
     const astarContext = new AStar(start, movements, goal, timeout, tickTimeout, searchRadius)
     let result = astarContext.compute()
-    if (optimizePath) result.path = postProcessPath(result.path)
+    if (optimizePath) result.path = postProcessPath(result.path.map(node => Object.assign(new Move(), node, { toBreak: [...node.toBreak], toPlace: [...node.toPlace] })))
     yield { result, astarContext }
     while (result.status === 'partial') {
       result = astarContext.compute()
-      if (optimizePath) result.path = postProcessPath(result.path)
+      if (optimizePath) result.path = postProcessPath(result.path.map(node => Object.assign(new Move(), node, { toBreak: [...node.toBreak], toPlace: [...node.toPlace] })))
       yield { result, astarContext }
     }
   }
@@ -128,14 +130,17 @@ function inject (bot) {
 
   function detectDiggingStopped () {
     digging = false
-    bot.removeAllListeners('diggingAborted', detectDiggingStopped)
-    bot.removeAllListeners('diggingCompleted', detectDiggingStopped)
+    digStarted = false
+    bot.removeListener('diggingAborted', detectDiggingStopped)
+    bot.removeListener('diggingCompleted', detectDiggingStopped)
   }
 
   function resetPath (reason, clearStates = true) {
+    pathGeneration++
     if (!stopPathing && path.length > 0) bot.emit('path_reset', reason)
     path = []
-    if (digging) {
+    if (digging && !digStarted) digging = false
+    if (digStarted) {
       bot.on('diggingAborted', detectDiggingStopped)
       bot.on('diggingCompleted', detectDiggingStopped)
       bot.stopDigging()
@@ -445,7 +450,7 @@ function inject (bot) {
 
     if (astarContext && astartTimedout) {
       const results = astarContext.compute()
-      results.path = postProcessPath(results.path)
+      results.path = postProcessPath(results.path.map(node => Object.assign(new Move(), node, { toBreak: [...node.toBreak], toPlace: [...node.toPlace] })))
       pathFromPlayer(results.path)
       bot.emit('path_update', results)
       path = results.path
@@ -485,24 +490,44 @@ function inject (bot) {
 
     // Handle digging
     if (digging || nextPoint.toBreak.length > 0) {
-      if (!digging && bot.entity.onGround) {
+      if (!digging && (bot.entity.onGround || bot.entity.isInWater)) {
         digging = true
         const b = nextPoint.toBreak.shift()
         const block = bot.blockAt(new Vec3(b.x, b.y, b.z), false)
+        const eye = bot.entity.position.offset(0, bot.entity.eyeHeight ?? 1.62, 0)
+        const submergedDig = bot.entity.isInWater || Movements.isWaterFilled(bot.blockAt(eye))
+        const resolveInteraction = bot.pathfinder.resolveBlockInteraction
+        const interaction = submergedDig && typeof resolveInteraction === 'function' ? resolveInteraction(block) : null
+        if (!block || (submergedDig && interaction?.status !== 'ready')) {
+          digging = false
+          resetPath('dig_not_reachable')
+          bot.emit('path_edit_error', new Error(interaction?.reason || 'Pathfinder submerged dig target is not currently reachable and visible'))
+          return
+        }
         const tool = bot.pathfinder.bestHarvestTool(block)
         fullStop()
+        const generation = pathGeneration
+        // Keep buoyancy active while the bot mines a ceiling or wall.
+        if (submergedDig) {
+          bot.setControlState('jump', true)
+        }
 
         // autonomy fork: edit failures emit path_edit_error (goto rejects with it)
         // instead of being swallowed.
         const digBlock = () => {
+          if (generation !== pathGeneration || !digging) return
+          digStarted = true
           bot.dig(block, true)
             .catch(err => {
+              if (generation !== pathGeneration) return
+              detectDiggingStopped()
               resetPath('dig_error')
               bot.emit('path_edit_error', err)
             })
             .then(function () {
+              if (generation !== pathGeneration) return
               lastNodeTime = performance.now()
-              digging = false
+              detectDiggingStopped()
             })
         }
 
@@ -510,6 +535,7 @@ function inject (bot) {
           digBlock()
         } else {
           bot.equip(tool, 'hand').then(() => digBlock(), err => {
+            if (generation !== pathGeneration) return
             digging = false
             resetPath('equip_error')
             bot.emit('path_edit_error', err)
@@ -574,7 +600,11 @@ function inject (bot) {
             lockEquipItem.release()
             const refBlock = bot.blockAt(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z), false)
             if (!lockPlaceBlock.tryAcquire()) return
-            bot.world.setBlockStateId(refBlock.position.offset(placingBlock.dx, placingBlock.dy, placingBlock.dz), 1)
+            const placementTarget = refBlock.position.offset(placingBlock.dx, placingBlock.dy, placingBlock.dz)
+            const submergedPlacement = Movements.isWaterFilled(bot.blockAt(placementTarget, false))
+            // Keep actual water visible to the interaction resolver/wrapper;
+            // the optimistic local update would hide the real water cell.
+            if (!submergedPlacement) bot.world.setBlockStateId(placementTarget, 1)
             if (interactableBlocks.includes(refBlock.name)) {
               bot.setControlState('sneak', true)
             }
@@ -608,9 +638,12 @@ function inject (bot) {
     }
 
     let dx = nextPoint.x - p.x
-    const dy = nextPoint.y - p.y
+    let dy = nextPoint.y - p.y
     let dz = nextPoint.z - p.z
-    if (Math.abs(dx) <= 0.175 && Math.abs(dz) <= 0.175 && Math.abs(dy) < 1) {
+    const centered = Math.abs(dx) <= 0.175 && Math.abs(dz) <= 0.175
+    const risingInWater = centered && bot.entity.isInWater && dy > 0 &&
+      Movements.isWaterFilled(bot.blockAt(nextPoint))
+    if (centered && (risingInWater ? dy < 0.1 : Math.abs(dy) < 1)) {
       // arrived at next point
       lastNodeTime = performance.now()
       if (stopPathing) {
@@ -635,7 +668,16 @@ function inject (bot) {
         return
       }
       dx = nextPoint.x - p.x
+      dy = nextPoint.y - p.y
       dz = nextPoint.z - p.z
+    }
+
+    // Keep rising in the same column until reaching the next swim node.
+    if (bot.entity.isInWater && Math.abs(dx) <= 0.175 && Math.abs(dz) <= 0.175 && dy > 0) {
+      bot.setControlState('forward', false)
+      bot.setControlState('sprint', false)
+      bot.setControlState('jump', true)
+      return
     }
 
     bot.look(Math.atan2(-dx, -dz), 0)

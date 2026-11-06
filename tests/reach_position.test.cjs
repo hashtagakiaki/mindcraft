@@ -1297,13 +1297,17 @@ async function main() {
       assert.ok(wideWaterHazard.testState.paths.some(path => path.path.at(-1)?.x === 12),
         'ordinary navigation reaches the requested goal through the shallow water')
 
-      // Mid-route drowning: the route starts dry, then the bot ends up with its eyes
-      // in water. A falling air supply stops the route with the observation;
-      // eyes under water with steady air (a surface bob) do not.
+      // The physics watcher interrupts for falling air and preserves its
+      // observation on an egress failure. Steady air (a surface bob) does not.
       const sinking = (oxygenStep, { staleStart = false } = {}) => {
         const bot = makeBot({ hazards: [{ x: 3, y: 64, z: 0, name: 'water' }, { x: 3, y: 65, z: 0, name: 'water' },
           { x: 3, y: 66, z: 0, name: 'stone' }] })
         bot.oxygenLevel = 20
+        const getPathFromTo = bot.pathfinder.getPathFromTo
+        bot.pathfinder.getPathFromTo = function * (movements, ...args) {
+          if (movements.navigationRecoveryKind) yield { result: { status: 'noPath', path: [] } }
+          else yield * getPathFromTo.call(this, movements, ...args)
+        }
         let staleTicks = staleStart ? 3 : 0
         bot.pathfinder.goto = async function (goal) {
           this.goal = goal
@@ -1315,6 +1319,7 @@ async function main() {
             // Mineflayer reports -1 until the first air update after entering water.
             if (staleTicks > 0) { staleTicks--; bot.oxygenLevel = staleTicks ? -1 : 20 }
             else bot.oxygenLevel = Math.max(0, bot.oxygenLevel - oxygenStep)
+            bot.emit('physicsTick')
             await delay(50)
           }
           throw Object.assign(new Error('Goal changed'), { name: 'GoalChanged' })
@@ -1323,8 +1328,8 @@ async function main() {
       }
       const drowning = sinking(0.5)
       await assert.rejects(() => skills.goToGoal(drowning, new pathfinder.goals.GoalBlock(6, 64, 0)), error => {
-        assert.equal(error.name, 'NavigationHazardError', String(error))
-        assert.equal(error.navigation.code, 'unsafe_state')
+        assert.equal(error.name, 'NavigationRecoveryNoPathError', String(error))
+        assert.equal(error.navigation.code, 'route_not_found')
         assert.equal(error.navigation.hazard.kind, 'submerged')
         assert.equal(error.navigation.hazard.aboveEyeBlock, 'stone')
         assert.ok(error.navigation.hazard.oxygenLevel <= 18, JSON.stringify(error.navigation.hazard))
@@ -1332,10 +1337,10 @@ async function main() {
       })
       assert.equal(drowning.pathfinder.goal, null, 'the stopped route clears its goal')
       await assert.rejects(() => skills.goToGoal(sinking(0.5, { staleStart: true }), new pathfinder.goals.GoalBlock(6, 64, 0)),
-        error => error.name === 'NavigationHazardError', 'a stale -1 air reading on entering water does not hide the fall')
+        error => error.navigation?.hazard?.kind === 'submerged', 'a stale -1 air reading on entering water does not hide the fall')
       const steadyAir = sinking(0)
       await assert.rejects(() => skills.goToGoal(steadyAir, new pathfinder.goals.GoalBlock(6, 64, 0)),
-        error => error.name !== 'NavigationHazardError', 'eyes under water with steady air do not stop the route')
+        error => !error.navigation?.hazard, 'eyes under water with steady air do not stop the route')
 
       // Recovery starts only in water deeper than the feet: these pools are two blocks deep.
       const deep = cells => cells.flatMap(cell => [cell, { ...cell, y: cell.y - 1 }])

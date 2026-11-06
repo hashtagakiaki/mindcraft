@@ -267,7 +267,7 @@ class Movements {
     b.safe = (b.boundingBox === 'empty' || b.climbable || this.carpets.has(b.type) || isOpenTrapdoor) && !this.blocksToAvoid.has(b.type)
     b.physical = (b.boundingBox === 'block' && !this.fences.has(b.type)) || isClosedTrapdoor
     b.replaceable = this.replaceables.has(b.type) && !b.physical
-    b.liquid = this.liquids.has(b.type)
+    b.liquid = this.liquids.has(b.type) || !b.physical && isWaterFilled(b)
     b.height = pos.y + dy
     b.canFall = this.gravityBlocks.has(b.type)
     b.openable = this.openable.has(b.type)
@@ -313,7 +313,7 @@ class Movements {
    * @param {[]} toBreak
    * @returns {number}
    */
-  safeOrBreak (block, toBreak) {
+  safeOrBreak (block, toBreak, node = this.bot.entity.position.floored()) {
     let cost = 0
     cost += this.exclusionStep(block) // Is excluded so can't move or break
     cost += this.getNumEntitiesAt(block.position, 0, 0, 0) * this.entityCost
@@ -338,7 +338,20 @@ class Movements {
     const tool = this.bot.pathfinder.bestHarvestTool(block)
     const enchants = (tool && tool.nbt) ? nbt.simplify(tool.nbt).Enchantments : []
     const effects = this.bot.entity.effects
-    const digTime = block.digTime(tool ? tool.type : null, false, false, false, enchants, effects)
+    if (node.digEnvironment === undefined) {
+      const entity = this.bot.entity
+      const current = entity.position.floored()
+      const live = current.x === node.x && current.y === node.y && current.z === node.z
+      const feet = live ? entity.position : new Vec3(node.x + 0.5, node.y, node.z + 0.5)
+      const swimming = isWaterFilled(this.bot.blockAt(feet))
+      node.digEnvironment = {
+        eyesInWater: isWaterFilled(this.bot.blockAt(feet.offset(0, entity.eyeHeight ?? 1.62, 0))),
+        airborne: swimming && (live ? !entity.onGround : !this.getBlock(node, 0, -1, 0).physical)
+      }
+    }
+    const { eyesInWater, airborne } = node.digEnvironment
+    const digTime = block.digTime(tool ? tool.type : null, this.bot.game?.gameMode === 'creative',
+      eyesInWater, airborne, enchants, effects)
     const laborCost = (1 + 3 * digTime / 1000) * this.digCost
     cost += laborCost
     return cost
@@ -396,11 +409,11 @@ class Movements {
     const block0 = this.getBlock(node, 0, -1, 0)
     if (blockC.height - block0.height > 1.2) return // Too high to jump
 
-    cost += this.safeOrBreak(blockA, toBreak)
+    cost += this.safeOrBreak(blockA, toBreak, node)
     if (cost > 100) return
-    cost += this.safeOrBreak(blockH, toBreak)
+    cost += this.safeOrBreak(blockH, toBreak, node)
     if (cost > 100) return
-    cost += this.safeOrBreak(blockB, toBreak)
+    cost += this.safeOrBreak(blockB, toBreak, node)
     if (cost > 100) return
 
     neighbors.push(new Move(blockB.position.x, blockB.position.y, blockB.position.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
@@ -433,14 +446,14 @@ class Movements {
       cost += this.placeCost // additional cost for placing a block
     }
 
-    cost += this.safeOrBreak(blockB, toBreak)
+    cost += this.safeOrBreak(blockB, toBreak, node)
     if (cost > 100) return
 
     // Open fence gates and doors
     if (this.canOpenDoors && blockC.openable && !blockC._properties.open) {
       toPlace.push({ x: node.x + dir.x, y: node.y, z: node.z + dir.z, dx: 0, dy: 0, dz: 0, useOne: true }) // Indicate that a block should be used on this block not placed
     } else {
-      cost += this.safeOrBreak(blockC, toBreak)
+      cost += this.safeOrBreak(blockC, toBreak, node)
       if (cost > 100) return
     }
 
@@ -463,18 +476,18 @@ class Movements {
     const blockB1 = this.getBlock(node, 0, y + 1, dir.z)
     const blockC1 = this.getBlock(node, 0, y, dir.z)
     const blockD1 = this.getBlock(node, 0, y - 1, dir.z)
-    cost1 += this.safeOrBreak(blockB1, toBreak1)
-    cost1 += this.safeOrBreak(blockC1, toBreak1)
-    if (blockD1.height - block0.height > 1.2) cost1 += this.safeOrBreak(blockD1, toBreak1)
+    cost1 += this.safeOrBreak(blockB1, toBreak1, node)
+    cost1 += this.safeOrBreak(blockC1, toBreak1, node)
+    if (blockD1.height - block0.height > 1.2) cost1 += this.safeOrBreak(blockD1, toBreak1, node)
 
     let cost2 = 0
     const toBreak2 = []
     const blockB2 = this.getBlock(node, dir.x, y + 1, 0)
     const blockC2 = this.getBlock(node, dir.x, y, 0)
     const blockD2 = this.getBlock(node, dir.x, y - 1, 0)
-    cost2 += this.safeOrBreak(blockB2, toBreak2)
-    cost2 += this.safeOrBreak(blockC2, toBreak2)
-    if (blockD2.height - block0.height > 1.2) cost2 += this.safeOrBreak(blockD2, toBreak2)
+    cost2 += this.safeOrBreak(blockB2, toBreak2, node)
+    cost2 += this.safeOrBreak(blockC2, toBreak2, node)
+    if (blockD2.height - block0.height > 1.2) cost2 += this.safeOrBreak(blockD2, toBreak2, node)
 
     if (cost1 < cost2) {
       cost += cost1
@@ -485,9 +498,9 @@ class Movements {
     }
     if (cost > 100) return
 
-    cost += this.safeOrBreak(this.getBlock(node, dir.x, y, dir.z), toBreak)
+    cost += this.safeOrBreak(this.getBlock(node, dir.x, y, dir.z), toBreak, node)
     if (cost > 100) return
-    cost += this.safeOrBreak(this.getBlock(node, dir.x, y + 1, dir.z), toBreak)
+    cost += this.safeOrBreak(this.getBlock(node, dir.x, y + 1, dir.z), toBreak, node)
     if (cost > 100) return
 
     if (this.getBlock(node, 0, 0, 0).liquid) cost += this.liquidCost
@@ -495,7 +508,7 @@ class Movements {
     const blockD = this.getBlock(node, dir.x, -1, dir.z)
     if (y === 1) { // Case jump up by 1
       if (blockC.height - block0.height > 1.2) return // Too high to jump
-      cost += this.safeOrBreak(this.getBlock(node, 0, 2, 0), toBreak)
+      cost += this.safeOrBreak(this.getBlock(node, 0, 2, 0), toBreak, node)
       if (cost > 100) return
       cost += 1
       neighbors.push(new Move(blockC.position.x, blockC.position.y + 1, blockC.position.z, node.remainingBlocks, cost, toBreak))
@@ -535,11 +548,11 @@ class Movements {
     if (!blockLand) return
     if (!this.infiniteLiquidDropdownDistance && ((node.y - blockLand.position.y) > this.maxDropDown)) return // Don't drop down into water
 
-    cost += this.safeOrBreak(blockB, toBreak)
+    cost += this.safeOrBreak(blockB, toBreak, node)
     if (cost > 100) return
-    cost += this.safeOrBreak(blockC, toBreak)
+    cost += this.safeOrBreak(blockC, toBreak, node)
     if (cost > 100) return
-    cost += this.safeOrBreak(blockD, toBreak)
+    cost += this.safeOrBreak(blockD, toBreak, node)
     if (cost > 100) return
 
     if (blockC.liquid) return // dont go underwater
@@ -559,7 +572,7 @@ class Movements {
     const blockLand = this.getLandingBlock(node, { x: 0, z: 0 })
     if (!blockLand) return
 
-    cost += this.safeOrBreak(block0, toBreak)
+    cost += this.safeOrBreak(block0, toBreak, node)
     if (cost > 100) return
 
     if (this.getBlock(node, 0, 0, 0).liquid) return // dont go underwater
@@ -571,7 +584,15 @@ class Movements {
 
   getMoveUp (node, neighbors) {
     const block1 = this.getBlock(node, 0, 0, 0)
-    if (block1.liquid) return
+    if (block1.liquid) {
+      // Standard swim-up step. No scaffold is needed in water; break a
+      // ceiling block only when the normal movement policy allows it.
+      const block2 = this.getBlock(node, 0, 2, 0)
+      const toBreak = []
+      const cost = 1 + this.safeOrBreak(block2, toBreak, node) + this.liquidCost
+      if (cost <= 100) neighbors.push(new Move(node.x, node.y + 1, node.z, node.remainingBlocks, cost, toBreak, []))
+      return
+    }
     if (this.getNumEntitiesAt(node, 0, 0, 0) > 0) return // an entity (besides the player) is blocking the building area
 
     const block2 = this.getBlock(node, 0, 2, 0)
@@ -579,7 +600,7 @@ class Movements {
     let cost = 1 // move cost
     const toBreak = []
     const toPlace = []
-    cost += this.safeOrBreak(block2, toBreak)
+    cost += this.safeOrBreak(block2, toBreak, node)
     if (cost > 100) return
 
     if (!block1.climbable) {
@@ -620,7 +641,7 @@ class Movements {
     const toPlace = []
     
     // Make sure we can break/pass through the block above if needed
-    cost += this.safeOrBreak(blockAbove, toBreak)
+    cost += this.safeOrBreak(blockAbove, toBreak, node)
     if (cost > 100) return
     
     // Add cost for opening the trapdoor
@@ -646,7 +667,7 @@ class Movements {
     
     // Check if there's space to jump up from the top of the ladder
     const blockJumpTarget = this.getBlock(node, 0, 2, 0)
-    cost += this.safeOrBreak(blockJumpTarget, toBreak)
+    cost += this.safeOrBreak(blockJumpTarget, toBreak, node)
     if (cost > 100) return
     
     neighbors.push(new Move(node.x, node.y + 2, node.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))

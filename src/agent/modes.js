@@ -101,6 +101,7 @@ const modes_list = [
             if (!blockAbove) blockAbove = {name: 'air'};
             const eye = skills.eyeLevelBlock(bot);
             if (skills.isWaterFilled(eye)) {
+                if (skills.ownsNavigationHazardRecovery(bot)) return;
                 // A solid block over the submerged head stops the bot from
                 // surfacing, so break it; breakBlockAt equips a harvest tool when one is held.
                 const ceiling = bot.blockAt(eye.position.offset(0, 1, 0));

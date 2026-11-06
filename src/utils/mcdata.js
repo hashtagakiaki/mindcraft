@@ -7,6 +7,7 @@ import { plugin as pvp } from 'mineflayer-pvp';
 import { plugin as collectblock } from 'mineflayer-collectblock';
 import { plugin as autoEat } from 'mineflayer-auto-eat';
 import plugin from 'mineflayer-armor-manager';
+import { resolveBlockInteraction } from '../agent/library/block_interaction.js';
 import { miningSyncPlugin } from '../agent/library/mining_sync.js';
 import { navigationPredictionPlugin } from '../agent/library/navigation_prediction.js';
 import { navigationEditGatePlugin } from '../agent/library/navigation_policy.js';
@@ -124,7 +125,10 @@ export function initBot(username) {
         return originalEmit(event, ...args);
     };
 
-    bot.loadPlugin(pathfinder);
+    bot.loadPlugin(client => {
+        pathfinder(client);
+        client.pathfinder.resolveBlockInteraction = block => resolveBlockInteraction(client, block);
+    });
     bot.loadPlugin(navigationEditGatePlugin);
     bot.loadPlugin(pvp);
     bot.loadPlugin(collectblock);
