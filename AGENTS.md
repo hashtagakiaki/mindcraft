@@ -43,6 +43,7 @@ Runnerはdisposable fixtureを使いMinecraft serverを起動しない。fixture
 ## 完了条件
 
 - 該当する既存fixtureと必須offline suiteを実行し、full diffとsecret/runtime dataの不在を確認する。
+- Botの実挙動の不具合修正は、offline fixtureだけで済ませず隔離serverで再現と修正後を確認する。`../mindcraft-eval/` の `CaseServer`（loopback 25569/25570、稼働play serverは使わない）とMineflayer clientで、修正前後の同じ操作を比べる。イベント順や遅延など実serverで変わる条件は、その順序を再現して両方確認する。使い捨てharnessはscratchに置き、repoへ追加しない。
 - task差分だけをstageし、`autonomy`からown `origin`へcommit/pushする。upstreamへpushしない。
 - evalのsource manifestはpush済みfull SHAだけをpinし、eval側でread-only dependenciesを使って再検証する。手動play pinは別管理。通常の機能追加だけでは自動反映しない。ただし親 `minecraft-autonomy/AGENTS.md` の継続指示が有効な横断作業では、そこに定めた検証後bot-only applyを行い、個別承認条件は適用しない。
 - bot指示snapshot、SDK一覧、tool境界、Codex home/session保存、action cancellation、Goalsの契約はbot instruction正本とREADMEに従う。変更時は関連する既存fixtureと隔離確認を更新する。

@@ -1328,6 +1328,10 @@ export class Agent {
             }
         });
         this.bot.on('death', () => {
+            // The death chat message can arrive before or after this event, and after the
+            // respawn bot.entity holds the respawn point, so the death location is taken here.
+            const p = this.bot.entity?.position;
+            this._deathSnapshot = p ? { x: p.x, y: p.y, z: p.z, dimension: this.bot.game?.dimension } : null;
             this.actions.cancelResume();
             this.actions.stop('death');
         });
@@ -1342,13 +1346,22 @@ export class Agent {
         this.bot.on('messagestr', async (message, _, jsonMsg) => {
             if (jsonMsg.translate && jsonMsg.translate.startsWith('death') && message.startsWith(this.name)) {
                 console.log('Agent died: ', message);
-                let death_pos = this.bot.entity?.position;
+                // The message can precede the death event by a tick; wait for it instead of reading the live position.
+                if (!this._deathSnapshot) {
+                    await new Promise((resolve) => {
+                        const done = () => { clearTimeout(timer); this.bot.removeListener('death', done); resolve(); };
+                        const timer = setTimeout(done, 2000);
+                        this.bot.once('death', done);
+                    });
+                }
+                const death_pos = this._deathSnapshot;
+                this._deathSnapshot = null;
                 let death_pos_text = null;
                 let deathPlaceSaved = false;
                 if (death_pos && ['x', 'y', 'z'].every((axis) => Number.isFinite(death_pos[axis]))) {
                     try {
                         await this.memory_bank.rememberPlace('last_death_position', death_pos.x, death_pos.y, death_pos.z, {
-                            dimension: this.bot.game.dimension,
+                            dimension: death_pos.dimension,
                             kind: 'other',
                             purpose: 'death location'
                         });
@@ -1358,7 +1371,7 @@ export class Agent {
                     }
                     death_pos_text = `x: ${death_pos.x.toFixed(2)}, y: ${death_pos.y.toFixed(2)}, z: ${death_pos.z.toFixed(2)}`;
                 }
-                let dimension = this.bot.game.dimension;
+                const dimension = death_pos?.dimension ?? 'unknown';
                 const deathReport = `You died at position ${death_pos_text || "unknown"} in the ${dimension} dimension with the final message: '${message}'. ${deathPlaceSaved ? "Your place of death is saved as 'last_death_position' if you want to return." : 'The death location could not be confirmed or saved.'} Previous actions were stopped and you have respawned.`;
                 // A running native task keeps its turn loop; deliver the death into its inbox instead.
                 if (this.codexRuntime?.active) {
