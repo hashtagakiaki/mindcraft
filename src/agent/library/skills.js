@@ -9,7 +9,7 @@ import craftingSync from "./crafting_sync.js";
 import { placeBlockOriented } from './block_placement.js';
 import { resolveBlockInteraction, makeBlockInteractionGoal, interactionFaceVector, interactionEye } from './block_interaction.js';
 import { trackSkill, reportSkillOutcome, skillFailure, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, operationCallContext, withSkillPhase, registerOwnedPromise, withNativeNavigationEditScope, nativeNavigationEditScopeActive } from './operation_context.js';
-import { awaitNavigationPlacementSettled, beginNavigationEdit, navigationPolicy, navigationScaffoldsPlaced, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, placeAndConfirmNavigationScaffold, recordNavigationArrival, registerNavigationCleanup, registerNavigationScaffoldSettledCallback, trackNavigationSegment } from './navigation_policy.js';
+import { awaitNavigationPlacementSettled, beginNavigationEdit, navigationPolicy, navigationScaffoldsPlaced, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, placeAndConfirmNavigationScaffold, recordNavigationArrival, registerNavigationCleanup, registerNavigationScaffoldSettledCallback, trackNavigationSegment, withEmergencyNavigation } from './navigation_policy.js';
 
 const require = createRequire(import.meta.url);
 
@@ -183,17 +183,12 @@ const AQUATIC_MOBS = new Set(['drowned', 'cod', 'salmon', 'tropical_fish', 'squi
 // (one oxygen level is 15 ticks); a surface bob dips the eyes only briefly.
 const NAVIGATION_DROWNING_OXYGEN_DROP = 2;
 const NAVIGATION_RECOVERY_RADIUS = 32;
-const NAVIGATION_RECOVERY_MAX_HAZARD_BLOCKS = 2048;
-const NAVIGATION_RECOVERY_MAX_CANDIDATES = 4096;
 const NAVIGATION_RECOVERY_MAX_DURATION_MS = 30_000;
 const NAVIGATION_LANDING_WAIT_MS = 5_000;
 // More than a straight line within block reach can cross.
 const COLLECT_MAX_LINE_CLEARS = 8;
 const COLLECT_DROP_WAIT_MS = 1_000;
 const ITEM_PICKUP_WAIT_MS = 750;
-const NAVIGATION_RECOVERY_SEARCH_TIMEOUT_MS = 6_000;
-const NAVIGATION_RECOVERY_SEARCH_TICK_MS = 50;
-const NAVIGATION_RECOVERY_SEARCH_STEPS = 2048;
 const SURFACE_SEARCH_RADIUS = 16;
 const SURFACE_ARRIVAL_Y_TOLERANCE = 0.25;
 const SURFACE_SETTLE_TICKS = 2;
@@ -2716,15 +2711,6 @@ export function eyeLevelBlock(bot) {
     return bot.blockAt(bot.entity.position.offset(0, eyeHeight, 0));
 }
 
-// Water only around the feet of a standing bot: ordinary wading, not a hazard.
-function wadingInShallowWater(bot, descriptor) {
-    if (descriptor?.kind !== 'water' || ![...descriptor.names].every(name => REACH_POSITION_WATER_NAMES.has(name))) return false;
-    const feet = bot.entity.position.floored();
-    const headOffset = Math.max(1, Math.ceil((Number.isFinite(bot.entity.height) ? bot.entity.height : 1.8) - 0.01) - 1);
-    return isWaterFilled(bot.blockAt(feet)) && !isWaterFilled(bot.blockAt(feet.offset(0, headOffset, 0)))
-        && !isWaterFilled(bot.blockAt(feet.offset(0, -1, 0))) && !isWaterFilled(eyeLevelBlock(bot));
-}
-
 function navigationGoalPosition(bot) {
     const position = bot.entity.position;
     const node = position.floored();
@@ -2745,27 +2731,30 @@ function watchNavigationHazard(bot, onHazard, { requireGoal = false } = {}) {
         monitor.tick = () => {
             const watch = monitor.watch;
             if (!watch || navigationRecoveryActive.has(bot) || isActionCancelled(bot, watch.owner)
-                || (watch.requireGoal && !bot.pathfinder.goal) || bot.pathfinder.movements?.allowSubmerged) return;
-            const eye = eyeLevelBlock(bot);
-            if (!isWaterFilled(eye)) {
+                || (watch.requireGoal && !bot.pathfinder.goal)) return;
+            const kind = observedHazard(bot);
+            if (!kind || kind === 'water' && bot.pathfinder.movements?.allowSubmerged) {
                 watch.oxygen = null;
                 return;
             }
             const oxygen = bot.oxygenLevel;
-            // Mineflayer can report -1 until the first server air update.
-            if (!Number.isFinite(oxygen) || oxygen < 0) return;
-            watch.oxygen = Math.max(watch.oxygen ?? oxygen, oxygen);
-            if (watch.oxygen - oxygen < NAVIGATION_DROWNING_OXYGEN_DROP) return;
             const oxygenAtSubmersion = watch.oxygen;
+            if (kind === 'water') {
+                // Mineflayer can report -1 until the first server air update.
+                if (!Number.isFinite(oxygen) || oxygen < 0) return;
+                watch.oxygen = Math.max(watch.oxygen ?? oxygen, oxygen);
+                if (watch.oxygen - oxygen < NAVIGATION_DROWNING_OXYGEN_DROP) return;
+            }
             watch.oxygen = null;
-            const above = bot.blockAt(eye.position.offset(0, 1, 0));
-            const error = Object.assign(new Error('Navigation was interrupted by falling air supply.'), {
+            const evidence = hazardEvidence(bot, kind);
+            const eye = eyeLevelBlock(bot);
+            const above = eye && bot.blockAt(eye.position.offset(0, 1, 0));
+            const error = Object.assign(new Error(`Navigation was interrupted by ${kind}.`), {
                 name: 'NavigationHazardError',
                 navigation: {
                     code: 'unsafe_state', phase: 'movement',
-                    hazard: { kind: 'submerged', oxygenLevel: oxygen, oxygenAtSubmersion,
-                        health: bot.health ?? null, eyeBlock: eye.name, aboveEyeBlock: above?.name ?? null },
-                    position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
+                    hazard: { ...evidence, oxygenAtSubmersion, aboveEyeBlock: above?.name ?? null },
+                    position: evidence.position,
                     observedAt: new Date().toISOString(),
                 },
             });
@@ -2831,121 +2820,37 @@ async function recoverInterruptedNavigation(bot, goal, movements, hazard) {
     if (isActionCancelled(bot, owner)) throw Object.assign(new Error('Navigation was cancelled before hazard recovery.'), { name: 'ReachCancelledError' });
     recordNavigationDiagnostic(bot, 'navigation_hazard_detected', hazard.navigation);
     try {
-        return await recoverNavigationStart(bot, goal, movements);
+        return await escapeHazard(bot, movements, goal);
     } catch (error) {
         if (error.name === 'ReachCancelledError' || isActionCancelled(bot, owner)) throw error;
-        error.navigation = { ...hazard.navigation, ...error.navigation };
+        error.navigation = { ...hazard.navigation, ...error.navigation, hazard: hazard.navigation.hazard };
         throw error;
     }
-}
-
-async function recoverNavigationStart(bot, goal, movementOverride) {
-    const startDescriptor = navigationRecoveryDescriptor(bot);
-    // Wading starts the route directly; only deeper water needs egress first.
-    const wading = wadingInShallowWater(bot, startDescriptor);
-    if (wading || !startDescriptor || (movementOverride?.allowSubmerged && startDescriptor.kind === 'water')) return null;
-    const releaseRecoverySwim = startDescriptor.submerged ? holdNavigationRecoverySwim(bot) : () => {};
-    navigationRecoveryActive.add(bot);
-    let recovery;
-    try {
-        recovery = await navigationRecovery(bot, movementOverride, goal);
-    } catch (error) {
-        releaseRecoverySwim();
-        navigationRecoveryActive.delete(bot);
-        throw error;
-    }
-    if (recovery) {
-        log(bot, `[navigation-recovery] ${JSON.stringify({ kind: recovery.kind, hazardBlocks: recovery.blocks?.size ?? 0,
-            safeCandidates: recovery.safeCandidateCount ?? recovery.candidates?.length ?? 0, searchStatus: recovery.searchStatus,
-            pathNodeCount: recovery.pathNodeCount ?? null,
-            candidateDiagnostics: recovery.goal ? undefined : recovery.candidateDiagnostics,
-            searchLimits: recovery.limits,
-            hazardBlockLimitReached: recovery.blocks?.size === NAVIGATION_RECOVERY_MAX_HAZARD_BLOCKS,
-            candidateLimitReached: recovery.safeCandidateCount === NAVIGATION_RECOVERY_MAX_CANDIDATES,
-            policy: 'survival-egress-before-goal' })}`);
-        if (!recovery.goal) {
-            releaseRecoverySwim();
-            navigationRecoveryActive.delete(bot);
-            const limitReason = recovery.searchStatus === 'search_limit'
-                ? `Recovery search budget exhausted (hazard blocks ${recovery.blocks?.size ?? 0}/${NAVIGATION_RECOVERY_MAX_HAZARD_BLOCKS}, candidates ${recovery.candidates?.length ?? 0}/${NAVIGATION_RECOVERY_MAX_CANDIDATES}, ${NAVIGATION_RECOVERY_MAX_DURATION_MS}ms).`
-                : `No safe landing was found in the observed local search (radius ${NAVIGATION_RECOVERY_RADIUS}, hazard blocks ${recovery.blocks?.size ?? 0}, candidates ${recovery.candidates?.length ?? 0}).`;
-            const error = new Error(`Navigation recovery from ${recovery.kind} failed: ${limitReason} This bounded search does not establish that every route is impossible.`);
-            error.name = recovery.searchStatus === 'search_limit' ? 'NavigationRecoveryBudgetError' : 'NavigationRecoveryNoPathError';
-            error.navigation = { code: recovery.searchStatus === 'search_limit' ? 'search_limit' : 'route_not_found',
-                phase: 'search', recovery: { kind: recovery.kind, status: recovery.searchStatus,
-                    hazardBlocks: recovery.blocks?.size ?? 0, safeCandidates: recovery.safeCandidateCount ?? recovery.candidates?.length ?? 0,
-                    limits: recovery.limits } };
-            throw error;
-        }
-        const previousMovements = bot.pathfinder.movements;
-        try {
-            const recoveryTarget = navigationRecoveryLandingFeet(bot, recovery.landing);
-            const egress = await reachPositionCore(bot, { position: { x: recoveryTarget.x + 0.5, y: recoveryTarget.y,
-                z: recoveryTarget.z + 0.5 }, tolerance: 0.75, allowDig: true,
-                allowScaffold: recovery.scaffoldNames.length > 0,
-                scaffoldBlocks: recovery.scaffoldNames.length ? recovery.scaffoldNames : ['dirt'],
-                safeWater: recovery.kind === 'water', cleanupOwnedScaffolds: false,
-                emergencyEgress: true, emergencyWaterBlocks: [...recovery.blocks.keys()],
-                recoveryMovements: recovery.movements }, { skipHazardRecovery: true });
-            releaseRecoverySwim();
-            if (!egress.ok) throw Object.assign(new Error(`Navigation recovery from ${recovery.kind} did not reach its server-confirmed safe landing: ${egress.reason}`),
-                { name: egress.status === 'cancelled' ? 'ReachCancelledError' : 'NavigationRecoveryMovementError',
-                    navigation: { code: egress.code ?? 'runtime_error', phase: 'movement', recovery: egress } });
-            const recoveryPosition = bot.entity.position.clone();
-            const settledRecovery = await settleReachPositionArrival(bot, recoveryPosition, () => {
-                if (operationContext()?.signal?.aborted || bot.interrupt_code) {
-                    const error = new Error('Navigation recovery landing confirmation cancelled.');
-                    error.name = 'ReachCancelledError';
-                    throw error;
-                }
-            }, 1200, { waitForSafeStart: true });
-            if (!settledRecovery || !navigationRecoveryLanded(bot, bot.entity.position.floored())) {
-                const feet = bot.blockAt(bot.entity.position.floored());
-                const head = bot.blockAt(bot.entity.position.floored().offset(0, 1, 0));
-                const support = bot.blockAt(bot.entity.position.floored().offset(0, -1, 0));
-                throw new Error(`Navigation recovery from ${recovery.kind} did not confirm a grounded safe landing: ${JSON.stringify({
-                    position: bot.entity.position, onGround: bot.entity.onGround, feet: feet?.name ?? null,
-                    head: head?.name ?? null, support: support?.name ?? null, egress })}.`);
-            }
-            log(bot, `[navigation-recovery] ${JSON.stringify({ kind: recovery.kind, policy: 'safe-landing-confirmed',
-                position: bot.entity.position.floored(), edits: egress.edits, cleanupRequired: egress.cleanupRequired })}`);
-            return recovery.routeCells;
-        } finally {
-            releaseRecoverySwim();
-            navigationRecoveryActive.delete(bot);
-            if (previousMovements) bot.pathfinder.setMovements(previousMovements);
-        }
-    }
-    releaseRecoverySwim();
-    navigationRecoveryActive.delete(bot);
-    return null;
 }
 
 export async function goToGoal(bot, goal, movementOverride = null) {
     // Older callers passed a boolean in this previously unused position.
     if (typeof movementOverride !== 'object') movementOverride = null;
-    if (navigationRecoveryActive.has(bot)) return goToGoalSegment(bot, goal, movementOverride);
     await awaitNavigationLanding(bot);
     const reachOwned = reachPositionMovementOwners.has(bot.pathfinder);
-    let recoveryRouteCells = reachOwned ? null : await recoverNavigationStart(bot, goal, movementOverride);
+    if (!reachOwned) await escapeHazard(bot, movementOverride, goal);
     for (;;) {
         try {
-            return await goToGoalSegment(bot, goal, movementOverride, recoveryRouteCells);
+            return await goToGoalSegment(bot, goal, movementOverride);
         } catch (error) {
             if (error.name !== 'NavigationHazardError' || reachOwned) throw error;
-            recoveryRouteCells = await recoverInterruptedNavigation(bot, goal, movementOverride, error) ?? recoveryRouteCells;
+            await recoverInterruptedNavigation(bot, goal, movementOverride, error);
         }
     }
 }
 
-async function goToGoalSegment(bot, goal, movementOverride, recoveryRouteCells = null) {
+async function goToGoalSegment(bot, goal, movementOverride) {
     const callerRestrictedMovement = !!movementOverride;
     const nativeNoEditNavigation = operationContext()?.nativeNavigationNoEdits === true && !nativeNavigationEditScopeActive();
 
     // Native navigation (including implicit approaches in other skills) uses
     // the same no-edit movement unless an owned explicit route edit is active.
     movementOverride = navigationMovements(bot, movementOverride);
-    if (recoveryRouteCells) movementOverride = navigationRecoveryNoReentryMovements(movementOverride, recoveryRouteCells);
     if (!navigationRecoveryActive.has(bot)) {
         for (const block of ['glass', 'glass_pane']) {
             movementOverride.blocksCantBreak.add(mc.getBlockId(block));
@@ -2956,11 +2861,7 @@ async function goToGoalSegment(bot, goal, movementOverride, recoveryRouteCells =
     // over pathfinder's per-move cost cap (100), so routes that must dig end noPath.
     const baseEditCosts = { placeCost: movementOverride.placeCost, digCost: movementOverride.digCost };
     const restoreEditCosts = () => Object.assign(movementOverride, baseEditCosts);
-    const nonDestructiveMovements = Object.assign(movementOverride, { placeCost: 2, digCost: 10 });
-
-    const destructiveMovements = movementOverride;
-
-    let final_movements = destructiveMovements;
+    const final_movements = movementOverride;
     const navigationRouteId = `nav:${randomUUID()}`;
     const navigationStartedAt = new Date().toISOString();
     recordNavigationDiagnostic(bot, 'navigation_route_started', { routeId: navigationRouteId,
@@ -2969,18 +2870,18 @@ async function goToGoalSegment(bot, goal, movementOverride, recoveryRouteCells =
             digCost: final_movements.digCost ?? null, placeCost: final_movements.placeCost ?? null,
         }, startedAt: navigationStartedAt });
 
-    const pathfind_timeout = 1000;
-    const nonDestructiveFound = await bot.pathfinder.getPathTo(nonDestructiveMovements, goal, pathfind_timeout).status === 'success';
-    if (!nonDestructiveFound) restoreEditCosts();
-    if (nonDestructiveFound) {
-        final_movements = nonDestructiveMovements;
-        log(bot, `Found non-destructive path.`);
-    }
-    else if (await bot.pathfinder.getPathTo(destructiveMovements, goal, pathfind_timeout).status === 'success') {
-        log(bot, callerRestrictedMovement || nativeNoEditNavigation ? 'Found a path with the requested movement restrictions.' : 'Found destructive path.');
-    }
-    else {
-        log(bot, callerRestrictedMovement || nativeNoEditNavigation ? 'Path search is incomplete; attempting navigation with the requested movement restrictions.' : 'Path not found, but attempting navigation anyway using destructive movements.');
+    if (!navigationRecoveryActive.has(bot)) {
+        Object.assign(final_movements, { placeCost: 2, digCost: 10 });
+        const pathfind_timeout = 1000;
+        const nonDestructiveFound = await bot.pathfinder.getPathTo(final_movements, goal, pathfind_timeout).status === 'success';
+        if (!nonDestructiveFound) restoreEditCosts();
+        if (nonDestructiveFound) {
+            log(bot, `Found non-destructive path.`);
+        } else if (await bot.pathfinder.getPathTo(final_movements, goal, pathfind_timeout).status === 'success') {
+            log(bot, callerRestrictedMovement || nativeNoEditNavigation ? 'Found a path with the requested movement restrictions.' : 'Found destructive path.');
+        } else {
+            log(bot, callerRestrictedMovement || nativeNoEditNavigation ? 'Path search is incomplete; attempting navigation with the requested movement restrictions.' : 'Path not found, but attempting navigation anyway using destructive movements.');
+        }
     }
 
     const doorCheckInterval = callerRestrictedMovement || nativeNoEditNavigation ? null : startDoorInterval(bot);
@@ -3040,6 +2941,8 @@ async function goToGoalSegment(bot, goal, movementOverride, recoveryRouteCells =
         livePath = Array.isArray(result?.path) ? result.path : [];
         lastPathUpdate = result && typeof result === 'object' ? {
             status: result.status ?? null,
+            visitedNodes: result.visitedNodes ?? null,
+            searchMs: result.time ?? null,
             endpoint: Array.isArray(result.path) && result.path.length ? (() => {
                 const node = result.path.at(-1);
                 return [node?.x, node?.y, node?.z].every(Number.isFinite)
@@ -3056,6 +2959,7 @@ async function goToGoalSegment(bot, goal, movementOverride, recoveryRouteCells =
             lastPathRecordAt = now;
             recordNavigationDiagnostic(bot, 'navigation_path_update', { routeId: navigationRouteId,
                 status: lastPathUpdate.status, endpoint: lastPathUpdate.endpoint,
+                visitedNodes: lastPathUpdate.visitedNodes, searchMs: lastPathUpdate.searchMs,
                 pathNodeCount: activeRouteNodes.length, routeNodes: activeRouteNodes.slice(0, 32),
                 omittedNodeCount: Math.max(0, activeRouteNodes.length - 32) });
         }
@@ -3106,13 +3010,20 @@ async function goToGoalSegment(bot, goal, movementOverride, recoveryRouteCells =
     };
     const navigationWaitStartedAt = new Date().toISOString();
     let removeDigListener = () => {};
+    let escapeReached = false;
+    const onEscapeTick = () => {
+        if (bot.pathfinder.goal !== goal || !goal.observedEscape?.()) return;
+        escapeReached = true;
+        stopOwnedNavigation();
+    };
     try {
         bestGoalDistance = goal.heuristic(navigationGoalPosition(bot));
         seenRouteSegments.add(positionKey(bot.entity.position.floored()));
         lastProgressAt = Date.now();
         bot.on?.('path_update', onPathUpdate);
         bot.on?.('path_reset', onPathReset);
-        if (bot.navigationPrediction) bot.on?.('physicsTick', onPredictionTick);
+        if (goal.observedEscape) bot.on?.('physicsTick', onEscapeTick);
+        else if (bot.navigationPrediction) bot.on?.('physicsTick', onPredictionTick);
         const call = operationCallContext();
         const record = (type, detail) => {
             const event = { taskId: owner?.taskId ?? null, actionId: owner?.actionId ?? null,
@@ -3129,7 +3040,7 @@ async function goToGoalSegment(bot, goal, movementOverride, recoveryRouteCells =
         // segment would reapply the normal policy and enqueue placement twice.
         // goto rejects with the original route edit error (pathfinder fork).
         const navigate = () => bot.pathfinder.goto(goal);
-        const startNavigation = () => navigationRecoveryActive.has(bot)
+        const startNavigation = () => reachPositionMovementOwners.has(bot.pathfinder) && navigationRecoveryActive.has(bot)
             ? navigate() : trackNavigationSegment(bot, navigate);
         // Pathfinder's think timeout is wall-clock and keeps running while the bot
         // digs, so slow breaks (bare-hand stone takes ~7.5s) end goto with Timeout
@@ -3156,6 +3067,10 @@ async function goToGoalSegment(bot, goal, movementOverride, recoveryRouteCells =
             if (owner?.signal.aborted || owner?.closed) {
                 clearInterval(timeoutHandle);
                 timeoutHandle = null;
+                return;
+            }
+            if (goal.observedEscape && lastPathUpdate?.status === 'partial') {
+                lastProgressAt = Date.now();
                 return;
             }
             const currentGoalDistance = goal.heuristic(navigationGoalPosition(bot));
@@ -3196,6 +3111,7 @@ async function goToGoalSegment(bot, goal, movementOverride, recoveryRouteCells =
                     await navigation;
                     break;
                 } catch (err) {
+                    if (escapeReached) break;
                     if (err.name === 'NoPath' && !navigationRecoveryActive.has(bot) && !final_movements.allowSubmerged) {
                         await observeSubmersion(bot, () => hazardStop || stallError || isActionCancelled(bot, owner));
                     }
@@ -3218,7 +3134,7 @@ async function goToGoalSegment(bot, goal, movementOverride, recoveryRouteCells =
                 navigationError = true;
                 clearOwnedGoalOnFailure = true;
                 const navigationCode = err.name === 'Timeout' || lastPathUpdate?.status === 'timeout' ? 'search_limit'
-                    : lastPathUpdate?.status === 'noPath' ? 'route_not_found'
+                    : err.name === 'NoPath' || lastPathUpdate?.status === 'noPath' ? 'route_not_found'
                         : err.name === 'NavigationStallTimeoutError' ? 'no_progress' : 'runtime_error';
                 err.navigation = {
                     code: navigationCode,
@@ -3274,6 +3190,7 @@ async function goToGoalSegment(bot, goal, movementOverride, recoveryRouteCells =
         bot.removeListener?.('path_update', onPathUpdate);
         bot.removeListener?.('path_reset', onPathReset);
         bot.removeListener?.('physicsTick', onPredictionTick);
+        bot.removeListener?.('physicsTick', onEscapeTick);
         setActionPhase(cancellation, previousActionPhase);
         finishOwnedWait(navigationWait, {
             phase: 'navigation', reason: 'goal-or-new-route-segment',
@@ -3521,10 +3438,11 @@ async function settleReachPositionArrival(bot, target, active, timeoutMs = 1200,
     }
 }
 
-function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safeWater }) {
+function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safeWater, surfaceSwimming = false }) {
     const movements = new pf.Movements(bot);
     movements.canDig = allowDig;
     movements.allow1by1towers = allowScaffold;
+    movements.allowWaterScaffold = surfaceSwimming;
     movements.scafoldingBlocks = allowScaffold
         ? scaffoldBlocks.map(name => bot.registry.itemsByName[name].id) : [];
     movements.canOpenDoors = false;
@@ -3537,7 +3455,7 @@ function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safe
     movements.infiniteLiquidDropdownDistance = false;
 
     const avoidNames = [
-        'lava', 'fire', 'soul_fire', 'magma_block', 'cactus', 'campfire', 'soul_campfire', 'bubble_column',
+        'lava', 'fire', 'soul_fire', 'magma_block', 'cactus', 'campfire', 'soul_campfire',
         'powder_snow', 'sweet_berry_bush', 'wither_rose', 'pointed_dripstone',
         ...(!safeWater ? ['water', 'flowing_water'] : []),
     ];
@@ -3582,7 +3500,8 @@ function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safe
     const getLandingBlock = movements.getLandingBlock.bind(movements);
     movements.getLandingBlock = (node, direction) => {
         const landing = getLandingBlock(node, direction);
-        if (!landing?.position || landing.liquid) return null;
+        if (!landing?.position || landing.liquid && !surfaceSwimming) return null;
+        if (landing.liquid && surfaceSwimming) return landing;
         const supportPosition = landing.position.offset(0, -1, 0);
         const support = bot.blockAt(supportPosition);
         if (!support || support.liquid || avoidNameSet.has(support.name)) return null;
@@ -3600,7 +3519,7 @@ function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safe
             movements.blocksCantBreak.add(block.id);
         }
     }
-    if (safeWater) {
+    if (safeWater && !surfaceSwimming) {
         const getBlock = movements.getBlock.bind(movements);
         movements.getBlock = (position, dx, dy, dz) => {
             const block = getBlock(position, dx, dy, dz);
@@ -3711,37 +3630,18 @@ function reachPositionPath(bot, movements, goal, {
 
 const REACH_POSITION_EXIT_HAZARDS = new Set([
     'lava', 'flowing_lava', 'fire', 'soul_fire', 'magma_block', 'cactus', 'campfire', 'soul_campfire',
-    'bubble_column', 'powder_snow', 'sweet_berry_bush', 'wither_rose', 'pointed_dripstone',
+    'powder_snow', 'sweet_berry_bush', 'wither_rose', 'pointed_dripstone',
 ]);
 const REACH_POSITION_CONTACT_EXIT_HAZARDS = new Set([
     'fire', 'soul_fire', 'magma_block', 'cactus', 'campfire', 'soul_campfire',
     'sweet_berry_bush', 'wither_rose', 'pointed_dripstone',
 ]);
-const REACH_POSITION_WATER_NAMES = new Set(['water', 'flowing_water']);
 const reachPositionBlockKey = position => `${position.x},${position.y},${position.z}`;
-
-function reachPositionStartHazard(bot) {
-    const feet = bot.entity.position.floored();
-    const headOffset = Math.max(1, Math.ceil((Number.isFinite(bot.entity.height) ? bot.entity.height : 1.8) - 0.01) - 1);
-    const current = bot.blockAt(new Vec3(feet.x, feet.y, feet.z));
-    const head = bot.blockAt(new Vec3(feet.x, feet.y + headOffset, feet.z));
-    const support = bot.blockAt(new Vec3(feet.x, feet.y - 1, feet.z));
-    if ([current, head].some(block => block && REACH_POSITION_WATER_NAMES.has(block.name))) return 'shallow_water';
-    for (const block of [current, head, support]) {
-        if (!block) continue;
-        if (REACH_POSITION_EXIT_HAZARDS.has(block.name)) return block.name;
-    }
-    return null;
-}
+const LAVA_NAMES = new Set(['lava', 'flowing_lava']);
 
 function reachPositionFullTopSupport(block) {
     return !!block?.shapes?.some(shape => shape[0] <= 0.01 && shape[2] <= 0.01
         && shape[3] >= 0.99 && shape[4] >= 0.99 && shape[5] >= 0.99);
-}
-
-function navigationRecoveryLandingSupport(block) {
-    return !!block?.shapes?.some(shape => shape[0] <= 0.01 && shape[2] <= 0.01
-        && shape[3] >= 0.99 && shape[4] >= 0.875 && shape[5] >= 0.99);
 }
 
 function reachPositionFullCollisionBlock(block) {
@@ -3749,29 +3649,145 @@ function reachPositionFullCollisionBlock(block) {
         && shape[3] >= 0.99 && shape[4] >= 0.99 && shape[5] >= 0.99);
 }
 
-function navigationRecoveryDescriptor(bot) {
-    const feet = bot.entity.position.floored();
-    const headOffset = Math.max(1, Math.ceil((Number.isFinite(bot.entity.height) ? bot.entity.height : 1.8) - 0.01) - 1);
-    const current = bot.blockAt(new Vec3(feet.x, feet.y, feet.z));
-    const head = bot.blockAt(new Vec3(feet.x, feet.y + headOffset, feet.z));
-    const support = bot.blockAt(new Vec3(feet.x, feet.y - 1, feet.z));
-    const observed = [current, head, support].filter(Boolean);
-    const liquidBlocks = observed.filter(block => REACH_POSITION_WATER_NAMES.has(block.name)
-        || ['lava', 'flowing_lava'].includes(block.name));
-    const contactBlocks = observed.filter(block => REACH_POSITION_CONTACT_EXIT_HAZARDS.has(block.name));
-    if (liquidBlocks.length || contactBlocks.length) {
-        const names = new Set([...liquidBlocks, ...contactBlocks].map(block => block.name));
-        const supportSeeds = support && [current, head].every(block => block?.position?.y !== support.position.y)
-            && liquidBlocks.some(block => block.position.y === support.position.y) ? [support.position.floored()] : [];
-        return { kind: liquidBlocks.some(block => REACH_POSITION_WATER_NAMES.has(block.name)) ? 'water'
-            : liquidBlocks.length ? 'lava' : 'contact', names,
-        contactNames: new Set(contactBlocks.map(block => block.name)), supportSeeds,
-        submerged: liquidBlocks.some(block => REACH_POSITION_WATER_NAMES.has(block.name)),
-        seeds: [...liquidBlocks, ...contactBlocks].map(block => block.position.floored()) };
+export function observedHazard(bot) {
+    const position = bot.entity.position.floored();
+    const eye = eyeLevelBlock(bot);
+    const feet = bot.blockAt(position);
+    const support = bot.blockAt(new Vec3(position.x, position.y - 1, position.z));
+    const contact = [feet, eye, support].find(block => REACH_POSITION_CONTACT_EXIT_HAZARDS.has(block?.name));
+    if ([feet, eye].some(block => LAVA_NAMES.has(block?.name)) || bot.entity.isInLava) return 'lava';
+    if (isWaterFilled(eye)) return 'water';
+    if (contact) return 'contact';
+    return [feet, eye].some(block => block?.name === 'powder_snow') ? 'powder_snow' : null;
+}
+
+function hazardEvidence(bot, kind) {
+    const position = bot.entity.position;
+    return { kind, position: { x: position.x, y: position.y, z: position.z }, oxygenLevel: bot.oxygenLevel ?? null,
+        health: bot.health ?? null, feet: bot.blockAt(position)?.name ?? null, eyeBlock: eyeLevelBlock(bot)?.name ?? null,
+        support: bot.blockAt(position.floored().offset(0, -1, 0))?.name ?? null };
+}
+
+function safeEscapeCell(feet, eye, support) {
+    if (!feet || feet.boundingBox !== 'empty' || !eye || isWaterFilled(eye) || eye.boundingBox !== 'empty') return false;
+    if ([feet, eye].some(block => LAVA_NAMES.has(block.name) || REACH_POSITION_CONTACT_EXIT_HAZARDS.has(block.name)
+        || block.name === 'powder_snow')) return false;
+    return isWaterFilled(feet) || (!!support?.shapes?.length && !isWaterFilled(support)
+        && !REACH_POSITION_EXIT_HAZARDS.has(support.name) && !LAVA_NAMES.has(support.name));
+}
+
+function observedEscape(bot) {
+    if (observedHazard(bot)) return false;
+    const position = bot.entity.position.floored();
+    const eye = eyeLevelBlock(bot);
+    const feet = bot.blockAt(position);
+    const support = bot.blockAt(position.offset(0, -1, 0));
+    if (isWaterFilled(feet) || bot.entity.isInWater) return eye?.boundingBox === 'empty' && !isWaterFilled(eye);
+    return safeEscapeCell(feet, eye, support) && bot.entity.onGround === true;
+}
+
+function openWaterColumn(bot, movements, start) {
+    const eye = eyeLevelBlock(bot);
+    if (!eye?.position || !isWaterFilled(eye)) return null;
+    let firstSolidY = null;
+    for (let y = eye.position.y + 1; y <= start.y + NAVIGATION_RECOVERY_RADIUS; y++) {
+        const block = bot.blockAt(new Vec3(start.x, y, start.z));
+        if (!block || REACH_POSITION_CONTACT_EXIT_HAZARDS.has(block.name) || LAVA_NAMES.has(block.name)) return null;
+        if (isWaterFilled(block) && block.boundingBox === 'empty') continue;
+        if (block.boundingBox === 'empty') return (firstSolidY ?? y) - Math.floor(bot.entity.eyeHeight ?? 1.62);
+        if (!movements.safeToBreak(block)) return null;
+        firstSolidY ??= y;
     }
-    const unsupported = observed.find(block => REACH_POSITION_EXIT_HAZARDS.has(block.name));
-    if (unsupported) return { kind: `unsupported:${unsupported.name}`, names: new Set([unsupported.name]), seeds: [unsupported.position.floored()] };
     return null;
+}
+
+function escapeMovements(bot, supplied, start, kind, scaffoldNames) {
+    const movements = new pf.Movements(bot);
+    for (const key of ['exclusionAreasStep', 'exclusionAreasBreak', 'exclusionAreasPlace']) {
+        if (supplied?.[key]) movements[key] = [...supplied[key]];
+    }
+    movements.allowSubmerged = true;
+    movements.allowParkour = false;
+    movements.allowFreeMotion = false;
+    movements.dontCreateFlow = false;
+    movements.maxMoveCost = Infinity;
+    movements.waitForFullPath = true;
+    movements.allowWaterScaffold = kind === 'water';
+    movements.searchRadius = -1;
+    movements.scafoldingBlocks = scaffoldNames.map(name => bot.registry.itemsByName[name].id);
+    movements.canPlaceOn = scaffoldNames.length > 0;
+    movements.allow1by1towers = scaffoldNames.length > 0;
+    movements.navigationRecoveryKind = kind;
+    const getNeighbors = movements.getNeighbors.bind(movements);
+    const withinRadius = next => start.distanceSquared(next) <= NAVIGATION_RECOVERY_RADIUS ** 2;
+    const columnY = kind === 'water' ? openWaterColumn(bot, movements, start) : null;
+    movements.getNeighbors = node => {
+        const neighbors = getNeighbors(node);
+        if (columnY != null) return neighbors.filter(next =>
+            next.x === start.x && next.z === start.z && next.y > node.y && withinRadius(next));
+        return neighbors.filter(next => withinRadius(next) && next.toPlace.every(edit => edit.useOne ||
+            !isWaterFilled(bot.blockAt(new Vec3(edit.x, edit.y, edit.z))) &&
+            !LAVA_NAMES.has(bot.blockAt(new Vec3(edit.x, edit.y, edit.z))?.name)));
+    };
+    return { movements, columnY };
+}
+
+export async function escapeHazard(bot, supplied = null, requestedGoal = null) {
+    const kind = observedHazard(bot);
+    if (!kind || kind === 'water' && supplied?.allowSubmerged) return false;
+    if (navigationRecoveryActive.has(bot)) throw new Error('Another hazard egress already owns this bot.');
+    const owner = operationContext() ?? getActionContext(bot);
+    if (isActionCancelled(bot, owner)) throw Object.assign(new Error('Hazard egress cancelled.'), { name: 'ReachCancelledError' });
+    const start = bot.entity.position.floored();
+    const scaffoldNames = ['dirt', 'cobblestone'].filter(name => bot.registry.itemsByName[name]
+        && bot.inventory.items().some(item => item.name === name && item.count > 0));
+    const { movements, columnY } = escapeMovements(bot, supplied, start, kind, scaffoldNames);
+    const goal = new pf.goals.Goal();
+    const eyeOffset = Math.floor(bot.entity.eyeHeight ?? 1.62);
+    goal.observedEscape = () => observedEscape(bot);
+    goal.isEnd = node => {
+        if (!node.toBreak) return goal.observedEscape();
+        if (columnY != null) return node.y >= columnY;
+        const feet = new Vec3(node.x, node.y, node.z);
+        const observed = position => node.toBreak.some(broken => reachPositionBlockKey(broken) === reachPositionBlockKey(position))
+            ? { boundingBox: 'empty', name: 'air' } : bot.blockAt(position);
+        const below = feet.offset(0, -1, 0);
+        const support = node.toPlace.some(edit => !edit.useOne &&
+            edit.x + edit.dx === below.x && edit.y + edit.dy === below.y && edit.z + edit.dz === below.z)
+            ? { name: 'dirt', shapes: [[0, 0, 0, 1, 1, 1]] } : observed(below);
+        return safeEscapeCell(observed(feet), observed(feet.offset(0, eyeOffset, 0)), support);
+    };
+    // An unsatisfied escape needs at least one move, irrespective of direction.
+    goal.heuristic = node => {
+        if (columnY != null) return Math.max(0, columnY - node.y);
+        const distance = requestedGoal?.heuristic(node) ?? 0;
+        const tieBreak = Number.isFinite(distance) ? Math.atan(distance) / 1_000 : 0;
+        return Number(!goal.isEnd(node)) + tieBreak;
+    };
+    const before = hazardEvidence(bot, kind);
+    const previousMovements = bot.pathfinder.movements;
+    const previousTimeout = bot.pathfinder.thinkTimeout;
+    navigationRecoveryActive.add(bot);
+    const releaseSwim = kind === 'water' || kind === 'lava' ? holdNavigationRecoverySwim(bot) : () => {};
+    bot.pathfinder.thinkTimeout = NAVIGATION_RECOVERY_MAX_DURATION_MS;
+    try {
+        const policy = { allowDig: true, scaffold: 'leave', scaffoldBlocks: scaffoldNames };
+        await withEmergencyNavigation(bot, policy, () => goToGoalSegment(bot, goal, movements));
+        if (!goal.observedEscape()) throw Object.assign(new Error('Hazard egress did not reach breathable air or safe footing.'),
+            { navigation: { code: 'unsafe_state', phase: 'recovery' } });
+        log(bot, `[navigation-recovery] ${JSON.stringify({ kind, policy: 'escape-observed', mode: columnY == null ? 'local-search' : 'water-column',
+            position: bot.entity.position.floored() })}`);
+        return true;
+    } catch (error) {
+        if (isActionCancelled(bot, owner)) throw Object.assign(new Error('Hazard egress cancelled.'), { name: 'ReachCancelledError' });
+        error.navigation = { code: 'unsafe_state', phase: 'recovery', ...error.navigation, hazard: before, currentHazard: hazardEvidence(bot, kind) };
+        throw error;
+    } finally {
+        releaseSwim();
+        navigationRecoveryActive.delete(bot);
+        bot.pathfinder.thinkTimeout = previousTimeout;
+        if (bot.pathfinder.movements === movements && previousMovements) bot.pathfinder.setMovements(previousMovements);
+    }
 }
 
 function navigationFalling(bot) {
@@ -3797,276 +3813,10 @@ async function awaitNavigationLanding(bot) {
     }
 }
 
-async function navigationRecovery(bot, suppliedMovements, requestedGoal = null) {
-    const descriptor = navigationRecoveryDescriptor(bot);
-    if (!descriptor) return null;
-    if (descriptor.kind.startsWith('unsupported:')) {
-        return { kind: descriptor.kind, blocks: new Map(), candidates: [], goal: null, movements: null, searchStatus: 'unsupported' };
-    }
-    const start = bot.entity.position.floored();
-    const startedAt = Date.now();
-    const operation = operationContext();
-    const cancelled = () => operation?.signal?.aborted || bot.interrupt_code;
-    const checkBudget = () => {
-        if (cancelled()) {
-            const error = new Error('Navigation recovery search was cancelled.');
-            error.name = 'ReachCancelledError';
-            throw error;
-        }
-        return Date.now() - startedAt >= NAVIGATION_RECOVERY_MAX_DURATION_MS;
-    };
-    const yieldSlice = () => new Promise(resolve => setImmediate(resolve));
-    const matches = block => descriptor.names.has(block?.name);
-    const blocks = new Map();
-    const queue = [...descriptor.seeds];
-    let queueIndex = 0;
-    while (queueIndex < queue.length && blocks.size < NAVIGATION_RECOVERY_MAX_HAZARD_BLOCKS) {
-        if (queueIndex % 128 === 0) {
-            if (checkBudget()) return { kind: descriptor.kind, blocks, candidates: [], goal: null, movements: null, searchStatus: 'search_limit' };
-            if (queueIndex > 0) await yieldSlice();
-        }
-        const position = queue[queueIndex++].floored();
-        const key = reachPositionBlockKey(position);
-        if (blocks.has(key) || position.distanceTo(start) > NAVIGATION_RECOVERY_RADIUS) continue;
-        const block = bot.blockAt(position);
-        if (!block || !matches(block)) continue;
-        blocks.set(key, position);
-        for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
-            queue.push(position.offset(dx, dy, dz));
-        }
-    }
-    if (!blocks.size) return { kind: descriptor.kind, goal: null, movements: null, candidates: [], searchStatus: 'noPath' };
-
-    const routeCells = new Map();
-    const candidateKeys = new Set();
-    const supportSeedKeys = new Set((descriptor.supportSeeds ?? []).map(reachPositionBlockKey));
-    for (const position of blocks.values()) {
-        const blockName = bot.blockAt(position)?.name;
-        const routePositions = descriptor.contactNames?.has(blockName) || supportSeedKeys.has(reachPositionBlockKey(position))
-            ? [position.offset(0, 1, 0)]
-                : ['water', 'lava'].includes(descriptor.kind)
-                    ? [position, position.offset(0, -1, 0), position.offset(0, 1, 0)] : [position];
-        for (const routePosition of routePositions) {
-            routeCells.set(reachPositionBlockKey(routePosition), routePosition);
-            for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
-                candidateKeys.add(reachPositionBlockKey(routePosition.offset(dx, dy, dz)));
-            }
-        }
-    }
-    const unsafeNames = new Set([...REACH_POSITION_EXIT_HAZARDS, ...REACH_POSITION_WATER_NAMES, 'flowing_lava']);
-    const scaffoldNames = ['dirt', 'cobblestone'].filter(name => bot.registry?.itemsByName?.[name]
-        && (bot.inventory?.items?.() ?? []).some(item => item.name === name && item.count > 0));
-    const candidates = [];
-    const scaffoldCandidates = [];
-    const candidateDiagnostics = [];
-    let candidateLimitReached = false;
-    for (const key of candidateKeys) {
-        if (candidates.length >= NAVIGATION_RECOVERY_MAX_CANDIDATES) { candidateLimitReached = true; break; }
-        const [x, y, z] = key.split(',').map(Number);
-        const position = new Vec3(x, y, z);
-        if (position.distanceTo(start) > NAVIGATION_RECOVERY_RADIUS) continue;
-        if (blocks.has(reachPositionBlockKey(position))) continue;
-        const feet = bot.blockAt(position);
-        const head = bot.blockAt(position.offset(0, 1, 0));
-        const support = bot.blockAt(position.offset(0, -1, 0));
-        const supportIsEgressWater = descriptor.kind === 'water' && blocks.has(reachPositionBlockKey(support?.position ?? {}));
-        const clearanceOrDiggable = block => !!block && (block.type === 0 && !block.shapes?.length || block.diggable);
-        const candidateStructure = !!feet && !!head && !!support && clearanceOrDiggable(feet) && clearanceOrDiggable(head)
-            && !unsafeNames.has(feet.name)
-            && !unsafeNames.has(head.name) && (!unsafeNames.has(support.name) || supportIsEgressWater);
-        const safe = candidateStructure && feet.type === 0 && head.type === 0 && navigationRecoveryLandingSupport(support);
-        if (candidateDiagnostics.length < 12) candidateDiagnostics.push({ x, y, z,
-            feet: feet?.name ?? null, head: head?.name ?? null, support: support?.name ?? null, safe });
-        if (!candidateStructure) continue;
-        if (candidateStructure && navigationRecoveryLandingSupport(support)) {
-            candidates.push(position);
-            continue;
-        }
-        const scaffoldTarget = position.offset(0, -1, 0);
-        const canReplaceWater = supportIsEgressWater;
-        if (canReplaceWater && scaffoldTarget.x === start.x && scaffoldTarget.z === start.z) continue;
-        if (!scaffoldNames.length || !(support.name === 'air' && support.type === 0 || canReplaceWater)) continue;
-        const anchor = navigationRecoveryPlacementAnchor(bot, scaffoldTarget);
-        if (!anchor) continue;
-        candidates.push(position);
-        scaffoldCandidates.push({ position, target: scaffoldTarget, anchor });
-    }
-    const safeCandidateCount = candidates.length;
-    const candidateScore = position => position.distanceTo(start) + (requestedGoal?.heuristic?.(position) ?? 0) * 0.1
-        + (['water', 'lava'].includes(descriptor.kind) && position.y < start.y ? 2 : 0)
-        + [position, position.offset(0, 1, 0)].filter(point => bot.blockAt(point)?.shapes?.length).length * 2
-        + (scaffoldCandidates.some(candidate => candidate.position.equals(position)) ? 2 : 0);
-    candidates.sort((a, b) => candidateScore(a) - candidateScore(b));
-    const movementSource = new pf.Movements(bot);
-    const movements = Object.assign(Object.create(Object.getPrototypeOf(movementSource)), movementSource);
-    for (const key of ['blocksToAvoid', 'blocksCantBreak', 'interactableBlocks', 'entitiesToAvoid', 'scafoldingBlocks']) {
-        if (movementSource[key] instanceof Set) movements[key] = new Set(movementSource[key]);
-        else if (Array.isArray(movementSource[key])) movements[key] = [...movementSource[key]];
-    }
-    // Egress owns an emergency edit scope. It can break terrain and use any
-    // available dirt/cobblestone even when the requested route is no-edit.
-    movements.canDig = true;
-    movements.blocksCantBreak.clear();
-    for (const block of bot.registry?.blocksArray ?? []) if (!block.diggable) movements.blocksCantBreak.add(block.id);
-    movements.scafoldingBlocks = scaffoldNames.map(name => bot.registry.itemsByName[name].id);
-    movements.canPlaceOn = movements.scafoldingBlocks.length > 0;
-    movements.allow1by1towers = movements.scafoldingBlocks.length > 0;
-    movements.allowParkour = false;
-    movements.allowFreeMotion = false;
-    movements.digCost = 2;
-    movements.placeCost = 2;
-    movements.navigationRecoveryKind = descriptor.kind;
-    // Egress starts under water and may have to cross it.
-    movements.allowSubmerged = true;
-    const originalGetBlock = movementSource.getBlock;
-    movements.getBlock = (position, dx, dy, dz) => {
-        const block = originalGetBlock.call(movements, position, dx, dy, dz);
-        if (!block?.position || !matches(block)) return block;
-        const blockKey = reachPositionBlockKey(block.position.floored());
-        block.safe = blocks.has(blockKey);
-        if (!blocks.has(blockKey)) block.physical = false;
-        return block;
-    };
-    const originalGetNeighbors = movementSource.getNeighbors;
-    const placementLiquidNames = new Set([...REACH_POSITION_WATER_NAMES, 'lava', 'flowing_lava']);
-    let selectedWaterLanding = null;
-    movements.getNeighbors = node => {
-        const neighbors = originalGetNeighbors.call(movements, node);
-        const fromKey = reachPositionBlockKey(new Vec3(node.x, node.y, node.z));
-        const fromInside = routeCells.has(fromKey);
-        // A block cannot be placed against a liquid face, e.g. a 1x1 tower from
-        // the surface onto the water below.
-        const allowed = neighbors.filter(next => (fromInside || !routeCells.has(reachPositionBlockKey(new Vec3(next.x, next.y, next.z))))
-            && !(next.toPlace ?? []).some(placement => !placement.useOne
-                && placementLiquidNames.has(bot.blockAt(new Vec3(placement.x, placement.y, placement.z))?.name)));
-        if (fromInside && ['water', 'lava'].includes(descriptor.kind)) {
-            if (descriptor.kind === 'water' && node.remainingBlocks > 0) {
-                for (const candidate of scaffoldCandidates) {
-                    const destination = candidate.position;
-                    if (Math.abs(destination.x - node.x) + Math.abs(destination.z - node.z) !== 1
-                        || destination.y < node.y || destination.y > node.y + 1) continue;
-                    const support = bot.blockAt(candidate.target);
-                    if (!REACH_POSITION_WATER_NAMES.has(support?.name)) continue;
-                    const anchor = candidate.anchor;
-                    allowed.push(new node.constructor(destination.x, destination.y, destination.z,
-                        node.remainingBlocks - 1, 2 + movements.placeCost, [], [{
-                            x: anchor.anchor.x, y: anchor.anchor.y, z: anchor.anchor.z,
-                            dx: anchor.face.x, dy: anchor.face.y, dz: anchor.face.z,
-                        }]));
-                }
-            }
-            const up = new Vec3(node.x, node.y + 1, node.z);
-            const upFeet = bot.blockAt(up);
-            const upHead = bot.blockAt(up.offset(0, 1, 0));
-            const liquidNames = descriptor.kind === 'water' ? REACH_POSITION_WATER_NAMES : new Set(['lava', 'flowing_lava']);
-            const clear = block => !!block && (block.type === 0 || liquidNames.has(block.name))
-                && !(block.shapes?.length);
-            const diggable = block => !!block?.diggable && movements.canDig
-                && !movements.blocksCantBreak.has(block.type);
-            const toBreak = [];
-            for (const block of [upFeet, upHead]) {
-                if (clear(block)) continue;
-                if (!diggable(block) || !movements.safeToBreak(block)) { toBreak.length = 0; break; }
-                toBreak.push(block.position.floored());
-            }
-            const upClear = [upFeet, upHead].every(block => clear(block) || diggable(block) && movements.safeToBreak(block));
-            // Swimming lifts the feet only while they are in the liquid. A node
-            // already in the air above the surface cannot rise again, or a path
-            // could float up and step onto a bank one block above the surface.
-            const swimming = liquidNames.has(bot.blockAt(new Vec3(node.x, node.y, node.z))?.name);
-            if (swimming && upClear && (clear(upFeet) || diggable(upFeet)) && up.y - start.y <= NAVIGATION_RECOVERY_RADIUS) {
-                allowed.push(new node.constructor(up.x, up.y, up.z, node.remainingBlocks,
-                    1 + toBreak.length * movements.digCost, toBreak, []));
-            }
-        }
-        if (!selectedWaterLanding || reachPositionFullTopSupport(bot.blockAt(selectedWaterLanding.target))) return allowed;
-        const destination = selectedWaterLanding.position;
-        const targetKey = reachPositionBlockKey(selectedWaterLanding.target);
-        return allowed.filter(next => next.x !== destination.x || next.y !== destination.y || next.z !== destination.z
-            || (next.toPlace ?? []).some(placement => reachPositionBlockKey(new Vec3(placement.x + placement.dx,
-                placement.y + placement.dy, placement.z + placement.dz)) === targetKey));
-    };
-    let path = { status: 'noPath', path: [] };
-    let landing = null;
-    let searchBudgetExpired = false;
-    let candidateSearchLimited = false;
-    while (candidates.length) {
-        if (checkBudget()) { searchBudgetExpired = true; break; }
-        const selectedCandidate = candidates[0];
-        selectedWaterLanding = scaffoldCandidates.find(candidate => candidate.position.equals(selectedCandidate)
-            && REACH_POSITION_WATER_NAMES.has(bot.blockAt(candidate.target)?.name)) ?? null;
-        const recoveryGoal = new pf.goals.GoalBlock(selectedCandidate.x, selectedCandidate.y, selectedCandidate.z);
-        const generator = bot.pathfinder.getPathFromTo(movements, bot.entity.position, recoveryGoal, {
-            timeout: NAVIGATION_RECOVERY_SEARCH_TIMEOUT_MS,
-            tickTimeout: NAVIGATION_RECOVERY_SEARCH_TICK_MS,
-            searchRadius: pathSearchCostCap(movements, NAVIGATION_RECOVERY_RADIUS),
-        });
-        for (let step = 0; step < NAVIGATION_RECOVERY_SEARCH_STEPS; step++) {
-            if (step % 8 === 0) {
-                if (checkBudget()) { path = { status: 'timeout', path: [] }; searchBudgetExpired = true; break; }
-                if (step > 0) await yieldSlice();
-            }
-            const next = generator.next();
-            if (next.done || !next.value?.result) break;
-            path = next.value.result;
-            if (path.status !== 'partial') break;
-        }
-        if (path.status !== 'success' || !path.path?.length) {
-            if (['timeout', 'partial'].includes(path.status)) candidateSearchLimited = true;
-            candidates.shift();
-            continue;
-        }
-        // Pathfinder post-processing centers movement nodes; retain the exact
-        // search goal for support/edit keys and the subsequent arrival check.
-        const candidate = selectedCandidate;
-        const feet = bot.blockAt(candidate);
-        const head = bot.blockAt(candidate.offset(0, 1, 0));
-        const support = bot.blockAt(candidate.offset(0, -1, 0));
-        const supportKey = reachPositionBlockKey(candidate.offset(0, -1, 0));
-        const plannedBreak = position => path.path.some(node => (node.toBreak ?? [])
-            .some(broken => reachPositionBlockKey(broken) === reachPositionBlockKey(position)));
-        const placementPlanned = path.path.some(node => (node.toPlace ?? []).some(placement =>
-            reachPositionBlockKey(new Vec3(placement.x + placement.dx, placement.y + placement.dy,
-                placement.z + placement.dz).floored()) === supportKey));
-        const feetClear = feet?.type === 0 && !feet.shapes?.length || plannedBreak(candidate);
-        const headPosition = candidate.offset(0, 1, 0);
-        const headClear = head?.type === 0 && !head.shapes?.length || plannedBreak(headPosition);
-        const supportSurvives = navigationRecoveryLandingSupport(support) && !plannedBreak(candidate.offset(0, -1, 0));
-        if (feetClear && headClear && (supportSurvives || placementPlanned)) {
-            landing = candidate;
-            break;
-        }
-        candidates.shift();
-    }
-    const goal = landing ? new pf.goals.GoalBlock(landing.x, landing.y, landing.z) : null;
-    const hazardLimitReached = queueIndex < queue.length && blocks.size >= NAVIGATION_RECOVERY_MAX_HAZARD_BLOCKS;
-    const searchStatus = goal ? 'success'
-        : searchBudgetExpired || candidateSearchLimited || ['timeout', 'partial'].includes(path.status)
-            || candidateLimitReached || hazardLimitReached ? 'search_limit' : 'noPath';
-    return { kind: descriptor.kind, submerged: descriptor.submerged === true, blocks, routeCells, candidates, candidateDiagnostics, goal, landing, movements,
-        searchStatus, pathNodeCount: path.path?.length ?? 0, safeCandidateCount, scaffoldNames, scaffoldCandidates,
-        limits: { radius: NAVIGATION_RECOVERY_RADIUS, hazardBlocks: NAVIGATION_RECOVERY_MAX_HAZARD_BLOCKS,
-            candidates: NAVIGATION_RECOVERY_MAX_CANDIDATES, durationMs: NAVIGATION_RECOVERY_MAX_DURATION_MS,
-            pathSearchTimeoutMs: NAVIGATION_RECOVERY_SEARCH_TIMEOUT_MS,
-            pathSearchTickTimeoutMs: NAVIGATION_RECOVERY_SEARCH_TICK_MS,
-            pathSearchSteps: NAVIGATION_RECOVERY_SEARCH_STEPS } };
-}
-
-function navigationRecoveryLandingFeet(bot, landing) {
-    const support = bot.blockAt(landing.offset(0, -1, 0));
-    const top = navigationRecoveryLandingSupport(support)
-        ? Math.max(...support.shapes.map(shape => shape[4])) : 1;
-    return landing.offset(0, Math.min(0, top - 1), 0);
-}
-
-function navigationRecoveryLanded(bot, position) {
-    return navigationRecoverySafeLanding(bot, position);
-}
-
 function holdNavigationRecoverySwim(bot) {
     const hold = () => {
         const position = bot.entity?.position?.floored?.();
-        const landed = bot.entity?.onGround === true && position && navigationRecoveryLanded(bot, position);
+        const landed = bot.entity?.onGround === true && position && !observedHazard(bot);
         bot.setControlState?.('jump', !landed);
     };
     hold();
@@ -4080,47 +3830,7 @@ function holdNavigationRecoverySwim(bot) {
     };
 }
 
-function navigationRecoveryNoReentryMovements(movementSource, routeCells) {
-    const movements = Object.assign(Object.create(Object.getPrototypeOf(movementSource)), movementSource);
-    for (const key of ['blocksToAvoid', 'blocksCantBreak', 'interactableBlocks', 'entitiesToAvoid', 'scafoldingBlocks']) {
-        if (movementSource[key] instanceof Set) movements[key] = new Set(movementSource[key]);
-        else if (Array.isArray(movementSource[key])) movements[key] = [...movementSource[key]];
-    }
-    const getNeighbors = movementSource.getNeighbors.bind(movementSource);
-    movements.getNeighbors = node => {
-        const neighbors = getNeighbors(node);
-        const fromInside = routeCells.has(reachPositionBlockKey(new Vec3(node.x, node.y, node.z)));
-        return fromInside ? neighbors : neighbors.filter(next => !routeCells.has(reachPositionBlockKey(new Vec3(next.x, next.y, next.z))));
-    };
-    return movements;
-}
-
-function navigationRecoveryPlacementAnchor(bot, target) {
-    const faces = [
-        { offset: new Vec3(0, -1, 0), face: new Vec3(0, 1, 0), faceId: 1 },
-        { offset: new Vec3(0, 0, -1), face: new Vec3(0, 0, 1), faceId: 3 },
-        { offset: new Vec3(0, 0, 1), face: new Vec3(0, 0, -1), faceId: 2 },
-        { offset: new Vec3(-1, 0, 0), face: new Vec3(1, 0, 0), faceId: 5 },
-        { offset: new Vec3(1, 0, 0), face: new Vec3(-1, 0, 0), faceId: 4 },
-    ];
-    for (const candidate of faces) {
-        const anchorPosition = target.plus(candidate.offset);
-        const anchor = bot.blockAt(anchorPosition);
-        if (!reachPositionFullCollisionBlock(anchor) || REACH_POSITION_EXIT_HAZARDS.has(anchor.name)
-            || REACH_POSITION_WATER_NAMES.has(anchor.name)) continue;
-        const interaction = resolveBlockInteraction(bot, anchor, { reach: 4.5 });
-        if (interaction.status !== 'ready' || interaction.face !== candidate.faceId) continue;
-        return { anchor: { x: anchorPosition.x, y: anchorPosition.y, z: anchorPosition.z },
-            face: { x: candidate.face.x, y: candidate.face.y, z: candidate.face.z }, interactionFace: candidate.faceId };
-    }
-    return null;
-}
-
-function navigationRecoverySafeLanding(bot, position) {
-    return reachPositionSafeArrival(bot, position);
-}
-
-async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = false, skipHazardRecovery = false, retainEmergencyScaffolds = false } = {}) {
+async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = false, retainEmergencyScaffolds = false } = {}) {
     /**
      * Reach an absolute bot-feet position using explicitly permitted digging
      * and/or pathfinder scaffolding. Only server-confirmed edits are reported.
@@ -4155,7 +3865,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
             scaffoldBlocks }, startedAt: routeStartedAt });
     const actionContext = operation?.cancellation ?? getActionContext(bot);
     let budgetExpired = false;
-    let hazardRecoveryComplete = skipHazardRecovery;
+    let hazardRecoveryComplete = false;
     let interruptedByHazard = null;
     let startedAt = 0;
     const cancelled = () => !!operation?.signal?.aborted || isActionCancelled(bot, actionContext);
@@ -4175,15 +3885,12 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
             { phase: 'landing', observedAt: new Date().toISOString() });
         return early(error.message, 'unsafe_state');
     }
-    const initialHazard = reachPositionStartHazard(bot);
-    let emergencyEgress = !!initialHazard || options.emergencyEgress === true;
-    const emergencyWaterBlocks = new Set(options.emergencyWaterBlocks ?? []);
-    const recoveryMovements = options.recoveryMovements ?? null;
+    const initialHazard = observedHazard(bot);
     if (bot.game?.minY != null && (target.y < bot.game.minY || bot.game.height != null && target.y >= bot.game.minY + bot.game.height)) return early('Target is outside the loaded dimension height.', 'invalid_target');
     if (bot.entity.position.distanceTo(target) > REACH_POSITION_MAX_DISTANCE) return early(`Target exceeds the ${REACH_POSITION_MAX_DISTANCE}-block range limit.`, 'invalid_target');
     const availableScaffoldBlocks = (allowScaffold ? scaffoldBlocks : []).filter(name => bot.registry?.itemsByName?.[name] &&
         (bot.inventory?.items?.() ?? []).some(item => item.name === name && item.count > 0));
-    let emergencyScaffoldBlocks = recoveryMovements?.scafoldingBlocks?.map(id => bot.registry.items[id].name) ?? availableScaffoldBlocks;
+    const emergencyScaffoldBlocks = ['dirt', 'cobblestone'];
     if (reachPositionMovementOwners.has(bot.pathfinder)) {
         return early('Another reachPosition operation already owns this pathfinder.');
     }
@@ -4204,8 +3911,11 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
         promise.then(() => { pendingNavigationEdits.delete(promise); releaseGate(); }, () => { pendingNavigationEdits.delete(promise); releaseGate(); });
         return promise;
     };
-    const ordinaryMovement = reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks: availableScaffoldBlocks, safeWater });
-    let movement = skipHazardRecovery && recoveryMovements ? recoveryMovements : ordinaryMovement;
+    const surfaceSwimming = isWaterFilled(bot.blockAt(bot.entity.position)) &&
+        isWaterFilled(bot.blockAt(bot.entity.position.floored().offset(0, -1, 0)));
+    const ordinaryMovement = reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks: availableScaffoldBlocks,
+        safeWater: safeWater || surfaceSwimming, surfaceSwimming });
+    let movement = ordinaryMovement;
     ownedMovements.add(movement);
     reachPositionMovementOwners.set(bot.pathfinder, context ?? movement);
     const movementOwner = reachPositionMovementOwners.get(bot.pathfinder);
@@ -4223,7 +3933,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
     const arrivalCandidate = () => arrivalMode === 'block' ? reachPositionBlockMatches(bot.entity.position, target) : finalDistance() <= tolerance;
     const confirmArrival = async () => {
         if (arrivalMode !== 'block') return { position: snapshotPosition(), observedAt: new Date().toISOString(), physicsTicks: 0 };
-        return await settleReachPositionArrival(bot, target, active);
+        return await settleReachPositionArrival(bot, target, active, 1200, { waitForSafeStart: startedPosition.distanceTo(bot.entity.position) > 0.01 });
     };
     const goal = reachPositionGoal(target, tolerance, arrivalMode);
     let resultCode = null;
@@ -4242,6 +3952,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
             if (typeof bot.tool?.equipForBlock === 'function') await bot.tool.equipForBlock(block);
             active();
             if (unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
+            if (bot.navigationProtection?.contains(block.position)) throw new Error('Protected area forbids digging route blocks.');
             const result = await registerOwnedPromise(originalDig.call(this, block, ...args));
             const observed = bot.blockAt(block.position);
             if (!observed || observed.type !== 0) throw new Error(`Server did not confirm route excavation at ${block.position}.`);
@@ -4272,6 +3983,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
             throw new Error(`Pathfinder attempted an unpermitted scaffold block: ${blockName ?? 'unknown'}.`);
         }
         const targetPosition = reference.position.plus(face).floored();
+        if (bot.navigationProtection?.contains(targetPosition)) throw new Error('Protected area forbids scaffolding.');
         let placement;
         try {
             const observedTarget = bot.blockAt(targetPosition);
@@ -4279,14 +3991,12 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
             const bodyHeadOffset = Math.max(1, Math.ceil((Number.isFinite(bot.entity.height) ? bot.entity.height : 1.8) - 0.01) - 1);
             const overlapsWaterPlacementBody = targetPosition.x === bodyFeet.x && targetPosition.z === bodyFeet.z
                 && targetPosition.y >= bodyFeet.y && targetPosition.y <= bodyFeet.y + bodyHeadOffset;
-            const waterPlacementAllowed = emergencyEgress && REACH_POSITION_WATER_NAMES.has(observedTarget?.name)
-                && emergencyWaterBlocks.has(reachPositionBlockKey(targetPosition)) && !overlapsWaterPlacementBody;
-            if (!observedTarget || (REACH_POSITION_WATER_NAMES.has(observedTarget.name) && !waterPlacementAllowed)
-                || ['lava', 'flowing_lava'].includes(observedTarget.name)) {
+            const waterPlacementAllowed = (navigationRecoveryActive.has(bot) || movement.allowWaterScaffold) && !overlapsWaterPlacementBody;
+            if (!observedTarget || (isWaterFilled(observedTarget) && !waterPlacementAllowed) || LAVA_NAMES.has(observedTarget.name)) {
                 failedScaffoldCells.add(reachPositionBlockKey(targetPosition));
                 const error = new Error(overlapsWaterPlacementBody
                     ? 'Emergency egress will not place a block in the bot body.'
-                    : 'Navigation scaffold target is unknown or occupied by liquid outside the observed egress water region.');
+                    : 'Navigation scaffold target is unknown or the route cannot place into that liquid.');
                 error.navigationPlacementAttempted = false;
                 throw error;
             }
@@ -4321,7 +4031,7 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
         edits.push(change);
         recordConfirmation({ quantity: 1, unit: 'block', target: { block: blockName, position: positionRecord },
             evidence: 'Expected server block update confirmed after Mineflayer placement promise' });
-        if (emergencyEgress) log(bot, `[navigation-recovery-edit] ${JSON.stringify({ kind: 'scaffold-placed',
+        if (navigationRecoveryActive.has(bot)) log(bot, `[navigation-recovery-edit] ${JSON.stringify({ kind: 'scaffold-placed',
             block: blockName, position: positionRecord, serverConfirmed: true, replanning: true })}`);
         active();
         return placement.result;
@@ -4406,75 +4116,27 @@ async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = f
                 status = 'stalled'; reason = 'Reach exceeded its elapsed-time budget.'; break;
             }
             const start = bot.entity.position.floored();
-            if (interruptedByHazard || segment === 0 && initialHazard && !hazardRecoveryComplete && !skipHazardRecovery) {
+            if (interruptedByHazard || segment === 0 && initialHazard && !hazardRecoveryComplete) {
                 diagnosticPhase = 'recovery';
-                if (interruptedByHazard) recordNavigationDiagnostic(bot, 'navigation_hazard_detected', interruptedByHazard.navigation);
-                if (interruptedByHazard && !navigationRecoveryDescriptor(bot)) {
-                    interruptedByHazard = null;
-                    continue;
-                }
-                const releaseRecoverySwim = navigationRecoveryDescriptor(bot)?.submerged
-                    ? holdNavigationRecoverySwim(bot) : () => {};
-                let recovery;
-                try {
-                    recovery = await navigationRecovery(bot, movement, goal);
-                } catch (error) {
-                    releaseRecoverySwim();
-                    throw error;
-                }
-                log(bot, `[navigation-recovery] ${JSON.stringify({ kind: recovery?.kind ?? initialHazard,
-                    policy: 'survival-egress-before-goal', searchStatus: recovery?.searchStatus ?? 'noPath',
-                    hazardBlocks: recovery?.blocks?.size ?? 0,
-                    safeCandidates: recovery?.safeCandidateCount ?? recovery?.candidates?.length ?? 0,
-                    landing: recovery?.landing ?? null, searchLimits: recovery?.limits ?? null })}`);
-                if (!recovery?.goal) {
-                    releaseRecoverySwim();
-                    const code = recovery?.searchStatus === 'search_limit' ? 'search_limit' : 'route_not_found';
-                    resultCode = code;
-                    throw Object.assign(new Error(`Hazard egress ${recovery?.searchStatus ?? 'failed'}: ${recovery?.kind ?? initialHazard}; `
-                        + `${recovery?.blocks?.size ?? 0} connected hazard blocks, ${recovery?.safeCandidateCount ?? recovery?.candidates?.length ?? 0} safe candidates.`),
-                        { name: code === 'search_limit' ? 'NavigationRecoveryBudgetError' : 'NavigationRecoveryNoPathError',
-                            navigation: { ...interruptedByHazard?.navigation, code, phase: 'search', recovery: { kind: recovery?.kind ?? initialHazard,
-                                status: recovery?.searchStatus ?? 'noPath', limits: recovery?.limits ?? null } } });
-                }
-                emergencyEgress = true;
-                emergencyScaffoldBlocks = recovery.scaffoldNames;
-                for (const key of recovery.blocks.keys()) emergencyWaterBlocks.add(key);
-                activeGoal = recovery.goal;
-                ownedMovements.add(recovery.movements);
-                bot.pathfinder.setMovements(recovery.movements);
-                let navigationFailure = null;
-                navigationRecoveryActive.add(bot);
-                try {
-                    await withNativeNavigationEditScope(() => goToGoal(bot, recovery.goal, recovery.movements));
-                } catch (error) {
-                    navigationFailure = error;
-                } finally {
-                    releaseRecoverySwim();
-                    navigationRecoveryActive.delete(bot);
-                    await drainNavigationEdits();
-                }
-                if (navigationFailure) throw navigationFailure;
+                const kind = observedHazard(bot);
+                if (interruptedByHazard) await recoverInterruptedNavigation(bot, goal, movement, interruptedByHazard);
+                else await escapeHazard(bot, movement, goal);
+                await drainNavigationEdits();
                 active();
-                const recoveredPosition = navigationRecoveryLandingFeet(bot, recovery.landing).floored();
-                const settled = await settleReachPositionArrival(bot, recoveredPosition, active, 1200, { waitForSafeStart: true });
-                if (!settled || !navigationRecoveryLanded(bot, recoveredPosition)) {
-                    resultCode = 'unsafe_state';
-                    throw new Error('Hazard egress did not confirm a grounded safe landing.');
-                }
                 hazardRecoveryComplete = true;
                 interruptedByHazard = null;
-                if (recovery.kind === 'water' && recovery.blocks?.has(reachPositionBlockKey(target.floored()))) {
+                if (kind === 'water' && isWaterFilled(bot.blockAt(target.floored()))) {
                     status = 'blocked';
                     resultCode = 'unsafe_state';
-                    reason = 'The requested destination is inside the water region; navigation stopped at the safe landing to avoid re-entry.';
-                    log(bot, `[reachPosition-departure] ${JSON.stringify({ policy: 'survival-egress', reason: 'target_reentry_forbidden', target: target.floored(), safeLanding: recoveredPosition })}`);
+                    reason = 'Hazard egress reached air; the requested feet block is still under water.';
                     break;
                 }
-                movement = navigationRecoveryNoReentryMovements(ordinaryMovement, recovery.routeCells);
-                ownedMovements.add(movement);
-                bot.pathfinder.setMovements(movement);
-                log(bot, `[navigation-recovery] ${JSON.stringify({ kind: recovery.kind, policy: 'safe-landing-confirmed', position: recoveredPosition })}`);
+                if (kind === 'water') {
+                    movement = reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks: availableScaffoldBlocks,
+                        safeWater: true, surfaceSwimming: true });
+                    ownedMovements.add(movement);
+                    bot.pathfinder.setMovements(movement);
+                }
                 continue;
             }
             diagnosticPhase = initialHazard && !hazardRecoveryComplete ? 'recovery' : 'search';
@@ -5022,7 +4684,7 @@ export async function followPlayer(bot, username, distance=4) {
     const followGoal = new pf.goals.GoalFollow(player, distance);
     const owner = operationContext() ?? getActionContext(bot);
     await awaitNavigationLanding(bot);
-    await recoverNavigationStart(bot, followGoal, move);
+    await escapeHazard(bot, move, followGoal);
     if (isActionCancelled(bot, owner)) return false;
     bot.pathfinder.setMovements(move);
     let doorCheckInterval = navigationPolicy() || operationContext()?.nativeNavigationNoEdits
@@ -5191,7 +4853,7 @@ export async function avoidEnemies(bot, distance=16) {
                     const p = enemy.position;
                     return new pf.goals.GoalInvert(new pf.goals.GoalNear(p.x, p.y, p.z, distance + 1));
                 }));
-                if (key === null) await recoverNavigationStart(bot, goal, movement);
+                if (key === null) await escapeHazard(bot, movement, goal);
                 if (bot.interrupt_code) return false;
                 bot.pathfinder.setMovements(movement);
                 bot.pathfinder.setGoal(goal, true);

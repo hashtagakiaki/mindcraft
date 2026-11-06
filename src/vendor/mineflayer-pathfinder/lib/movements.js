@@ -30,6 +30,7 @@ class Movements {
 
     this.canDig = true
     this.digCost = 1
+    this.maxMoveCost = 100
     this.placeCost = 1
     this.liquidCost = 1
     this.entityCost = 1
@@ -145,7 +146,7 @@ class Movements {
     for (const a of this.exclusionAreasPlace) {
       weight += a(block)
     }
-    return weight
+    return weight >= 100 ? Infinity : weight
   }
 
   exclusionStep (block) {
@@ -154,7 +155,7 @@ class Movements {
     for (const a of this.exclusionAreasStep) {
       weight += a(block)
     }
-    return weight
+    return weight >= 100 ? Infinity : weight
   }
 
   exclusionBreak (block) {
@@ -308,7 +309,7 @@ class Movements {
   }
 
   /**
-   * Takes into account if the block is within the stepExclusionAreas. And returns 100 if a block to be broken is within break exclusion areas.
+   * Takes into account if the block is within the stepExclusionAreas. Returns Infinity for a prohibited transition.
    * @param {import('prismarine-block').Block} block block
    * @param {[]} toBreak
    * @returns {number}
@@ -330,7 +331,7 @@ class Movements {
       return cost + 1 // Small cost for opening trapdoor
     }
 
-    if (!this.safeToBreak(block)) return 100 // Can't break, so can't move
+    if (!this.safeToBreak(block)) return Infinity // Can't break, so can't move
     toBreak.push(block.position)
 
     if (block.physical) cost += this.getNumEntitiesAt(block.position, 0, 1, 0) * this.entityCost // Add entity cost if there is an entity above (a breakable block) that will fall
@@ -371,13 +372,29 @@ class Movements {
     if (blockH.physical && (this.getNumEntitiesAt(blockH.position, 0, 1, 0) > 0)) return
     if (blockB.physical && !blockH.physical && !blockC.physical && (this.getNumEntitiesAt(blockB.position, 0, 1, 0) > 0)) return // It is fine if an ent falls on B so long as we don't need to replace block C
 
-    if (!blockC.physical) {
+    const feet = this.getBlock(node, 0, 0, 0)
+    if (blockC.liquid) {
+      if (!this.allowWaterScaffold || !isWaterFilled(feet) || !isWaterFilled(blockC) || this.canPlaceOn === false || node.remainingBlocks === 0 ||
+          this.editProtected(blockC.position) || this.getNumEntitiesAt(blockC.position, 0, 0, 0) > 0) return
+      const faces = [{ x: 0, y: 1, z: 0 }, ...cardinalDirections.map(({ x, z }) => ({ x, y: 0, z }))]
+      const face = faces.find(({ x, y, z }) => {
+        const anchor = this.getBlock(blockC.position, -x, -y, -z)
+        return anchor.physical && !anchor.liquid && !this.blocksToAvoid.has(anchor.type)
+      })
+      if (!face) return
+      const anchor = blockC.position.offset(-face.x, -face.y, -face.z)
+      toPlace.push({ x: anchor.x, y: anchor.y, z: anchor.z, dx: face.x, dy: face.y, dz: face.z })
+      cost += this.placeCost + this.exclusionPlace(blockC)
+      blockC.height += 1
+    } else if (!blockC.physical) {
       if (node.remainingBlocks === 0) return // not enough blocks to place
 
       if (this.getNumEntitiesAt(blockC.position, 0, 0, 0) > 0) return // Check for any entities in the way of a block placement
 
       const blockD = this.getBlock(node, dir.x, -1, dir.z)
       if (!blockD.physical) {
+        const anchor = this.getBlock(node, 0, -1, 0)
+        if (anchor.liquid) return
         if (node.remainingBlocks === 1) return // not enough blocks to place
 
         if (this.getNumEntitiesAt(blockD.position, 0, 0, 0) > 0) return // Check for any entities in the way of a block placement
@@ -407,14 +424,17 @@ class Movements {
     }
 
     const block0 = this.getBlock(node, 0, -1, 0)
-    if (blockC.height - block0.height > 1.2) return // Too high to jump
+    const scaffoldUnderfoot = block0.liquid && node.toPlace?.some(edit => !edit.useOne &&
+      edit.x + edit.dx === node.x && edit.y + edit.dy === node.y - 1 && edit.z + edit.dz === node.z)
+    const launchHeight = (isWaterFilled(feet) && !feet.physical) || scaffoldUnderfoot ? node.y : block0.height
+    if (blockC.height - launchHeight > 1.2) return // Too high to jump
 
     cost += this.safeOrBreak(blockA, toBreak, node)
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
     cost += this.safeOrBreak(blockH, toBreak, node)
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
     cost += this.safeOrBreak(blockB, toBreak, node)
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
 
     neighbors.push(new Move(blockB.position.x, blockB.position.y, blockB.position.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
   }
@@ -431,6 +451,8 @@ class Movements {
     const toPlace = []
 
     if (!blockD.physical && !blockC.liquid) {
+      const anchor = this.getBlock(node, 0, -1, 0)
+      if (anchor.liquid) return
       if (node.remainingBlocks === 0) return // not enough blocks to place
 
       if (this.getNumEntitiesAt(blockD.position, 0, 0, 0) > 0) return // D intersects an entity hitbox
@@ -447,14 +469,14 @@ class Movements {
     }
 
     cost += this.safeOrBreak(blockB, toBreak, node)
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
 
     // Open fence gates and doors
     if (this.canOpenDoors && blockC.openable && !blockC._properties.open) {
       toPlace.push({ x: node.x + dir.x, y: node.y, z: node.z + dir.z, dx: 0, dy: 0, dz: 0, useOne: true }) // Indicate that a block should be used on this block not placed
     } else {
       cost += this.safeOrBreak(blockC, toBreak, node)
-      if (cost > 100) return
+      if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
     }
 
     if (this.getBlock(node, 0, 0, 0).liquid) cost += this.liquidCost
@@ -496,12 +518,12 @@ class Movements {
       cost += cost2
       toBreak.push(...toBreak2)
     }
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
 
     cost += this.safeOrBreak(this.getBlock(node, dir.x, y, dir.z), toBreak, node)
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
     cost += this.safeOrBreak(this.getBlock(node, dir.x, y + 1, dir.z), toBreak, node)
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
 
     if (this.getBlock(node, 0, 0, 0).liquid) cost += this.liquidCost
 
@@ -509,7 +531,7 @@ class Movements {
     if (y === 1) { // Case jump up by 1
       if (blockC.height - block0.height > 1.2) return // Too high to jump
       cost += this.safeOrBreak(this.getBlock(node, 0, 2, 0), toBreak, node)
-      if (cost > 100) return
+      if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
       cost += 1
       neighbors.push(new Move(blockC.position.x, blockC.position.y + 1, blockC.position.z, node.remainingBlocks, cost, toBreak))
     } else if (blockD.physical || blockC.liquid) {
@@ -549,11 +571,11 @@ class Movements {
     if (!this.infiniteLiquidDropdownDistance && ((node.y - blockLand.position.y) > this.maxDropDown)) return // Don't drop down into water
 
     cost += this.safeOrBreak(blockB, toBreak, node)
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
     cost += this.safeOrBreak(blockC, toBreak, node)
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
     cost += this.safeOrBreak(blockD, toBreak, node)
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
 
     if (blockC.liquid) return // dont go underwater
 
@@ -573,7 +595,7 @@ class Movements {
     if (!blockLand) return
 
     cost += this.safeOrBreak(block0, toBreak, node)
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
 
     if (this.getBlock(node, 0, 0, 0).liquid) return // dont go underwater
 
@@ -587,10 +609,12 @@ class Movements {
     if (block1.liquid) {
       // Standard swim-up step. No scaffold is needed in water; break a
       // ceiling block only when the normal movement policy allows it.
+      const aboveFeet = this.getBlock(node, 0, 1, 0)
+      if (isWaterFilled(block1) && !aboveFeet.liquid) return
       const block2 = this.getBlock(node, 0, 2, 0)
       const toBreak = []
       const cost = 1 + this.safeOrBreak(block2, toBreak, node) + this.liquidCost
-      if (cost <= 100) neighbors.push(new Move(node.x, node.y + 1, node.z, node.remainingBlocks, cost, toBreak, []))
+      if (Number.isFinite(cost) && cost <= this.maxMoveCost) neighbors.push(new Move(node.x, node.y + 1, node.z, node.remainingBlocks, cost, toBreak, []))
       return
     }
     if (this.getNumEntitiesAt(node, 0, 0, 0) > 0) return // an entity (besides the player) is blocking the building area
@@ -601,7 +625,7 @@ class Movements {
     const toBreak = []
     const toPlace = []
     cost += this.safeOrBreak(block2, toBreak, node)
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
 
     if (!block1.climbable) {
       if (!this.allow1by1towers || node.remainingBlocks === 0) return // not enough blocks to place
@@ -620,7 +644,7 @@ class Movements {
       cost += this.placeCost // additional cost for placing a block
     }
 
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
 
     neighbors.push(new Move(node.x, node.y + 1, node.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
   }
@@ -642,7 +666,7 @@ class Movements {
     
     // Make sure we can break/pass through the block above if needed
     cost += this.safeOrBreak(blockAbove, toBreak, node)
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
     
     // Add cost for opening the trapdoor
     toPlace.push({ x: node.x, y: node.y + 2, z: node.z, dx: 0, dy: 0, dz: 0, useOne: true })
@@ -668,7 +692,7 @@ class Movements {
     // Check if there's space to jump up from the top of the ladder
     const blockJumpTarget = this.getBlock(node, 0, 2, 0)
     cost += this.safeOrBreak(blockJumpTarget, toBreak, node)
-    if (cost > 100) return
+    if (!Number.isFinite(cost) || cost > this.maxMoveCost) return
     
     neighbors.push(new Move(node.x, node.y + 2, node.z, node.remainingBlocks - toPlace.length, cost, toBreak, toPlace))
   }

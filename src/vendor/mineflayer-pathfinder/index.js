@@ -15,7 +15,6 @@ const nbt = require('prismarine-nbt')
 const interactableBlocks = require('./lib/interactable.json')
 
 function inject (bot) {
-  const waterType = bot.registry.blocksByName.water.id
   const lavaType = bot.registry.blocksByName.lava.id
   const ladderId = bot.registry.blocksByName.ladder.id
   const vineId = bot.registry.blocksByName.vine.id
@@ -86,7 +85,7 @@ function inject (bot) {
     const resetEntityIntersects = options.resetEntityIntersects ?? true
     const timeout = options.timeout ?? bot.pathfinder.thinkTimeout
     const tickTimeout = options.tickTimeout ?? bot.pathfinder.tickTimeout
-    const searchRadius = options.searchRadius ?? bot.pathfinder.searchRadius
+    const searchRadius = options.searchRadius ?? movements.searchRadius ?? bot.pathfinder.searchRadius
     let start
     if (options.startMove) {
       start = options.startMove
@@ -198,7 +197,7 @@ function inject (bot) {
         continue
       }
 
-      if (b && (b.type === waterType || ((b.type === ladderId || b.type === vineId) && i + 1 < path.length && path[i + 1].y < curPoint.y))) {
+      if (b && (Movements.isWaterFilled(b) || ((b.type === ladderId || b.type === vineId) && i + 1 < path.length && path[i + 1].y < curPoint.y))) {
         curPoint.x = Math.floor(curPoint.x) + 0.5
         curPoint.y = Math.floor(curPoint.y)
         curPoint.z = Math.floor(curPoint.z) + 0.5
@@ -453,8 +452,8 @@ function inject (bot) {
       results.path = postProcessPath(results.path.map(node => Object.assign(new Move(), node, { toBreak: [...node.toBreak], toPlace: [...node.toPlace] })))
       pathFromPlayer(results.path)
       bot.emit('path_update', results)
-      path = results.path
       astartTimedout = results.status === 'partial'
+      path = astartTimedout && stateMovements.waitForFullPath ? [] : results.path
     }
 
     if (bot.pathfinder.LOSWhenPlacingBlocks && returningPos) {
@@ -474,8 +473,8 @@ function inject (bot) {
         } else if (!pathUpdated) {
           const results = bot.pathfinder.getPathTo(stateMovements, stateGoal)
           bot.emit('path_update', results)
-          path = results.path
           astartTimedout = results.status === 'partial'
+          path = astartTimedout && stateMovements.waitForFullPath ? [] : results.path
           pathUpdated = true
         }
       }

@@ -206,6 +206,14 @@ async function waitForScaffoldClearance(bot, position) {
     }
 }
 
+export async function withEmergencyNavigation(bot, policy, body) {
+    const context = policyStorage.getStore();
+    if (context?.bot !== bot) return runWithNavigationPolicy(bot, policy, body);
+    context.emergencyPolicy = policy;
+    try { return await body(); }
+    finally { context.emergencyPolicy = null; }
+}
+
 export async function runWithNavigationPolicy(bot, policy, body) {
     const context = { bot, policy, edits: [], scaffolds: [], unconfirmedScaffolds: [], arrivals: [], segment: null, active: true, goal: null };
     const pathfinder = bot.pathfinder;
@@ -300,7 +308,7 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
         if (workTargetDig) {
             return originalDig.call(this, block, ...args);
         }
-        if (context.policy.allowDig !== true) throw new Error('Navigation policy forbids digging route blocks.');
+        if ((context.emergencyPolicy ?? context.policy).allowDig !== true) throw new Error('Navigation policy forbids digging route blocks.');
         const protectedArea = bot.navigationProtection?.areaAt(block.position);
         if (protectedArea) throw new Error(`Protected area ${protectedArea.name} forbids digging route blocks.`);
         const result = await originalDig.call(this, block, ...args);
@@ -315,9 +323,10 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
         if (!context.active) throw new Error('Navigation policy ended before the next edit.');
         if (navigationCancelled(bot)) throw new Error('Action cancelled before the next navigation edit.');
         if (context.unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
-        if (context.policy.scaffold === 'forbid') throw new Error('Navigation policy forbids scaffolding.');
+        const policy = context.emergencyPolicy ?? context.policy;
+        if (policy.scaffold === 'forbid') throw new Error('Navigation policy forbids scaffolding.');
         const blockName = bot.heldItem?.name;
-        if (!context.policy.scaffoldBlocks.includes(blockName)) throw new Error(`Navigation policy forbids scaffold block ${blockName ?? 'unknown'}.`);
+        if (!policy.scaffoldBlocks.includes(blockName)) throw new Error(`Navigation policy forbids scaffold block ${blockName ?? 'unknown'}.`);
         const target = reference.position.plus(face).floored();
         const protectedArea = bot.navigationProtection?.areaAt(target);
         if (protectedArea) throw new Error(`Protected area ${protectedArea.name} forbids scaffolding.`);

@@ -99,30 +99,18 @@ const modes_list = [
             let blockAbove = bot.blockAt(bot.entity.position.offset(0, 1, 0));
             if (!block) block = {name: 'air'}; // hacky fix when blocks are not loaded
             if (!blockAbove) blockAbove = {name: 'air'};
-            const eye = skills.eyeLevelBlock(bot);
-            if (skills.isWaterFilled(eye)) {
+            const hazard = skills.observedHazard(bot);
+            if (hazard === 'water') {
                 if (skills.ownsNavigationHazardRecovery(bot)) return;
-                // A solid block over the submerged head stops the bot from
-                // surfacing, so break it; breakBlockAt equips a harvest tool when one is held.
-                const ceiling = bot.blockAt(eye.position.offset(0, 1, 0));
-                if (ceiling?.boundingBox === 'block' && ceiling.diggable) {
-                    const { x, y, z } = ceiling.position;
-                    execute(this, agent, async () => {
-                        await skills.breakBlockAt(bot, x, y, z);
-                    }, -1, modeDecision(this, bot, 'submerged_under_ceiling', { block: ceiling.name, position: { x, y, z } }));
-                }
-                // otherwise does not call execute so does not interrupt other actions
-                else if (!bot.pathfinder.goal) {
-                    bot.setControlState('jump', true);
-                }
+                execute(this, agent, () => skills.escapeHazard(bot), -1, modeDecision(this, bot, 'submerged'));
             }
             else if (this.fall_blocks.some(name => blockAbove.name.includes(name))) {
                 execute(this, agent, async () => {
                     await skills.moveAway(bot, 2);
                 }, -1, modeDecision(this, bot, 'falling_block_overhead', { block: blockAbove.name }));
             }
-            else if (block.name === 'lava' || block.name === 'fire' ||
-                blockAbove.name === 'lava' || blockAbove.name === 'fire') {
+            else if (hazard === 'lava' || block.name === 'fire' || blockAbove.name === 'fire') {
+                if (skills.ownsNavigationHazardRecovery(bot)) return;
                 say(agent, 'I\'m on fire!');
                 // if you have a water bucket, use it
                 let waterBucket = bot.inventory.findInventoryItem('water_bucket');
@@ -133,23 +121,13 @@ const modes_list = [
                     }, -1, modeDecision(this, bot, 'fire_or_lava_with_bucket', { block: block.name, blockAbove: blockAbove.name }));
                 }
                 else {
-                    execute(this, agent, async () => {
-                        let waterBucket = bot.inventory.findInventoryItem('water_bucket');
-                        if (waterBucket) {
-                            let success = await skills.placeBlock(bot, 'water_bucket', block.position.x, block.position.y, block.position.z);
-                            if (success) say(agent, 'Placed some water, ahhhh that\'s better!');
-                            return;
-                        }
-                        let nearestWater = world.getNearestBlock(bot, 'water', 20);
-                        if (nearestWater) {
-                            const pos = nearestWater.position;
-                            let success = await skills.goToPosition(bot, pos.x, pos.y, pos.z, 0.2);
-                            if (success) say(agent, 'Found some water, ahhhh that\'s better!');
-                            return;
-                        }
-                        await skills.moveAway(bot, 5);
-                    }, -1, modeDecision(this, bot, 'fire_or_lava_seek_water', { block: block.name, blockAbove: blockAbove.name }));
+                    execute(this, agent, () => skills.escapeHazard(bot), -1,
+                        modeDecision(this, bot, 'hazard_egress', { block: block.name, blockAbove: blockAbove.name }));
                 }
+            }
+            else if (hazard === 'contact' || hazard === 'powder_snow') {
+                if (skills.ownsNavigationHazardRecovery(bot)) return;
+                execute(this, agent, () => skills.escapeHazard(bot), -1, modeDecision(this, bot, 'hazard_egress', { hazard }));
             }
             else if (Date.now() - bot.lastDamageTime < 3000 && (bot.health < 5 || bot.lastDamageTaken >= bot.health)) {
                 say(agent, 'I\'m dying!');

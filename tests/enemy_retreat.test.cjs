@@ -177,6 +177,11 @@ async function main() {
       Object.assign(bot, { _mindcraftDiagnosticRecord: (type, detail) => events.push({ type, detail }),
         chat: message => chat.push(message), setControlState: (control, state) => controls.push(`${control}:${state}`),
         clearControlStates: () => controls.push('clear') })
+      bot.pathfinder.goto = async goal => {
+        assert.equal(typeof goal.observedEscape, 'function', 'self_preservation uses the shared escape goal')
+        bot.entity.position = new Vec3(2.5, 64, 0.5)
+        bot.entity.onGround = true
+      }
       initModes({ ...modeAgent, bot, prompter: { getInitModes: () => ({ self_preservation: true, cowardice: false, self_defense: false,
         hunting: false, item_collecting: false, torch_placing: false, elbow_room: false, idle_staring: false, cheat: true }) },
         actions: { currentActionLabel: '', currentAction: null, getCancellationContext: () => null,
@@ -186,18 +191,13 @@ async function main() {
       const event = events.find(item => item.type === 'mode_action_triggered')
       return { reason: event?.detail.reason ?? null, target: event?.detail.evidence.position ?? null, chat, controls }
     }
-    const underStone = await submerged('stone')
-    assert.equal(underStone.reason, 'submerged_under_ceiling')
-    assert.deepEqual(underStone.target, { x: 0, y: 66, z: 0 })
-    assert.deepEqual(underStone.chat, ['/setblock 0 66 0 air'], 'the solid block over the submerged head is broken')
-    for (const name of ['air', 'water', 'bedrock']) {
-      const open = await submerged(name)
-      assert.equal(open.reason, null, `${name} over the head does not start digging`)
-      assert.deepEqual(open.controls, ['jump:true'], `${name} over the head keeps the swim-up jump`)
+    for (const name of ['stone', 'air', 'water', 'bedrock']) {
+      const result = await submerged(name)
+      assert.equal(result.reason, 'submerged', `${name} over the head is passed to the shared egress`)
+      assert.ok(result.controls.includes('jump:true'), 'egress maintains the swim-up input')
     }
-    // Kelp holds water like a water block: the eyes in it are submerged.
     const inKelp = await submerged('stone', { column: { 64: 'kelp_plant', 65: 'kelp' } })
-    assert.equal(inKelp.reason, 'submerged_under_ceiling', 'kelp at the eyes counts as water')
+    assert.equal(inKelp.reason, 'submerged', 'kelp at the eyes counts as water')
     // Floating at the surface: the feet+1 cell is water but the eyes are in the air.
     const surface = await submerged('air', { feetY: 64.5, column: { 64: 'water', 65: 'water' } })
     assert.equal(surface.reason, null, 'eyes above the surface do not start a dig')
