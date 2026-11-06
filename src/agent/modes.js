@@ -4,7 +4,9 @@ import * as world from './library/world.js';
 import * as mc from '../utils/mcdata.js';
 import settings from './settings.js'
 
-const meleeMobs = new Set(['zombie', 'husk', 'zombie_villager', 'drowned', 'spider']);
+// Ground mobs self_defense fights instead of fleeing when the bot is healthy.
+// Creepers are fought from outside their ignition distance (skills.fightEntity).
+const selfDefenseMobs = new Set(['zombie', 'husk', 'zombie_villager', 'drowned', 'spider', 'creeper']);
 // Retreat only from threats that endanger the bot now; distant creepers and
 // ranged mobs that are merely visible would otherwise cancel every action.
 const CREEPER_RETREAT_DISTANCE = 7;
@@ -152,7 +154,7 @@ const modes_list = [
     },
     {
         name: 'cowardice',
-        description: 'Run away from dangerous encounters (creepers within 7 blocks; melee mobs within 8 blocks; visible ranged mobs only after recent damage or below 10 health); let self-defense handle unarmed ground melee enemies when healthy and able to sprint. Interrupts all actions.',
+        description: 'Run away from dangerous encounters (creepers within 7 blocks; melee mobs within 8 blocks; visible ranged mobs only after recent damage or below 10 health); let self-defense handle unarmed ground melee enemies and creepers when healthy and able to sprint. Interrupts all actions.',
         interrupts: ['all'],
         on: true,
         active: false,
@@ -166,7 +168,7 @@ const modes_list = [
             }
             const maxEnemies = bot.health >= 20 ? 3 : 1;
             const groundMelee = enemies.length > 0 && enemies.length <= maxEnemies && enemies.every(opponent => {
-                const block = meleeMobs.has(opponent.name) ? bot.blockAt(opponent.position) : null;
+                const block = selfDefenseMobs.has(opponent.name) ? bot.blockAt(opponent.position) : null;
                 return block && !opponent.heldItem && !['water', 'lava', 'bubble_column'].includes(block.name);
             });
             // One shared encounter rule, independent of this bot's equipment or

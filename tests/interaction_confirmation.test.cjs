@@ -386,6 +386,43 @@ async function main() {
     assert.deepEqual(splitTargets, [33, 34], 'defense observes delayed death-spawned enemies')
   } finally { clearTimeout(childTimer) }
 
+  // A creeper is struck from outside its 3-block ignition distance. Once its
+  // fuse starts, striking stops and the bot holds beyond the 7-block cancel
+  // distance until the fuse has drained, then re-engages.
+  {
+    const creeper = { id: 40, name: 'creeper', type: 'hostile', position: makePosition(3.8, 0, 0.5), metadata: { 16: -1 } }
+    const events = {}
+    const defender = makeBot({ entities: [creeper], onAttack(enemy, bot) {
+      if (!events.firstAttack) {
+        events.firstAttack = Date.now()
+        setTimeout(() => { creeper.metadata[16] = 1 }, 100)
+      } else {
+        events.secondAttack = Date.now()
+        bot.emit('entityDead', enemy)
+      }
+    } })
+    defender.registry.entitiesByName = { creeper: { metadataKeys: [...Array.from({ length: 16 }, (_, i) => `key_${i}`), 'swell_dir'] } }
+    const goals = []
+    const recordGoal = defender.pathfinder.setGoal
+    defender.pathfinder.setGoal = function (goal) {
+      recordGoal.call(this, goal)
+      if (!goal || goal.pluginFollow) return
+      goals.push(goal)
+      if (goals.length === 2) {
+        events.stopsBeforeRetreat = defender.pvpStopCount
+        setTimeout(() => { creeper.metadata[16] = -1; events.fuseCancelled = Date.now() }, 300)
+      }
+    }
+    assert.equal(await withAcceleratedClock(() => skills.defendSelf(defender), 10), true)
+    const node = x => ({ x, y: 0, z: 0 })
+    assert.deepEqual([-1, 0, 1].map(x => goals[0].isEnd(node(x))), [false, true, false],
+      'the strike position stays between the ignition distance and PVP attack range')
+    assert.deepEqual([0, -5].map(x => goals[1].goals[0].isEnd(node(x))), [false, true], 'a lit fuse sends the bot past the cancel distance')
+    assert.equal(events.stopsBeforeRetreat, 1, 'striking stops before the retreat from a lit fuse')
+    assert.ok(events.secondAttack - events.fuseCancelled >= 200, 'the bot re-engages only after the fuse has drained')
+    assert.equal(goals.length, 3, 'the strike position resumes after the fuse drains')
+  }
+
   const killedDefender = makeBot({ entities: [target], onAttack(_enemy, bot) { bot.emit('death') } })
   killedDefender.navigation.entities[0] = { ...target, type: 'hostile' }
   assert.equal(await skills.defendSelf(killedDefender), false, 'death cannot become success after automatic respawn')

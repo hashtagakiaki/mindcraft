@@ -110,6 +110,46 @@ const HARVEST_CONFIRM_TIMEOUT_MS = 2000;
 const INTERACTION_CONFIRM_TIMEOUT_MS = 2000;
 const COMBAT_CHECK_INTERVAL_MS = 50;
 const COMBAT_SETTLE_MS = 1500;
+// A creeper starts its fuse when its target is within 3 blocks (feet to feet)
+// and keeps swelling until the target is beyond 7 blocks or out of sight; the
+// fuse fills and drains one tick at a time over 30 ticks. Strike from just
+// outside the ignition distance, inside PVP's 3.5-block attack range, and
+// retreat past the cancel distance until the fuse has drained.
+const CREEPER_STRIKE_MIN_DISTANCE = 3.2;
+const CREEPER_STRIKE_MAX_DISTANCE = 3.5;
+const CREEPER_DEFUSE_DISTANCE = 8;
+const CREEPER_FUSE_MS = 1500;
+
+// Stand where the block-centre feet position is within [min, max] of the
+// entity. GoalFollow compares floored coordinates, which is too coarse to keep
+// outside a creeper's ignition distance.
+function distanceBandGoal(entity, min, max) {
+    const distance = node => Math.hypot(node.x + 0.5 - entity.position.x, node.y - entity.position.y, node.z + 0.5 - entity.position.z);
+    let cell = entity.position.floored();
+    return {
+        heuristic(node) {
+            const d = distance(node);
+            return d < min ? min - d : d > max ? d - max : 0;
+        },
+        isEnd(node) {
+            const d = distance(node);
+            return d >= min && d <= max;
+        },
+        hasChanged() {
+            const position = entity.position.floored();
+            if (position.equals(cell)) return false;
+            cell = position;
+            return true;
+        },
+        isValid() { return entity != null; },
+    };
+}
+
+function creeperSwellIndex(bot) {
+    const index = bot.registry.entitiesByName?.creeper?.metadataKeys?.indexOf('swell_dir') ?? -1;
+    if (index < 0) throw new Error('creeper swell_dir metadata is not defined for this Minecraft version');
+    return index;
+}
 
 function allRetreatGoals(goals) {
     const goal = new pf.goals.GoalCompositeAll(goals);
@@ -1145,6 +1185,20 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24, defend=fal
         let retargetAfter = 0;
         let retreating = false;
         let motionKey = null;
+        // Estimated fuse per creeper id: { ms, at }. The server only reports
+        // the swell direction, so the elapsed fuse is integrated here.
+        const creeperFuses = new Map();
+        let swellIndex = null;
+        const creeperFusing = (creeper, now) => {
+            swellIndex ??= creeperSwellIndex(bot);
+            const igniting = creeper.metadata?.[swellIndex] === 1;
+            const fuse = creeperFuses.get(creeper.id) ?? { ms: 0, at: now };
+            const elapsed = now - fuse.at;
+            fuse.ms = igniting ? Math.min(CREEPER_FUSE_MS, fuse.ms + elapsed) : Math.max(0, fuse.ms - elapsed);
+            fuse.at = now;
+            creeperFuses.set(creeper.id, fuse);
+            return igniting || fuse.ms > 0;
+        };
         const stopAttack = () => {
             if (attackRunning) {
                 bot.pvp.forceStop();
@@ -1199,6 +1253,20 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24, defend=fal
                         continue;
                     }
                     const target = targets[0];
+                    const now = Date.now();
+                    const fusing = targets.filter(candidate => candidate.name === 'creeper' && creeperFusing(candidate, now));
+                    if (fusing.length) {
+                        // Striking cannot stop a fuse, and PVP's shield block
+                        // stops the pathfinder; only distance cancels it.
+                        stopAttack();
+                        const key = `defuse:${fusing.map(creeper => creeper.id).sort((a, b) => a-b).join(',')}`;
+                        if (key !== motionKey) {
+                            bot.pathfinder.setGoal(allRetreatGoals(fusing.map(creeper => distanceBandGoal(creeper, CREEPER_DEFUSE_DISTANCE, Infinity))), true);
+                            motionKey = key;
+                        }
+                        await new Promise(resolve => setTimeout(resolve, COMBAT_CHECK_INTERVAL_MS));
+                        continue;
+                    }
                     const distance = bot.entity.position.distanceTo(target.position);
                     if (distance < 3.4) retreating = true;
                     else if (distance > 4.4) retreating = false;
@@ -1215,7 +1283,8 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24, defend=fal
                             if (bot.interrupt_code || died || targetLost) return false;
                         }
                     }
-                    const key = retreating ? `away:${targets.map(target => target.id).sort((a, b) => a-b).join(',')}` : `toward:${target.id}`;
+                    const key = target.name === 'creeper' ? `strike:${target.id}`
+                        : retreating ? `away:${targets.map(target => target.id).sort((a, b) => a-b).join(',')}` : `toward:${target.id}`;
                     if (key !== motionKey) {
                         const follow = (opponent, radius) => {
                             const goal = new pf.goals.GoalFollow(opponent, radius);
@@ -1229,7 +1298,9 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24, defend=fal
                             };
                             return goal;
                         };
-                        const goal = retreating
+                        const goal = target.name === 'creeper'
+                            ? distanceBandGoal(target, CREEPER_STRIKE_MIN_DISTANCE, CREEPER_STRIKE_MAX_DISTANCE)
+                            : retreating
                             ? allRetreatGoals(targets.map(opponent => new pf.goals.GoalInvert(follow(opponent, 3.9))))
                             : follow(target, 2.9);
                         bot.pathfinder.setGoal(goal, true);

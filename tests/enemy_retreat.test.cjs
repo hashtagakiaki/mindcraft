@@ -156,8 +156,10 @@ async function main() {
       'low health makes a visible ranged mob a retreat threat')
     assert.equal(await triggeredMode({ enemies: [enemy(21, 4.5), enemy(22, 15.5, 'creeper')] }), 'self_defense:nearby_threat',
       'a distant creeper does not stop self-defense against a nearby zombie')
-    assert.equal(await triggeredMode({ enemies: [enemy(22, 5.5, 'creeper')] }), 'cowardice:dangerous_encounter',
-      'a creeper within the retreat distance still triggers retreat')
+    assert.equal(await triggeredMode({ enemies: [enemy(22, 5.5, 'creeper')] }), 'self_defense:nearby_threat',
+      'a healthy bot fights a lone creeper within the retreat distance')
+    assert.equal(await triggeredMode({ enemies: [enemy(22, 5.5, 'creeper')], health: 8 }), 'cowardice:dangerous_encounter',
+      'a low-health bot still retreats from a creeper within the retreat distance')
     console.log('enemy retreat: real wall/scaffold and directional reachability, ranged sight, group escape, failure, progress, cancellation and imminent-threat retreat passed')
   } finally { await rm(root, { recursive: true, force: true }) }
 }
