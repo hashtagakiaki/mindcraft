@@ -28,6 +28,7 @@ function inject (bot) {
   let digging = false
   let digStarted = false
   let pathGeneration = 0
+  let routeEditGeneration = 0
   let placing = false
   let placingBlock = null
   let awaitingPillarLanding = false
@@ -40,6 +41,7 @@ function inject (bot) {
   const lockUseBlock = new Lock()
 
   bot.pathfinder = {}
+  bot.pathfinder.isWaterFilled = Movements.isWaterFilled
 
   bot.pathfinder.thinkTimeout = 5000 // ms
   bot.pathfinder.tickTimeout = 40 // ms, amount of thinking per tick (max 50 ms)
@@ -136,6 +138,7 @@ function inject (bot) {
 
   function resetPath (reason, clearStates = true) {
     pathGeneration++
+    if (reason === 'goal_moved') routeEditGeneration++
     if (!stopPathing && path.length > 0) bot.emit('path_reset', reason)
     path = []
     if (digging && !digStarted) digging = false
@@ -157,6 +160,7 @@ function inject (bot) {
   }
 
   bot.pathfinder.setGoal = (goal, dynamic = false) => {
+    routeEditGeneration++
     stateGoal = goal
     dynamicGoal = dynamic
     bot.emit('goal_updated', goal, dynamic)
@@ -164,6 +168,7 @@ function inject (bot) {
   }
 
   bot.pathfinder.setMovements = (movements) => {
+    routeEditGeneration++
     stateMovements = movements
     resetPath('movements_updated')
   }
@@ -177,6 +182,7 @@ function inject (bot) {
   }
 
   bot.pathfinder.stop = () => {
+    routeEditGeneration++
     stopPathing = true
   }
 
@@ -389,6 +395,7 @@ function inject (bot) {
   }
 
   function stop () {
+    routeEditGeneration++
     stopPathing = false
     stateGoal = null
     path = []
@@ -564,17 +571,31 @@ function inject (bot) {
         fullStop()
       }
 
+      const edit = placingBlock
+      const editGeneration = routeEditGeneration
+      const editGoal = stateGoal
+      const editMovements = stateMovements
+      const editIsCurrent = () => routeEditGeneration === editGeneration && stateGoal === editGoal &&
+        stateMovements === editMovements && !stopPathing
+      const unresolvedAt = bot.pathfinder.navigationUnconfirmedAt
+      const referencePosition = { x: edit.x, y: edit.y, z: edit.z }
+      const placementTarget = { x: edit.x + edit.dx, y: edit.y + edit.dy, z: edit.z + edit.dz }
+      if (typeof unresolvedAt === 'function' && (unresolvedAt(referencePosition) || unresolvedAt(placementTarget))) {
+        resetPath('unconfirmed_scaffold_target')
+        return
+      }
+
       // Open gates or doors
-      if (placingBlock?.useOne) {
+      if (edit?.useOne) {
         if (!lockUseBlock.tryAcquire()) return
-        bot.activateBlock(bot.blockAt(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z))).then(() => {
+        bot.activateBlock(bot.blockAt(new Vec3(edit.x, edit.y, edit.z))).then(() => {
           lockUseBlock.release()
-          placingBlock = nextPoint.toPlace.shift()
-          if (!placingBlock) {
-            placing = false
+          if (editIsCurrent()) {
+            placingBlock = nextPoint.toPlace.shift()
+            if (!placingBlock) placing = false
           }
         }, err => {
-          console.error(err)
+          if (editIsCurrent()) console.error(err)
           lockUseBlock.release()
         })
         return
@@ -584,53 +605,69 @@ function inject (bot) {
         resetPath('no_scaffolding_blocks')
         return
       }
-      if (bot.pathfinder.LOSWhenPlacingBlocks && placingBlock.y === bot.entity.position.floored().y - 1 && placingBlock.dy === 0) {
-        if (!moveToEdge(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z), new Vec3(placingBlock.dx, 0, placingBlock.dz))) return
+      if (bot.pathfinder.LOSWhenPlacingBlocks && edit.y === bot.entity.position.floored().y - 1 && edit.dy === 0) {
+        if (!moveToEdge(new Vec3(edit.x, edit.y, edit.z), new Vec3(edit.dx, 0, edit.dz))) return
       }
       let canPlace = true
-      if (placingBlock.jump) {
+      if (edit.jump) {
         bot.setControlState('jump', true)
-        canPlace = placingBlock.y + 1 < bot.entity.position.y
+        canPlace = edit.y + 1 < bot.entity.position.y
       }
       if (canPlace) {
         if (!lockEquipItem.tryAcquire()) return
         bot.equip(block, 'hand')
           .then(function () {
             lockEquipItem.release()
-            const refBlock = bot.blockAt(new Vec3(placingBlock.x, placingBlock.y, placingBlock.z), false)
+            if (!editIsCurrent()) return
+            const currentReference = { x: edit.x, y: edit.y, z: edit.z }
+            const currentTarget = { x: edit.x + edit.dx, y: edit.y + edit.dy, z: edit.z + edit.dz }
+            if (typeof unresolvedAt === 'function' && (unresolvedAt(currentReference) || unresolvedAt(currentTarget))) {
+              resetPath('unconfirmed_scaffold_target')
+              return
+            }
+            const refBlock = bot.blockAt(new Vec3(edit.x, edit.y, edit.z), false)
+            if (!refBlock || refBlock.type === 0) {
+              resetPath('place_reference_changed')
+              return
+            }
             if (!lockPlaceBlock.tryAcquire()) return
-            const placementTarget = refBlock.position.offset(placingBlock.dx, placingBlock.dy, placingBlock.dz)
-            const submergedPlacement = Movements.isWaterFilled(bot.blockAt(placementTarget, false))
-            // Keep actual water visible to the interaction resolver/wrapper;
-            // the optimistic local update would hide the real water cell.
-            if (!submergedPlacement) bot.world.setBlockStateId(placementTarget, 1)
+            // Do not write a predicted block into the local world. Until a
+            // server block update arrives, route planning treats this target
+            // as unresolved and routes around it.
             if (interactableBlocks.includes(refBlock.name)) {
               bot.setControlState('sneak', true)
             }
-            bot.placeBlock(refBlock, new Vec3(placingBlock.dx, placingBlock.dy, placingBlock.dz))
+            bot.placeBlock(refBlock, new Vec3(edit.dx, edit.dy, edit.dz))
               .then(function () {
+                if (!editIsCurrent()) return
                 // Dont release Sneak if the block placement was not successful
                 bot.setControlState('sneak', false)
                 bot.setControlState('jump', false)
-                if (placingBlock.jump && placingBlock.dx === 0 && placingBlock.dy === 1 && placingBlock.dz === 0 && !bot.entity.isInWater) {
+                if (edit.jump && edit.dx === 0 && edit.dy === 1 && edit.dz === 0 && !bot.entity.isInWater) {
                   awaitingPillarLanding = true
                 }
-                if (bot.pathfinder.LOSWhenPlacingBlocks && placingBlock.returnPos) returningPos = placingBlock.returnPos.clone()
+                if (bot.pathfinder.LOSWhenPlacingBlocks && edit.returnPos) returningPos = edit.returnPos.clone()
               })
               .catch(err => {
-                resetPath('place_error')
-                bot.emit('path_edit_error', err)
+                if (editIsCurrent()) {
+                  resetPath('place_error')
+                  bot.emit('path_edit_error', err)
+                }
               })
               .then(() => {
                 lockPlaceBlock.release()
-                placing = false
-                lastNodeTime = performance.now()
+                if (editIsCurrent()) {
+                  placing = false
+                  lastNodeTime = performance.now()
+                }
               })
           })
           .catch(err => {
             // Upstream kept the equip lock and placing=true forever here.
-            resetPath('equip_error')
-            bot.emit('path_edit_error', err)
+            if (editIsCurrent()) {
+              resetPath('equip_error')
+              bot.emit('path_edit_error', err)
+            }
           })
       }
       return

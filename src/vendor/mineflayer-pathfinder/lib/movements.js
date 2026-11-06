@@ -246,7 +246,29 @@ class Movements {
   }
 
   getBlock (pos, dx, dy, dz) {
-    const b = pos ? this.bot.blockAt(new Vec3(pos.x + dx, pos.y + dy, pos.z + dz), false) : null
+    const blockPosition = pos ? new Vec3(pos.x + dx, pos.y + dy, pos.z + dz) : null
+    if (blockPosition && this.bot.pathfinder?.navigationUnconfirmedAt?.(blockPosition)) {
+      // An unconfirmed placement has no trustworthy collision or support
+      // state. Treat it as unknown: it blocks movement, cannot support a step,
+      // and cannot be mined or replaced until a server block update arrives.
+      return {
+        type: this.bot.registry.blocksByName.bedrock.id,
+        name: 'bedrock',
+        position: blockPosition,
+        boundingBox: 'block',
+        shapes: [[0, 0, 0, 1, 1]],
+        safe: false,
+        physical: false,
+        replaceable: false,
+        liquid: false,
+        canFall: false,
+        climbable: false,
+        height: blockPosition.y,
+        openable: false,
+        diggable: false
+      }
+    }
+    const b = blockPosition ? this.bot.blockAt(blockPosition, false) : null
     if (!b) {
       return {
         replaceable: false,
@@ -778,12 +800,19 @@ class Movements {
 
   getNeighbors (node) {
     const neighbors = this.getMoveNeighbors(node)
-    if (this.allowSubmerged) return neighbors
-    // From an already submerged node only rising moves stay, so a route can
-    // leave water it starts in without travelling further under it.
-    const headSubmerged = position => isWaterFilled(this.getBlock(position, 0, 1, 0))
-    const fromSubmerged = headSubmerged(node)
-    return neighbors.filter(next => !headSubmerged(next) || (fromSubmerged && next.y > node.y))
+    let filtered = neighbors
+    if (!this.allowSubmerged) {
+      // From an already submerged node only rising moves stay, so a route can
+      // leave water it starts in without travelling further under it.
+      const headSubmerged = position => isWaterFilled(this.getBlock(position, 0, 1, 0))
+      const fromSubmerged = headSubmerged(node)
+      filtered = neighbors.filter(next => !headSubmerged(next) || (fromSubmerged && next.y > node.y))
+    }
+    const unresolvedAt = this.bot.pathfinder?.navigationUnconfirmedAt
+    if (typeof unresolvedAt !== 'function') return filtered
+    return filtered.filter(next => !(next.toPlace || []).some(edit =>
+      unresolvedAt({ x: edit.x, y: edit.y, z: edit.z }) ||
+      unresolvedAt({ x: edit.x + edit.dx, y: edit.y + edit.dy, z: edit.z + edit.dz })))
   }
 
   getMoveNeighbors (node) {

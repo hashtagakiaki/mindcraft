@@ -9,7 +9,7 @@ import craftingSync from "./crafting_sync.js";
 import { placeBlockOriented } from './block_placement.js';
 import { resolveBlockInteraction, makeBlockInteractionGoal, interactionFaceVector, interactionEye } from './block_interaction.js';
 import { trackSkill, reportSkillOutcome, skillFailure, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, operationCallContext, withSkillPhase, registerOwnedPromise, withNativeNavigationEditScope, nativeNavigationEditScopeActive } from './operation_context.js';
-import { awaitNavigationPlacementSettled, beginNavigationEdit, navigationPolicy, navigationScaffoldsPlaced, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, placeAndConfirmNavigationScaffold, recordNavigationArrival, registerNavigationCleanup, registerNavigationScaffoldSettledCallback, trackNavigationSegment, withEmergencyNavigation } from './navigation_policy.js';
+import { awaitNavigationPlacementSettled, isNavigationScaffoldUnconfirmed, navigationEditSnapshot, navigationPolicy, navigationScaffoldPlacementPending, navigationScaffoldsPlaced, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, recordNavigationArrival, registerNavigationScaffoldSettledCallback, runWithNavigationPolicy, trackNavigationSegment, withEmergencyNavigation } from './navigation_policy.js';
 
 const require = createRequire(import.meta.url);
 
@@ -176,8 +176,6 @@ const REACH_POSITION_SEARCH_STEPS = 12;
 const REACH_POSITION_CHUNK_WAIT_MS = 5_000;
 const REACH_POSITION_NO_PROGRESS_LIMIT = 3;
 const REACH_POSITION_MAX_SAFE_FEET_DROP = 3;
-const reachPositionMovementOwners = new WeakMap();
-const navigationRecoveryActive = new WeakSet();
 const AQUATIC_MOBS = new Set(['drowned', 'cod', 'salmon', 'tropical_fish', 'squid']);
 // Water at the eyes with the air supply falling for this long ends a route
 // (one oxygen level is 15 ticks); a surface bob dips the eyes only briefly.
@@ -206,52 +204,6 @@ const CROPS = {
     beetroots: { mature: 3, seed: 'beetroot_seeds', produce: ['beetroot'] },
 };
 
-function isOwnedScaffoldUnderBot(bot, position) {
-    const feet = bot.entity?.position;
-    return !!feet && Math.floor(feet.x) === position.x && Math.floor(feet.z) === position.z && position.y < feet.y;
-}
-
-function upsertOwnedScaffold(records, record) {
-    const index = records.findIndex(entry => entry.position.x === record.position.x
-        && entry.position.y === record.position.y && entry.position.z === record.position.z);
-    if (index >= 0) records.splice(index, 1);
-    records.push(record);
-}
-
-registerNavigationCleanup(async (bot, context) => {
-    const remaining = [];
-    for (const scaffold of [...context.scaffolds].reverse()) {
-        if (isActionCancelled(bot, getActionContext(bot))) {
-            remaining.push({ ...scaffold.position, block: scaffold.block, reason: 'Action cancelled before owned scaffold cleanup.' });
-            continue;
-        }
-        const position = new Vec3(scaffold.position.x, scaffold.position.y, scaffold.position.z);
-        const block = bot.blockAt(position);
-        if (block?.type === 0) continue;
-        if (!block || block.name !== scaffold.block || scaffold.stateId != null && block.stateId !== scaffold.stateId) {
-            remaining.push({ ...scaffold.position, block: scaffold.block, reason: 'Owned scaffold state changed or became unknown.' });
-            continue;
-        }
-        if (isOwnedScaffoldUnderBot(bot, position)) {
-            remaining.push({ ...scaffold.position, block: scaffold.block, reason: 'Scaffold supports the bot at its current position.' });
-            continue;
-        }
-        const interaction = resolveBlockInteraction(bot, block, { reach: 4.5 });
-        if (interaction.status !== 'ready') {
-            remaining.push({ ...scaffold.position, block: scaffold.block, reason: `Scaffold is not safely reachable: ${interaction.reason}.` });
-            continue;
-        }
-        try {
-            await registerOwnedPromise(bot.dig(block));
-            if (bot.blockAt(position)?.type !== 0) throw new Error('Server did not confirm scaffold removal.');
-            context.edits.push({ kind: 'scaffold_removed', block: scaffold.block, position: scaffold.position });
-        } catch (error) {
-            if (bot.blockAt(position)?.type !== 0) remaining.push({ ...scaffold.position, block: scaffold.block, reason: String(error.message ?? error) });
-        }
-    }
-    return remaining;
-});
-
 export function log(bot, message) {
     const owner = operationContext();
     if (owner?.closed) { owner.diagnostics.push({ kind: 'late_output', message: String(message) }); return; }
@@ -272,24 +224,34 @@ function isActionCancelled(bot, context) {
     return !!bot.interrupt_code || !!context?.signal?.aborted;
 }
 
-function navigationMovements(bot, movementOverride = null) {
+function routeMovements(bot, movementOverride = null, positionPolicy = null) {
     const supplied = movementOverride && typeof movementOverride === 'object' ? movementOverride : null;
-    if (nativeNavigationEditScopeActive() || navigationRecoveryActive.has(bot)) return supplied ?? new pf.Movements(bot);
-    const explicitPolicy = navigationPolicy();
-    if (explicitPolicy || operationContext()?.nativeNavigationNoEdits && !nativeNavigationEditScopeActive()) {
-        const policy = explicitPolicy ?? { allowDig: false, scaffold: 'forbid', scaffoldBlocks: [] };
-        const scaffoldBlocks = policy.scaffold === 'forbid' ? [] : policy.scaffoldBlocks.flatMap(name => {
-            const available = (bot.inventory?.items?.() ?? []).some(item => item.name === name && item.count > 0);
-            const id = bot.registry?.itemsByName?.[name]?.id;
-            return available && Number.isInteger(id) ? [id] : [];
-        });
-        return Object.assign(new pf.Movements(bot), supplied ?? {}, {
-            canDig: policy.allowDig === true, canPlaceOn: scaffoldBlocks.length > 0,
-            allow1by1towers: scaffoldBlocks.length > 0 && policy.allowTowers !== false,
-            allowFreeMotion: false, scafoldingBlocks: scaffoldBlocks, canOpenDoors: false,
-        });
+    const movements = supplied ?? new pf.Movements(bot);
+    const editPolicy = navigationPolicy();
+    if (!nativeNavigationEditScopeActive() && (editPolicy || operationContext()?.nativeNavigationNoEdits)) {
+        const policy = editPolicy ?? { allowDig: false, scaffold: 'forbid', scaffoldBlocks: [] };
+        const scaffolds = policy.scaffold === 'forbid' || supplied?.canPlaceOn === false ? [] :
+            availableScaffolds(bot, policy.scaffoldBlocks).filter(name =>
+                !supplied?.scafoldingBlocks || supplied.scafoldingBlocks.includes(bot.registry.itemsByName[name].id));
+        Object.assign(movements, { canDig: policy.allowDig === true && supplied?.canDig !== false, canPlaceOn: scaffolds.length > 0,
+            allow1by1towers: scaffolds.length > 0 && policy.allowTowers !== false && supplied?.allow1by1towers !== false,
+            allowFreeMotion: false, scafoldingBlocks: scaffolds.map(name => bot.registry.itemsByName[name].id),
+            canOpenDoors: false });
     }
-    return supplied ?? new pf.Movements(bot);
+    const lavaId = bot.registry?.blocksByName?.lava?.id;
+    if (lavaId != null) {
+        movements.blocksToAvoid.add(lavaId);
+        movements.updateLavaAvoidance = () => {};
+    }
+    for (const block of ['glass', 'glass_pane']) movements.blocksCantBreak.add(mc.getBlockId(block));
+    if (positionPolicy) configurePositionRoute(bot, movements, positionPolicy);
+    return movements;
+}
+
+function availableScaffolds(bot, names) {
+    const inventory = bot.inventory?.items?.() ?? [];
+    return names.filter(name => Number.isInteger(bot.registry?.itemsByName?.[name]?.id)
+        && inventory.some(item => item.name === name && item.count > 0));
 }
 
 function countWindowItems(slots, start, end, itemName) {
@@ -1144,7 +1106,7 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24, defend=fal
     bot.modes.pause('self_defense');
     bot.modes.pause('cowardice');
     if (bot.pathfinder) {
-        const movements = navigationMovements(bot);
+        const movements = routeMovements(bot);
         // Routes never dive; fighting a water mob is the one intended dive.
         if (AQUATIC_MOBS.has(entity.name)) movements.allowSubmerged = true;
         bot.pathfinder.setMovements(movements);
@@ -1153,8 +1115,8 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24, defend=fal
     }
     const scaffoldsBeforeCombat = navigationScaffoldsPlaced(bot);
     let combatWeaponRestoredAt = scaffoldsBeforeCombat;
-    const restoreCombatWeapon = async () => {
-        await awaitNavigationPlacementSettled(bot);
+    const restoreCombatWeapon = async (waitForPlacement = true) => {
+        if (waitForPlacement) await awaitNavigationPlacementSettled(bot);
         const placed = navigationScaffoldsPlaced(bot);
         if (placed > combatWeaponRestoredAt) {
             await equipHighestAttack(bot);
@@ -1229,20 +1191,22 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24, defend=fal
         bot.on('death', onDeath);
         bot.on('end', onEnd);
         bot.on('attackedTarget', onAttacked);
-        const hazardWatch = watchDynamicNavigation(bot, bot.pvp.movements,
-            () => { if (attackRunning) bot.pvp.forceStop(); },
-            async () => {
+        const combatOwner = operationContext() ?? getActionContext(bot);
+        const continuous = {
+            suspend: () => { if (attackRunning) bot.pvp.forceStop(); },
+            restore: async () => {
                 if (attackRunning && currentTarget && !died && !targetLost) {
                     await equipHighestAttack(bot);
-                    if (!bot.interrupt_code && !died && !targetLost) await bot.pvp.attack(currentTarget);
+                    if (!isActionCancelled(bot, combatOwner) && !died && !targetLost) await bot.pvp.attack(currentTarget);
                 }
-            });
-        const unregisterScaffoldRestore = registerNavigationScaffoldSettledCallback(bot, () => restoreCombatWeapon());
+            },
+        };
+        const unregisterScaffoldRestore = registerNavigationScaffoldSettledCallback(bot, () => restoreCombatWeapon(false));
         try {
-            const completed = await trackNavigationSegment(bot, async () => {
-                while (!bot.interrupt_code && !died && !targetLost) {
+            continuous.run = async hazardWatch => {
+                while (!isActionCancelled(bot, combatOwner) && !died && !targetLost) {
                     await hazardWatch.resume();
-                    if (bot.interrupt_code || died || targetLost) return false;
+                    if (isActionCancelled(bot, combatOwner) || died || targetLost) return false;
                     // Admission radius selects new threats; an engaged enemy
                     // can leave that radius during knockback or a retreat.
                     const nearby = world.getNearbyEntities(bot, Math.max(range, 24));
@@ -1272,7 +1236,7 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24, defend=fal
                         stopAttack();
                         const key = `defuse:${fusing.map(creeper => creeper.id).sort((a, b) => a-b).join(',')}`;
                         if (key !== motionKey) {
-                            bot.pathfinder.setGoal(allRetreatGoals(fusing.map(creeper => distanceBandGoal(creeper, CREEPER_DEFUSE_DISTANCE, Infinity))), true);
+                            hazardWatch.setGoal(allRetreatGoals(fusing.map(creeper => distanceBandGoal(creeper, CREEPER_DEFUSE_DISTANCE, Infinity))));
                             motionKey = key;
                         }
                         await new Promise(resolve => setTimeout(resolve, COMBAT_CHECK_INTERVAL_MS));
@@ -1285,13 +1249,13 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24, defend=fal
                         stopAttack();
                         if (Date.now() >= retargetAfter) {
                             await restoreCombatWeapon();
-                            if (bot.interrupt_code || died || targetLost) return false;
+                            if (isActionCancelled(bot, combatOwner) || died || targetLost) return false;
                             if (defeated.has(target.id)) continue;
                             attackRunning = true;
                             await bot.pvp.attack(target);
                             currentTarget = target;
                             motionKey = null; // attack() installs PVP's own follow goal
-                            if (bot.interrupt_code || died || targetLost) return false;
+                            if (isActionCancelled(bot, combatOwner) || died || targetLost) return false;
                         }
                     }
                     const key = target.name === 'creeper' ? `strike:${target.id}`
@@ -1314,13 +1278,14 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24, defend=fal
                             : retreating
                             ? allRetreatGoals(targets.map(opponent => new pf.goals.GoalInvert(follow(opponent, 3.9))))
                             : follow(target, 2.9);
-                        bot.pathfinder.setGoal(goal, true);
+                        hazardWatch.setGoal(goal);
                         motionKey = key;
                     }
                     await new Promise(resolve => setTimeout(resolve, COMBAT_CHECK_INTERVAL_MS));
                 }
                 return false;
-            });
+            };
+            const completed = await navigate(bot, null, { movementOverride: bot.pvp.movements, continuous });
             if (!completed) return false;
             log(bot, defend ? `Successfully defended self against ${observed.size} enemies.` : `Successfully killed ${entity.name}.`);
             if (collectDrops) await pickupNearbyItems(bot);
@@ -1328,10 +1293,8 @@ async function fightEntity(bot, entity, kill, collectDrops, range=24, defend=fal
         } catch (err) {
             return failSkill(bot, err.navigation?.code ?? 'action_error', `Combat failed: ${err.message}.`, { navigation: err.navigation });
         } finally {
-            hazardWatch.close();
             unregisterScaffoldRestore();
             stopAttack();
-            bot.pathfinder.setGoal(null);
             bot.removeListener('entityDead', onEntityDead);
             bot.removeListener('entityGone', onEntityGone);
             bot.removeListener('death', onDeath);
@@ -1422,7 +1385,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
         return legacyResult;
     };
 
-    const movements = navigationMovements(bot);
+    const movements = routeMovements(bot);
     movements.dontMineUnderFallingBlock = false;
     // A released liquid is recoverable; excluding the target would report it as not found.
     movements.dontCreateFlow = false;
@@ -1874,7 +1837,7 @@ export async function placeBlock(bot, blockType, x, y, z, placeOn='bottom', dont
         // too far
         let pos = targetBlock.position;
         let movements = new pf.Movements(bot);
-        bot.pathfinder.setMovements(navigationMovements(bot, movements));
+        bot.pathfinder.setMovements(routeMovements(bot, movements));
         await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
     }
 
@@ -2680,10 +2643,9 @@ export async function receiveFromPlayer(bot, itemType, username, num=1, timeoutM
         }
         const drop = bot.nearestEntity(isWanted);
         if (drop && bot.entity.position.distanceTo(drop.position) > 1.5) {
-            const movements = navigationMovements(bot);
+            const movements = routeMovements(bot);
             movements.canDig = false;
-            bot.pathfinder.setMovements(movements);
-            await goToGoal(bot, new pf.goals.GoalFollow(drop, 0.5));
+            await goToGoal(bot, new pf.goals.GoalFollow(drop, 0.5), movements);
         }
         await new Promise(resolve => setTimeout(resolve, 200));
     }
@@ -2722,6 +2684,7 @@ function navigationGoalPosition(bot) {
 }
 
 const navigationHazardMonitors = new WeakMap();
+const navigationOwners = new WeakSet();
 
 function watchNavigationHazard(bot, onHazard, { requireGoal = false } = {}) {
     let monitor = navigationHazardMonitors.get(bot);
@@ -2730,7 +2693,7 @@ function watchNavigationHazard(bot, onHazard, { requireGoal = false } = {}) {
         navigationHazardMonitors.set(bot, monitor);
         monitor.tick = () => {
             const watch = monitor.watch;
-            if (!watch || navigationRecoveryActive.has(bot) || isActionCancelled(bot, watch.owner)
+            if (!watch || bot.pathfinder.goal?.observedEscape || isActionCancelled(bot, watch.owner)
                 || (watch.requireGoal && !bot.pathfinder.goal)) return;
             const kind = observedHazard(bot);
             if (!kind || kind === 'water' && bot.pathfinder.movements?.allowSubmerged) {
@@ -2763,7 +2726,7 @@ function watchNavigationHazard(bot, onHazard, { requireGoal = false } = {}) {
     }
     const previous = monitor.watch;
     const watch = { onHazard, requireGoal, owner: operationContext() ?? getActionContext(bot), oxygen: null };
-    if (!previous) bot.on?.('physicsTick', monitor.tick);
+    if (!previous) bot.prependListener?.('physicsTick', monitor.tick);
     monitor.watch = watch;
     return () => {
         if (monitor.watch !== watch) return;
@@ -2773,36 +2736,74 @@ function watchNavigationHazard(bot, onHazard, { requireGoal = false } = {}) {
 }
 
 export function ownsNavigationHazardRecovery(bot) {
-    return navigationRecoveryActive.has(bot) ||
-        reachPositionMovementOwners.has(bot.pathfinder) || !!navigationHazardMonitors.get(bot)?.watch;
+    return navigationOwners.has(bot) || !!bot.pathfinder.goal?.observedEscape;
 }
 
 function watchDynamicNavigation(bot, movements, suspend = () => {}, restore = () => {}) {
     const owner = operationContext() ?? getActionContext(bot);
+    let ownedGoal;
     let interrupted;
+    let editError;
+    const unconfirmed = new Map();
+    const stop = () => {
+        if (bot.pathfinder.goal === ownedGoal) bot.pathfinder.setGoal(null);
+    };
+    const setGoal = goal => {
+        if (isActionCancelled(bot, owner)) return;
+        ownedGoal = goal;
+        bot.pathfinder.setMovements(movements);
+        bot.pathfinder.setGoal(goal, true);
+    };
     const unwatch = watchNavigationHazard(bot, hazard => {
-        interrupted = { goal: bot.pathfinder.goal, hazard };
-        bot.pathfinder.setGoal(null);
+        if (bot.pathfinder.goal !== ownedGoal) return;
+        interrupted = hazard;
+        stop();
         suspend();
     }, { requireGoal: true });
+    const onEditError = error => {
+        if (bot.pathfinder.goal !== ownedGoal) return;
+        editError = error;
+        stop();
+    };
+    const onPath = result => {
+        if (bot.pathfinder.goal !== ownedGoal || !hasUnconfirmedNavigationCell(bot, unconfirmed) || result.status !== 'noPath') return;
+        editError = navigationFailure('no_progress', 'The route cannot proceed around an unconfirmed scaffold.');
+        stop();
+    };
+    bot.on?.('path_edit_error', onEditError);
+    bot.on?.('path_update', onPath);
+    owner?.signal?.addEventListener('abort', stop, { once: true });
     return {
+        setGoal,
         async resume() {
-            if (!interrupted && bot.pathfinder.goal && !movements.allowSubmerged) {
-                await observeSubmersion(bot, () => interrupted || !bot.pathfinder.goal || isActionCancelled(bot, owner));
+            if (editError) {
+                const error = editError;
+                editError = null;
+                if (!isNavigationScaffoldUnconfirmed(error)) throw error;
+                const key = reachPositionBlockKey(error.position);
+                if (unconfirmed.has(key)) throw navigationFailure('no_progress', `Scaffold at ${key} remains unconfirmed.`);
+                unconfirmed.set(key, error.position);
+                setGoal(ownedGoal);
+                return true;
+            }
+            if (!interrupted && bot.pathfinder.goal === ownedGoal && ownedGoal && !movements.allowSubmerged) {
+                await observeSubmersion(bot, () => interrupted || bot.pathfinder.goal !== ownedGoal || isActionCancelled(bot, owner));
             }
             if (!interrupted) return false;
-            const { goal, hazard } = interrupted;
-            await recoverInterruptedNavigation(bot, goal, movements, hazard);
+            await recoverInterruptedNavigation(bot, ownedGoal, movements, interrupted);
             if (isActionCancelled(bot, owner)) return false;
             await restore();
-            if (!isActionCancelled(bot, owner)) {
-                bot.pathfinder.setMovements(movements);
-                if (goal.isValid?.() !== false) bot.pathfinder.setGoal(goal, true);
-            }
+            if (ownedGoal.isValid?.() !== false) setGoal(ownedGoal);
             interrupted = null;
             return true;
         },
-        close: unwatch,
+        close() {
+            stop();
+            unwatch();
+            bot.removeListener?.('path_edit_error', onEditError);
+            bot.removeListener?.('path_update', onPath);
+            owner?.signal?.removeEventListener('abort', stop);
+        },
     };
 }
 
@@ -2829,39 +2830,143 @@ async function recoverInterruptedNavigation(bot, goal, movements, hazard) {
 }
 
 export async function goToGoal(bot, goal, movementOverride = null) {
-    // Older callers passed a boolean in this previously unused position.
-    if (typeof movementOverride !== 'object') movementOverride = null;
-    await awaitNavigationLanding(bot);
-    const reachOwned = reachPositionMovementOwners.has(bot.pathfinder);
-    if (!reachOwned) await escapeHazard(bot, movementOverride, goal);
-    for (;;) {
-        try {
-            return await goToGoalSegment(bot, goal, movementOverride);
-        } catch (error) {
-            if (error.name !== 'NavigationHazardError' || reachOwned) throw error;
-            await recoverInterruptedNavigation(bot, goal, movementOverride, error);
+    return navigate(bot, goal, { movementOverride });
+}
+
+function navigationFailure(code, reason, detail = {}) {
+    return Object.assign(new Error(reason), { navigation: { phase: 'movement', ...detail, code } });
+}
+
+function hasUnconfirmedNavigationCell(bot, attempts) {
+    return [...attempts.values()].some(position => bot.pathfinder.navigationUnconfirmedAt?.(position));
+}
+
+async function navigate(bot, goal, { movementOverride = null, positionRoute = null, continuous = null } = {}) {
+    if (navigationOwners.has(bot)) throw navigationFailure('runtime_error', 'Another navigation already owns this pathfinder.');
+    navigationOwners.add(bot);
+    try {
+        const run = async () => {
+            if (!continuous) return runStaticNavigation(bot, goal, movementOverride, positionRoute);
+            return trackNavigationSegment(bot, async () => {
+                const watch = watchDynamicNavigation(bot, movementOverride, continuous.suspend, continuous.restore);
+                try { return await continuous.run(watch); }
+                finally { watch.close(); }
+            });
+        };
+        if (navigationPolicy()) return await run();
+        const movements = continuous ? movementOverride : routeMovements(bot, movementOverride, positionRoute?.policy);
+        const scaffoldBlocks = (movements.scafoldingBlocks ?? []).map(id => bot.registry?.items?.[id]?.name).filter(Boolean);
+        return await runWithNavigationPolicy(bot, { allowDig: movements.canDig === true,
+            scaffold: scaffoldBlocks.length ? 'leave' : 'forbid', scaffoldBlocks }, run);
+    } finally {
+        navigationOwners.delete(bot);
+    }
+}
+
+async function runStaticNavigation(bot, goal, movementOverride, positionRoute) {
+    const owner = operationContext() ?? getActionContext(bot);
+    const deadline = Date.now() + REACH_POSITION_MAX_DURATION_MS;
+    const active = () => {
+        if (isActionCancelled(bot, owner)) {
+            throw Object.assign(new Error('Navigation cancelled.'), { name: 'ReachCancelledError' });
+        }
+        if (Date.now() >= deadline) throw navigationFailure('search_limit', 'Navigation exceeded its 180-second budget.');
+    };
+    const previousMovements = bot.pathfinder.movements;
+    const explicit = movementOverride && typeof movementOverride === 'object';
+    let movements = routeMovements(bot, movementOverride, positionRoute?.policy);
+    const ownedMovements = new Set([movements]);
+    const attempts = new Map();
+    const unconfirmed = new Map();
+    const recover = async hazard => {
+        const kind = observedHazard(bot);
+        const before = kind && hazardEvidence(bot, kind);
+        if (hazard) await recoverInterruptedNavigation(bot, goal, movements, hazard);
+        else await escapeHazard(bot, movements, goal);
+        active();
+        if (positionRoute && kind === 'water') {
+            if (isWaterFilled(bot.blockAt(positionRoute.target.floored()))) {
+                throw navigationFailure('unsafe_state', 'Hazard egress reached air; the requested feet block is still under water.',
+                    { hazard: before, currentHazard: hazardEvidence(bot, kind) });
+            }
+            movements = routeMovements(bot, movementOverride, { ...positionRoute.policy, safeWater: true, surfaceSwimming: true });
+            ownedMovements.add(movements);
+        }
+    };
+    try {
+        await awaitNavigationLanding(bot);
+        active();
+        await recover();
+        for (let segment = 0; ; segment++) {
+            active();
+            let checkpoint = goal;
+            if (positionRoute) {
+                if (positionRoute.arrived()) return true;
+                if (segment >= REACH_POSITION_MAX_SEGMENTS) throw navigationFailure('search_limit', 'Navigation exceeded its route-segment budget.');
+                bot.pathfinder.setMovements(movements);
+                const path = reachPositionPath(bot, movements, goal);
+                const end = path.path?.at(-1);
+                const start = bot.entity.position.floored();
+                const search = { phase: 'search', segment, status: path.status, start,
+                    endpoint: end && { x: end.x, y: end.y, z: end.z }, pathNodeCount: path.path?.length ?? 0 };
+                positionRoute.onSearch(search);
+                log(bot, `[reachPosition-route] ${JSON.stringify({ ...search, searchStatus: path.status })}`);
+                if (path.status !== 'success') {
+                    if (!end || start.distanceTo(end) < 0.5) {
+                        if (reachPositionHasUnknownNeighbor(bot, bot.entity.position)) {
+                            const loaded = await waitForReachPositionChunk(bot, owner, REACH_POSITION_CHUNK_WAIT_MS);
+                            active();
+                            if (loaded) continue;
+                        }
+                        const targetBlocker = reachPositionTargetBlocker(bot, positionRoute.target, movements.canDig);
+                        const code = hasUnconfirmedNavigationCell(bot, unconfirmed) ? 'no_progress' : targetBlocker?.code ??
+                            (['partial', 'timeout'].includes(path.status) ? 'search_limit' : 'route_not_found');
+                        throw navigationFailure(code, `Path search ended ${path.status} without a safe next segment.`,
+                            { ...search, phase: targetBlocker ? 'target' : 'search', targetBlocker });
+                    }
+                    const node = typeof end.hash === 'string' ? end.hash.split(',').map(Number) : [];
+                    if (node.length !== 3 || !node.every(Number.isSafeInteger)) {
+                        throw navigationFailure('runtime_error', 'Pathfinder checkpoint is missing its original A* coordinates.', search);
+                    }
+                    const key = `${start.x},${start.y},${start.z}>${end.hash}`;
+                    const count = (attempts.get(key) ?? 0) + 1;
+                    attempts.set(key, count);
+                    if (count >= REACH_POSITION_NO_PROGRESS_LIMIT) throw navigationFailure('no_progress', 'The same route segment made no progress.', search);
+                    checkpoint = new pf.goals.GoalBlock(...node);
+                }
+            }
+            try {
+                await runNavigationSegment(bot, checkpoint, movements, { explicit, active });
+            } catch (error) {
+                active();
+                if (error.name === 'NavigationHazardError') {
+                    await recover(error);
+                    continue;
+                }
+                if (isNavigationScaffoldUnconfirmed(error)) {
+                    const key = reachPositionBlockKey(error.position);
+                    if (unconfirmed.has(key)) throw navigationFailure('no_progress', `Scaffold at ${key} remains unconfirmed.`);
+                    unconfirmed.set(key, error.position);
+                    continue;
+                }
+                if (hasUnconfirmedNavigationCell(bot, unconfirmed) && error.navigation?.code === 'route_not_found') {
+                    throw navigationFailure('no_progress', 'The route cannot proceed around an unconfirmed scaffold.', error.navigation);
+                }
+                throw error;
+            }
+            active();
+            if (checkpoint === goal) return true;
+        }
+    } finally {
+        if (positionRoute && ownedMovements.has(bot.pathfinder.movements) && previousMovements) {
+            bot.pathfinder.setMovements(previousMovements);
         }
     }
 }
 
-async function goToGoalSegment(bot, goal, movementOverride) {
-    const callerRestrictedMovement = !!movementOverride;
+async function runNavigationSegment(bot, goal, final_movements, { explicit = true, active = null } = {}) {
+    const callerRestrictedMovement = !!explicit;
     const nativeNoEditNavigation = operationContext()?.nativeNavigationNoEdits === true && !nativeNavigationEditScopeActive();
-
-    // Native navigation (including implicit approaches in other skills) uses
-    // the same no-edit movement unless an owned explicit route edit is active.
-    movementOverride = navigationMovements(bot, movementOverride);
-    if (!navigationRecoveryActive.has(bot)) {
-        for (const block of ['glass', 'glass_pane']) {
-            movementOverride.blocksCantBreak.add(mc.getBlockId(block));
-        }
-    }
-    // Edit penalties apply only while preferring and following a non-destructive
-    // route. Left on the shared movements they push every bare-hand stone break
-    // over pathfinder's per-move cost cap (100), so routes that must dig end noPath.
-    const baseEditCosts = { placeCost: movementOverride.placeCost, digCost: movementOverride.digCost };
-    const restoreEditCosts = () => Object.assign(movementOverride, baseEditCosts);
-    const final_movements = movementOverride;
     const navigationRouteId = `nav:${randomUUID()}`;
     const navigationStartedAt = new Date().toISOString();
     recordNavigationDiagnostic(bot, 'navigation_route_started', { routeId: navigationRouteId,
@@ -2869,20 +2974,6 @@ async function goToGoalSegment(bot, goal, movementOverride) {
             callerRestricted: callerRestrictedMovement, nativeNoEdit: nativeNoEditNavigation,
             digCost: final_movements.digCost ?? null, placeCost: final_movements.placeCost ?? null,
         }, startedAt: navigationStartedAt });
-
-    if (!navigationRecoveryActive.has(bot)) {
-        Object.assign(final_movements, { placeCost: 2, digCost: 10 });
-        const pathfind_timeout = 1000;
-        const nonDestructiveFound = await bot.pathfinder.getPathTo(final_movements, goal, pathfind_timeout).status === 'success';
-        if (!nonDestructiveFound) restoreEditCosts();
-        if (nonDestructiveFound) {
-            log(bot, `Found non-destructive path.`);
-        } else if (await bot.pathfinder.getPathTo(final_movements, goal, pathfind_timeout).status === 'success') {
-            log(bot, callerRestrictedMovement || nativeNoEditNavigation ? 'Found a path with the requested movement restrictions.' : 'Found destructive path.');
-        } else {
-            log(bot, callerRestrictedMovement || nativeNoEditNavigation ? 'Path search is incomplete; attempting navigation with the requested movement restrictions.' : 'Path not found, but attempting navigation anyway using destructive movements.');
-        }
-    }
 
     const doorCheckInterval = callerRestrictedMovement || nativeNoEditNavigation ? null : startDoorInterval(bot);
 
@@ -3040,8 +3131,7 @@ async function goToGoalSegment(bot, goal, movementOverride) {
         // segment would reapply the normal policy and enqueue placement twice.
         // goto rejects with the original route edit error (pathfinder fork).
         const navigate = () => bot.pathfinder.goto(goal);
-        const startNavigation = () => reachPositionMovementOwners.has(bot.pathfinder) && navigationRecoveryActive.has(bot)
-            ? navigate() : trackNavigationSegment(bot, navigate);
+        const startNavigation = () => trackNavigationSegment(bot, navigate);
         // Pathfinder's think timeout is wall-clock and keeps running while the bot
         // digs, so slow breaks (bare-hand stone takes ~7.5s) end goto with Timeout
         // mid-route. After a completed dig or goal/segment progress, continue
@@ -3054,7 +3144,7 @@ async function goToGoalSegment(bot, goal, movementOverride) {
         };
         bot.on?.('diggingCompleted', onDigCompleted);
         removeDigListener = () => bot.removeListener?.('diggingCompleted', onDigCompleted);
-        if (!navigationRecoveryActive.has(bot)) stopWatchingHazard = watchNavigationHazard(bot, error => {
+        if (!goal.observedEscape) stopWatchingHazard = watchNavigationHazard(bot, error => {
             hazardStop = error;
             hazardStop.navigation.lastPathUpdate = lastPathUpdate;
             navigationError = true;
@@ -3064,6 +3154,12 @@ async function goToGoalSegment(bot, goal, movementOverride) {
         owner?.signal.addEventListener('abort', stopOwnedNavigation, { once: true });
         if (owner?.signal.aborted) stopOwnedNavigation();
         timeoutHandle = setInterval(() => {
+            try { active?.(); }
+            catch (error) {
+                stallError = error;
+                stopOwnedNavigation();
+                return;
+            }
             if (owner?.signal.aborted || owner?.closed) {
                 clearInterval(timeoutHandle);
                 timeoutHandle = null;
@@ -3077,7 +3173,7 @@ async function goToGoalSegment(bot, goal, movementOverride) {
             // A dig owns its own finite ground/look/break deadlines; restart the
             // stall clock when it ends instead of cutting a slow, normal break.
             const miningDeadline = bot.miningSync?.activeDeadline();
-            if (miningDeadline != null && Date.now() <= miningDeadline) lastProgressAt = Date.now();
+            if (navigationScaffoldPlacementPending(bot) || miningDeadline != null && Date.now() <= miningDeadline) lastProgressAt = Date.now();
             if (digProgressPending) {
                 digProgressPending = false;
                 lastProgressAt = Date.now();
@@ -3112,7 +3208,7 @@ async function goToGoalSegment(bot, goal, movementOverride) {
                     break;
                 } catch (err) {
                     if (escapeReached) break;
-                    if (err.name === 'NoPath' && !navigationRecoveryActive.has(bot) && !final_movements.allowSubmerged) {
+                    if (err.name === 'NoPath' && !goal.observedEscape && !final_movements.allowSubmerged) {
                         await observeSubmersion(bot, () => hazardStop || stallError || isActionCancelled(bot, owner));
                     }
                     const progressed = digCompletedSinceStart || lastProgressAt > attemptStartedAt;
@@ -3183,7 +3279,6 @@ async function goToGoalSegment(bot, goal, movementOverride) {
         owner?.signal.removeEventListener('abort', stopOwnedNavigation);
         removeDigListener();
         navigationObserver?.close();
-        restoreEditCosts();
         if (clearOwnedGoalOnFailure && bot.pathfinder.goal === goal) bot.pathfinder.setGoal(null);
         clearInterval(doorCheckInterval);
         if (timeoutHandle) clearInterval(timeoutHandle);
@@ -3438,8 +3533,7 @@ async function settleReachPositionArrival(bot, target, active, timeoutMs = 1200,
     }
 }
 
-function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safeWater, surfaceSwimming = false }) {
-    const movements = new pf.Movements(bot);
+function configurePositionRoute(bot, movements, { allowDig, allowScaffold, scaffoldBlocks, safeWater, surfaceSwimming = false }) {
     movements.canDig = allowDig;
     movements.allow1by1towers = allowScaffold;
     movements.allowWaterScaffold = surfaceSwimming;
@@ -3473,18 +3567,6 @@ function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safe
         const id = bot.registry.blocksByName[name]?.id;
         if (id != null) movements.blocksCantBreak.add(id);
     }
-    // The pathfinder's forward-step planner can treat a solid hazard as a
-    // valid support even when its id is in blocksToAvoid. Make that movement
-    // view unsafe so route nodes cannot bridge the default water/hazard fence.
-    const getMovementBlock = movements.getBlock.bind(movements);
-    movements.getBlock = (position, dx, dy, dz) => {
-        const block = getMovementBlock(position, dx, dy, dz);
-        if (avoidNames.includes(block.name)) {
-            block.safe = false;
-            block.physical = false;
-        }
-        return block;
-    };
     // Mineflayer-pathfinder's forward-step planner checks only whether the
     // destination support is physical. Mark avoided hazards as nonphysical in
     // this private movement view as well, so it cannot route over solid hazards.
@@ -3494,6 +3576,7 @@ function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safe
         if (avoidNameSet.has(block.name)) {
             block.safe = false;
             block.physical = false;
+            block.replaceable = false;
         }
         return block;
     };
@@ -3530,7 +3613,6 @@ function reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks, safe
             return block;
         };
     }
-    return movements;
 }
 
 function reachPositionGoal(target, tolerance, arrivalMode = 'distance') {
@@ -3735,7 +3817,7 @@ function escapeMovements(bot, supplied, start, kind, scaffoldNames) {
 export async function escapeHazard(bot, supplied = null, requestedGoal = null) {
     const kind = observedHazard(bot);
     if (!kind || kind === 'water' && supplied?.allowSubmerged) return false;
-    if (navigationRecoveryActive.has(bot)) throw new Error('Another hazard egress already owns this bot.');
+    if (bot.pathfinder.goal?.observedEscape) throw new Error('Another hazard egress already owns this bot.');
     const owner = operationContext() ?? getActionContext(bot);
     if (isActionCancelled(bot, owner)) throw Object.assign(new Error('Hazard egress cancelled.'), { name: 'ReachCancelledError' });
     const start = bot.entity.position.floored();
@@ -3767,12 +3849,11 @@ export async function escapeHazard(bot, supplied = null, requestedGoal = null) {
     const before = hazardEvidence(bot, kind);
     const previousMovements = bot.pathfinder.movements;
     const previousTimeout = bot.pathfinder.thinkTimeout;
-    navigationRecoveryActive.add(bot);
     const releaseSwim = kind === 'water' || kind === 'lava' ? holdNavigationRecoverySwim(bot) : () => {};
     bot.pathfinder.thinkTimeout = NAVIGATION_RECOVERY_MAX_DURATION_MS;
     try {
         const policy = { allowDig: true, scaffold: 'leave', scaffoldBlocks: scaffoldNames };
-        await withEmergencyNavigation(bot, policy, () => goToGoalSegment(bot, goal, movements));
+        await withEmergencyNavigation(bot, policy, () => runNavigationSegment(bot, goal, movements));
         if (!goal.observedEscape()) throw Object.assign(new Error('Hazard egress did not reach breathable air or safe footing.'),
             { navigation: { code: 'unsafe_state', phase: 'recovery' } });
         log(bot, `[navigation-recovery] ${JSON.stringify({ kind, policy: 'escape-observed', mode: columnY == null ? 'local-search' : 'water-column',
@@ -3784,7 +3865,6 @@ export async function escapeHazard(bot, supplied = null, requestedGoal = null) {
         throw error;
     } finally {
         releaseSwim();
-        navigationRecoveryActive.delete(bot);
         bot.pathfinder.thinkTimeout = previousTimeout;
         if (bot.pathfinder.movements === movements && previousMovements) bot.pathfinder.setMovements(previousMovements);
     }
@@ -3830,595 +3910,94 @@ function holdNavigationRecoverySwim(bot) {
     };
 }
 
-async function reachPositionCore(bot, options = {}, { requireScaffoldCleanup = false, retainEmergencyScaffolds = false } = {}) {
-    /**
-     * Reach an absolute bot-feet position using explicitly permitted digging
-     * and/or pathfinder scaffolding. Only server-confirmed edits are reported.
-     * @param {MinecraftBot} bot
-     * @param {{position:{x:number,y:number,z:number}, tolerance?:number, allowDig?:boolean, allowScaffold?:boolean, scaffoldBlocks?:string[], safeWater?:boolean}} options
-     * @returns {Promise<{ok:boolean,status:'reached'|'blocked'|'stalled'|'cancelled',finalPosition:{x:number,y:number,z:number}|null,reason:string,edits:Array,cleanupRequired:Array}>}
-     * @example
-     * const result = await skills.reachPosition(bot, { position: {x: 10.5, y: 64, z: -3.5} });
-     **/
-    const snapshotPosition = () => bot.entity?.position
-        ? { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z } : null;
-    const edits = [];
-    const cleanupRequired = [];
-    const early = (reason, code = 'runtime_error') => reachPositionResult('blocked', snapshotPosition(), reason, edits, cleanupRequired, false, code,
+export async function reachPosition(bot, options = {}) {
+    const snapshotPosition = () => {
+        const position = bot?.entity?.position;
+        return position ? { x: position.x, y: position.y, z: position.z } : null;
+    };
+    const early = (reason, code = 'runtime_error') => reachPositionResult('blocked', snapshotPosition(), reason, [], [], false, code,
         { phase: 'target', observedAt: new Date().toISOString() });
-    if (!bot?.entity?.position || !bot.pathfinder || !options || typeof options !== 'object' || Array.isArray(options)) return early('Bot, position, or pathfinder is unavailable.');
-    const { position, tolerance = 1, arrivalMode = 'distance', allowDig = true, allowScaffold = true, scaffoldBlocks = ['dirt', 'cobblestone'], safeWater = false,
-        cleanupOwnedScaffolds = true } = options;
+    if (!bot?.entity?.position || !bot.pathfinder || !options || typeof options !== 'object' || Array.isArray(options)) {
+        return early('Bot, position, or pathfinder is unavailable.');
+    }
+    const { position, tolerance = 1, arrivalMode = 'distance', allowDig = true, allowScaffold = true,
+        scaffoldBlocks = ['dirt', 'cobblestone'], safeWater = false } = options;
     if (!position || ![position.x, position.y, position.z].every(Number.isFinite)) return early('Position must contain finite x, y, and z coordinates.', 'invalid_target');
     if (!Number.isFinite(tolerance) || tolerance < 0.75 || tolerance > 8) return early('Tolerance must be between 0.75 and 8 blocks.');
     if (![allowDig, allowScaffold, safeWater].every(value => typeof value === 'boolean')) return early('Edit and water permissions must be booleans.');
     if (!Array.isArray(scaffoldBlocks) || new Set(scaffoldBlocks).size !== scaffoldBlocks.length ||
-        scaffoldBlocks.some(name => !['dirt', 'cobblestone'].includes(name)) || (allowScaffold && scaffoldBlocks.length === 0)) {
+        scaffoldBlocks.some(name => !['dirt', 'cobblestone'].includes(name)) || (allowScaffold && !scaffoldBlocks.length)) {
         return early('Scaffolding requires a unique, nonempty dirt/cobblestone allowlist.');
     }
-
-    const operation = operationContext();
-    const routeId = `reach:${randomUUID()}`;
-    const routeStartedAt = new Date().toISOString();
-    recordNavigationDiagnostic(bot, 'navigation_route_started', { routeId, routeKind: 'reachPosition',
-        goal: { x: position.x, y: position.y, z: position.z }, policy: { allowDig, allowScaffold, safeWater,
-            scaffoldBlocks }, startedAt: routeStartedAt });
-    const actionContext = operation?.cancellation ?? getActionContext(bot);
-    let budgetExpired = false;
-    let hazardRecoveryComplete = false;
-    let interruptedByHazard = null;
-    let startedAt = 0;
-    const cancelled = () => !!operation?.signal?.aborted || isActionCancelled(bot, actionContext);
-    const active = () => {
-        if (cancelled()) throw Object.assign(new Error('Reach cancelled.'), { name: 'ReachCancelledError' });
-        if (budgetExpired || startedAt && Date.now() - startedAt >= REACH_POSITION_MAX_DURATION_MS) {
-            budgetExpired = true;
-            throw Object.assign(new Error('Reach exceeded its elapsed-time budget.'), { name: 'ReachBudgetExpiredError' });
-        }
-    };
-    const target = new Vec3(position.x, position.y, position.z);
     if (!['distance', 'block'].includes(arrivalMode)) return early('Arrival mode is invalid.');
-    try { await awaitNavigationLanding(bot); }
-    catch (error) {
-        if (error.name === 'ReachCancelledError') return reachPositionResult('cancelled', snapshotPosition(),
-            'Action was cancelled; no further edits were started.', edits, cleanupRequired, false, 'cancelled',
-            { phase: 'landing', observedAt: new Date().toISOString() });
-        return early(error.message, 'unsafe_state');
+    const target = new Vec3(position.x, position.y, position.z);
+    if (bot.game?.minY != null && (target.y < bot.game.minY || bot.game.height != null && target.y >= bot.game.minY + bot.game.height)) {
+        return early('Target is outside the loaded dimension height.', 'invalid_target');
     }
-    const initialHazard = observedHazard(bot);
-    if (bot.game?.minY != null && (target.y < bot.game.minY || bot.game.height != null && target.y >= bot.game.minY + bot.game.height)) return early('Target is outside the loaded dimension height.', 'invalid_target');
-    if (bot.entity.position.distanceTo(target) > REACH_POSITION_MAX_DISTANCE) return early(`Target exceeds the ${REACH_POSITION_MAX_DISTANCE}-block range limit.`, 'invalid_target');
-    const availableScaffoldBlocks = (allowScaffold ? scaffoldBlocks : []).filter(name => bot.registry?.itemsByName?.[name] &&
-        (bot.inventory?.items?.() ?? []).some(item => item.name === name && item.count > 0));
-    const emergencyScaffoldBlocks = ['dirt', 'cobblestone'];
-    if (reachPositionMovementOwners.has(bot.pathfinder)) {
-        return early('Another reachPosition operation already owns this pathfinder.');
-    }
+    const start = bot.entity.position.clone();
+    if (start.distanceTo(target) > REACH_POSITION_MAX_DISTANCE) return early(`Target exceeds the ${REACH_POSITION_MAX_DISTANCE}-block range limit.`, 'invalid_target');
 
-    const context = operationContext();
-    const originalDig = bot.dig;
-    const originalPlaceBlock = bot.placeBlock;
-    const originalEquip = bot.equip;
-    const originalMovements = bot.pathfinder.movements;
-    const ownedMovements = new WeakSet();
-    const scaffoldRecords = [];
-    const unconfirmedScaffolds = [];
-    const failedScaffoldCells = new Set();
-    const pendingNavigationEdits = new Set();
-    const ownNavigationEdit = (promise, releaseGate) => {
-        pendingNavigationEdits.add(promise);
-        registerOwnedPromise(promise);
-        promise.then(() => { pendingNavigationEdits.delete(promise); releaseGate(); }, () => { pendingNavigationEdits.delete(promise); releaseGate(); });
-        return promise;
-    };
-    const surfaceSwimming = isWaterFilled(bot.blockAt(bot.entity.position)) &&
-        isWaterFilled(bot.blockAt(bot.entity.position.floored().offset(0, -1, 0)));
-    const ordinaryMovement = reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks: availableScaffoldBlocks,
-        safeWater: safeWater || surfaceSwimming, surfaceSwimming });
-    let movement = ordinaryMovement;
-    ownedMovements.add(movement);
-    reachPositionMovementOwners.set(bot.pathfinder, context ?? movement);
-    const movementOwner = reachPositionMovementOwners.get(bot.pathfinder);
-    let editPhase = 'traversal';
-    let activeGoal = null;
-    let lastNavigationError = '';
-    let status = 'blocked';
-    let reason = 'No safe route was found.';
-    let diagnosticPhase = 'target';
-    let hardTimer;
-    startedAt = Date.now();
-    let chunkWaitCount = 0;
-    const routeAttempts = new Map();
-    const finalDistance = () => bot.entity.position.distanceTo(target);
-    const arrivalCandidate = () => arrivalMode === 'block' ? reachPositionBlockMatches(bot.entity.position, target) : finalDistance() <= tolerance;
-    const confirmArrival = async () => {
-        if (arrivalMode !== 'block') return { position: snapshotPosition(), observedAt: new Date().toISOString(), physicsTicks: 0 };
-        return await settleReachPositionArrival(bot, target, active, 1200, { waitForSafeStart: startedPosition.distanceTo(bot.entity.position) > 0.01 });
-    };
-    const goal = reachPositionGoal(target, tolerance, arrivalMode);
-    let resultCode = null;
-    let lastSearchDiagnostics = null;
-    const startedPosition = bot.entity.position.clone();
-    const drainNavigationEdits = async () => {
-        while (pendingNavigationEdits.size) await Promise.allSettled([...pendingNavigationEdits]);
-    };
-
-    const digWrapper = function (block, ...args) {
-        const releaseGate = beginNavigationEdit(bot);
-        return ownNavigationEdit((async () => {
-            await awaitNavigationPlacementSettled(bot);
-            active();
-            if (unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
-            if (typeof bot.tool?.equipForBlock === 'function') await bot.tool.equipForBlock(block);
-            active();
-            if (unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
-            if (bot.navigationProtection?.contains(block.position)) throw new Error('Protected area forbids digging route blocks.');
-            const result = await registerOwnedPromise(originalDig.call(this, block, ...args));
-            const observed = bot.blockAt(block.position);
-            if (!observed || observed.type !== 0) throw new Error(`Server did not confirm route excavation at ${block.position}.`);
-            const kind = editPhase === 'cleanup' ? 'scaffold_removed' : 'dug';
-            const change = { kind, block: block.name, position: { x: block.position.x, y: block.position.y, z: block.position.z } };
-            edits.push(change);
-            recordConfirmation({ quantity: 1, unit: 'block', target: { block: block.name, position: change.position },
-                evidence: 'Mineflayer dig promise resolved after server block update' });
-            active();
-            return result;
-        })(), releaseGate);
-    };
-    const equipWrapper = function (...args) {
-        const releaseGate = beginNavigationEdit(bot);
-        return ownNavigationEdit((async () => {
-            await awaitNavigationPlacementSettled(bot);
-            active();
-            if (unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
-            return originalEquip.call(this, ...args);
-        })(), releaseGate);
-    };
-    const placeWrapper = function (reference, face, ...args) {
-        const releaseGate = beginNavigationEdit(bot);
-        return ownNavigationEdit((async () => {
-        active();
-        const blockName = bot.heldItem?.name;
-        if (!(navigationRecoveryActive.has(bot) ? emergencyScaffoldBlocks : availableScaffoldBlocks).includes(blockName)) {
-            throw new Error(`Pathfinder attempted an unpermitted scaffold block: ${blockName ?? 'unknown'}.`);
-        }
-        const targetPosition = reference.position.plus(face).floored();
-        if (bot.navigationProtection?.contains(targetPosition)) throw new Error('Protected area forbids scaffolding.');
-        let placement;
+    const run = async () => {
+        const goal = reachPositionGoal(target, tolerance, arrivalMode);
+        const arrived = () => arrivalMode === 'block'
+            ? reachPositionBlockMatches(bot.entity.position, target) : bot.entity.position.distanceTo(target) <= tolerance;
+        const surfaceSwimming = isWaterFilled(bot.blockAt(bot.entity.position)) &&
+            isWaterFilled(bot.blockAt(bot.entity.position.floored().offset(0, -1, 0)));
+        const policy = { allowDig, allowScaffold, scaffoldBlocks: availableScaffolds(bot, scaffoldBlocks),
+            safeWater: safeWater || surfaceSwimming, surfaceSwimming };
+        const owner = operationContext() ?? getActionContext(bot);
+        const active = () => {
+            if (isActionCancelled(bot, owner)) throw Object.assign(new Error('Navigation cancelled.'), { name: 'ReachCancelledError' });
+        };
+        let lastSearch;
+        let observation;
+        let status = 'reached';
+        let code = 'arrived';
+        let reason = 'Reached the requested position.';
         try {
-            const observedTarget = bot.blockAt(targetPosition);
-            const bodyFeet = bot.entity.position.floored();
-            const bodyHeadOffset = Math.max(1, Math.ceil((Number.isFinite(bot.entity.height) ? bot.entity.height : 1.8) - 0.01) - 1);
-            const overlapsWaterPlacementBody = targetPosition.x === bodyFeet.x && targetPosition.z === bodyFeet.z
-                && targetPosition.y >= bodyFeet.y && targetPosition.y <= bodyFeet.y + bodyHeadOffset;
-            const waterPlacementAllowed = (navigationRecoveryActive.has(bot) || movement.allowWaterScaffold) && !overlapsWaterPlacementBody;
-            if (!observedTarget || (isWaterFilled(observedTarget) && !waterPlacementAllowed) || LAVA_NAMES.has(observedTarget.name)) {
-                failedScaffoldCells.add(reachPositionBlockKey(targetPosition));
-                const error = new Error(overlapsWaterPlacementBody
-                    ? 'Emergency egress will not place a block in the bot body.'
-                    : 'Navigation scaffold target is unknown or the route cannot place into that liquid.');
-                error.navigationPlacementAttempted = false;
-                throw error;
+            await navigate(bot, goal, { positionRoute: { target, arrived, policy, onSearch: search => { lastSearch = search; } } });
+            if (arrivalMode === 'block') {
+                observation = await settleReachPositionArrival(bot, target, active, 1200,
+                    { waitForSafeStart: start.distanceTo(bot.entity.position) > 0.01 });
+                if (!observation) throw navigationFailure('unsafe_state', 'Arrival did not remain grounded, loaded, and safe for two physics ticks.', { phase: 'arrival' });
+            } else if (!arrived()) {
+                throw navigationFailure('arrival_unconfirmed', 'The requested position was not observed.', { phase: 'arrival' });
             }
-            placement = await placeAndConfirmNavigationScaffold(bot, targetPosition, blockName,
-                () => {
-                    try {
-                        active();
-                        if (unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
-                        const freshReference = bot.blockAt(reference.position);
-                        if (!freshReference || freshReference.type === 0) throw new Error('Scaffold support block is no longer available.');
-                        return registerOwnedPromise(originalPlaceBlock.call(this, freshReference, face, ...args));
-                    } catch (error) {
-                        if (error.navigationPlacementAttempted !== false) error.navigationPlacementAttempted = false;
-                        throw error;
-                    }
-                }, () => bot.lookAt(reference.position.offset(
-                    0.5 + face.x * 0.5, 0.5 + face.y * 0.5, 0.5 + face.z * 0.5)));
+            active();
+            if (reachPositionBlockMatches(start, target) && start.distanceTo(bot.entity.position) < 0.01) code = 'already_at_goal';
         } catch (error) {
-            const position = { x: targetPosition.x, y: targetPosition.y, z: targetPosition.z };
-            if (error.navigationPlacementAttempted !== false && !unconfirmedScaffolds.some(entry => entry.position.x === position.x && entry.position.y === position.y && entry.position.z === position.z)) {
-                unconfirmedScaffolds.push({ position, block: blockName });
-                cleanupRequired.push({ ...position, block: blockName,
-                    reason: 'Scaffold placement was attempted but not server-confirmed; target state is unknown.' });
-            }
-            throw error;
+            const cancelled = isActionCancelled(bot, owner) || error.name === 'ReachCancelledError';
+            code = cancelled ? 'cancelled' : error.navigation?.code ?? 'runtime_error';
+            status = cancelled ? 'cancelled' : ['search_limit', 'no_progress'].includes(code) ? 'stalled' : 'blocked';
+            reason = error.message;
+            lastSearch = { ...lastSearch, ...error.navigation };
         }
-        const observed = placement.block;
-        const positionRecord = { x: targetPosition.x, y: targetPosition.y, z: targetPosition.z };
-        const record = { position: positionRecord, block: blockName, stateId: observed.stateId };
-        if (!retainEmergencyScaffolds || !navigationRecoveryActive.has(bot)) upsertOwnedScaffold(scaffoldRecords, record);
-        const change = { kind: 'scaffold_placed', block: blockName, position: positionRecord };
-        edits.push(change);
-        recordConfirmation({ quantity: 1, unit: 'block', target: { block: blockName, position: positionRecord },
-            evidence: 'Expected server block update confirmed after Mineflayer placement promise' });
-        if (navigationRecoveryActive.has(bot)) log(bot, `[navigation-recovery-edit] ${JSON.stringify({ kind: 'scaffold-placed',
-            block: blockName, position: positionRecord, serverConfirmed: true, replanning: true })}`);
-        active();
-        return placement.result;
-        })(), releaseGate);
+        const finalPosition = observation?.position ?? snapshotPosition();
+        const feet = bot.entity.position.floored();
+        const { edits, scaffolds, unconfirmedScaffolds } = navigationEditSnapshot(bot);
+        const diagnostics = { phase: status === 'reached' ? 'arrival' : lastSearch?.phase ?? 'movement',
+            target: { x: target.x, y: target.y, z: target.z, block: target.floored() },
+            finalPosition, distance: bot.entity.position.distanceTo(target), displacement: start.distanceTo(bot.entity.position),
+            feet: observation?.feet ?? bot.blockAt(feet)?.name ?? null, head: observation?.head ?? bot.blockAt(feet.offset(0, 1, 0))?.name ?? null,
+            support: observation?.support ?? bot.blockAt(feet.offset(0, -1, 0))?.name ?? null,
+            onGround: observation?.onGround ?? bot.entity.onGround === true, velocity: observation?.velocity ?? bot.entity.velocity ?? null,
+            lastSearch: reachPositionSearchSummary(lastSearch), physicsTicks: observation?.physicsTicks ?? 0,
+            ...(lastSearch?.hazard ? { hazard: lastSearch.hazard, currentHazard: lastSearch.currentHazard } : {}),
+            observedAt: observation?.observedAt ?? new Date().toISOString() };
+        const retainedScaffolds = scaffolds.map(({ position, block }) => ({ ...position, block, reason: 'Confirmed scaffold was left in place.' }));
+        return reachPositionResult(status, finalPosition, reason, edits, [...retainedScaffolds, ...unconfirmedScaffolds], arrived(), code, diagnostics);
     };
-
-    const restoreWrappers = () => {
-        if (bot.dig === digWrapper) bot.dig = originalDig;
-        if (bot.placeBlock === placeWrapper) bot.placeBlock = originalPlaceBlock;
-        if (bot.equip === equipWrapper) bot.equip = originalEquip;
-    };
-    const cleanupScaffolds = async () => {
-        editPhase = 'cleanup';
-        for (const scaffold of [...scaffoldRecords].reverse()) {
-            if (cancelled()) break;
-            if (budgetExpired || Date.now() - startedAt >= REACH_POSITION_MAX_DURATION_MS) {
-                budgetExpired = true;
-                break;
-            }
-            const p = new Vec3(scaffold.position.x, scaffold.position.y, scaffold.position.z);
-            const observed = bot.blockAt(p);
-            if (observed?.type === 0) continue;
-            if (!observed || observed.name !== scaffold.block || scaffold.stateId != null && observed.stateId !== scaffold.stateId) {
-                cleanupRequired.push({ ...scaffold.position, block: scaffold.block, reason: 'Owned scaffold state changed or became unknown.' });
-                continue;
-            }
-            if (isOwnedScaffoldUnderBot(bot, p)) {
-                cleanupRequired.push({ ...scaffold.position, block: scaffold.block, reason: 'Scaffold supports the bot at its current position.' });
-                continue;
-            }
-            try {
-                const targetBlock = bot.blockAt(p);
-                if (!targetBlock) throw new Error('Scaffold became unobserved.');
-                const current = bot.blockAt(p);
-                if (!current || current.name !== scaffold.block || scaffold.stateId != null && current.stateId !== scaffold.stateId) throw new Error('Owned scaffold changed before cleanup.');
-                const interaction = resolveBlockInteraction(bot, current, { reach: 4.5 });
-                if (interaction.status !== 'ready') throw new Error(`Scaffold is not safely reachable: ${interaction.reason}.`);
-                await bot.dig(current);
-                active();
-                if (bot.blockAt(p)?.type !== 0) throw new Error('Server did not confirm scaffold removal.');
-            } catch (error) {
-                if (cancelled()) break;
-                const afterAttempt = bot.blockAt(p);
-                if (afterAttempt?.type === 0) {
-                    if (budgetExpired) break;
-                    continue;
-                }
-                cleanupRequired.push({ ...scaffold.position, block: scaffold.block, reason: String(error.message ?? error) });
-                if (budgetExpired) break;
-            }
-        }
-    };
-
-    try {
-        if (!originalDig || (availableScaffoldBlocks.length > 0 && allowScaffold && !originalPlaceBlock)
-            || typeof bot.pathfinder.getPathFromTo !== 'function') throw new Error('The required Mineflayer/pathfinder edit APIs are unavailable.');
-        bot.dig = digWrapper;
-        if (originalPlaceBlock) bot.placeBlock = placeWrapper;
-        bot.equip = equipWrapper;
-        bot.pathfinder.setMovements(movement);
-        hardTimer = setTimeout(() => {
-            budgetExpired = true;
-            if (activeGoal && bot.pathfinder.goal === activeGoal) bot.pathfinder.stop();
-        }, REACH_POSITION_MAX_DURATION_MS);
-
-        for (let segment = 0; segment < REACH_POSITION_MAX_SEGMENTS; segment++) {
-            active();
-            if (!interruptedByHazard && (!initialHazard || hazardRecoveryComplete) && arrivalCandidate()) {
-                diagnosticPhase = 'arrival';
-                if (await confirmArrival()) {
-                    status = 'reached';
-                    resultCode = reachPositionBlockMatches(bot.entity.position, target) && startedPosition.distanceTo(bot.entity.position) < 0.01
-                        ? 'already_at_goal' : 'arrived';
-                    reason = 'Reached the requested feet position with a grounded, loaded, safe arrival.';
-                    break;
-                }
-                status = 'blocked'; resultCode = 'unsafe_state';
-                reason = 'Arrival did not remain grounded, loaded, and safe for two physics ticks.';
-                break;
-            }
-            if (Date.now() - startedAt > REACH_POSITION_MAX_DURATION_MS) {
-                status = 'stalled'; reason = 'Reach exceeded its elapsed-time budget.'; break;
-            }
-            const start = bot.entity.position.floored();
-            if (interruptedByHazard || segment === 0 && initialHazard && !hazardRecoveryComplete) {
-                diagnosticPhase = 'recovery';
-                const kind = observedHazard(bot);
-                if (interruptedByHazard) await recoverInterruptedNavigation(bot, goal, movement, interruptedByHazard);
-                else await escapeHazard(bot, movement, goal);
-                await drainNavigationEdits();
-                active();
-                hazardRecoveryComplete = true;
-                interruptedByHazard = null;
-                if (kind === 'water' && isWaterFilled(bot.blockAt(target.floored()))) {
-                    status = 'blocked';
-                    resultCode = 'unsafe_state';
-                    reason = 'Hazard egress reached air; the requested feet block is still under water.';
-                    break;
-                }
-                if (kind === 'water') {
-                    movement = reachPositionMoves(bot, { allowDig, allowScaffold, scaffoldBlocks: availableScaffoldBlocks,
-                        safeWater: true, surfaceSwimming: true });
-                    ownedMovements.add(movement);
-                    bot.pathfinder.setMovements(movement);
-                }
-                continue;
-            }
-            diagnosticPhase = initialHazard && !hazardRecoveryComplete ? 'recovery' : 'search';
-            const pathResult = reachPositionPath(bot, movement, goal);
-            lastSearchDiagnostics = { status: pathResult.status ?? 'unknown', pathNodeCount: pathResult.path?.length ?? 0,
-                endpoint: pathResult.path?.length ? { x: pathResult.path.at(-1).x, y: pathResult.path.at(-1).y, z: pathResult.path.at(-1).z } : null,
-                limits: { timeoutMs: REACH_POSITION_SEARCH_TIMEOUT_MS, steps: REACH_POSITION_SEARCH_STEPS,
-                    searchRadius: pathSearchCostCap(movement, REACH_POSITION_SEARCH_RADIUS) } };
-            recordNavigationDiagnostic(bot, 'navigation_route_search', { routeId, phase: diagnosticPhase, search: lastSearchDiagnostics });
-            if (pathResult.status === 'unavailable') { status = 'blocked'; reason = 'Bounded path search is unavailable.'; break; }
-            const path = Array.isArray(pathResult.path) ? pathResult.path : [];
-            const endpoint = path.at(-1);
-            const searchDiagnostic = {
-                segment, start: { x: start.x, y: start.y, z: start.z },
-                searchStatus: pathResult.status, pathNodeCount: path.length,
-                path: path.slice(0, 128).map(node => ({ x: node.x, y: node.y, z: node.z })),
-                omittedPathNodeCount: Math.max(0, path.length - 128),
-                endpoint: endpoint ? { x: endpoint.x, y: endpoint.y, z: endpoint.z } : null,
-                startHazard: segment === 0 ? initialHazard : null,
-            };
-            if (!endpoint || endpoint.x === start.x && endpoint.y === start.y && endpoint.z === start.z) {
-                if (!interruptedByHazard && (!initialHazard || hazardRecoveryComplete) && arrivalCandidate()) {
-                    diagnosticPhase = 'arrival';
-                    if (arrivalMode === 'block' && !await confirmArrival()) {
-                        status = 'blocked'; resultCode = 'unsafe_state';
-                        reason = 'Arrival could not be confirmed as grounded, loaded, and safe for two physics ticks.';
-                        break;
-                    }
-                    status = 'reached';
-                    resultCode = reachPositionBlockMatches(bot.entity.position, target) && startedPosition.distanceTo(bot.entity.position) < 0.01
-                        ? 'already_at_goal' : 'arrived';
-                    reason = 'Reached the requested feet position after safe hazard egress.';
-                    break;
-                }
-                const unknownNeighbor = reachPositionHasUnknownNeighbor(bot, bot.entity.position);
-                searchDiagnostic.unknownNeighbor = unknownNeighbor;
-                if (unknownNeighbor) {
-                    diagnosticPhase = 'search';
-                    if (++chunkWaitCount > REACH_POSITION_MAX_SEGMENTS) {
-                        const blocker = reachPositionTargetBlocker(bot, target, allowDig);
-                        resultCode = blocker?.code ?? 'search_limit';
-                        diagnosticPhase = blocker ? 'target' : 'search';
-                        status = blocker?.code === 'target_unloaded' ? 'blocked' : 'stalled';
-                        reason = blocker ? 'The target remains unloaded after the bounded chunk wait.' : 'Chunk loading retry limit reached.';
-                        break;
-                    }
-                    const loaded = await waitForReachPositionChunk(bot, context, REACH_POSITION_CHUNK_WAIT_MS);
-                    searchDiagnostic.chunkWaitOutcome = loaded ? 'chunk_loaded' : 'deadline';
-                    active();
-                    log(bot, `[reachPosition-route] ${JSON.stringify(searchDiagnostic)}`);
-                    if (loaded) continue;
-                    const blocker = reachPositionTargetBlocker(bot, target, allowDig);
-                    resultCode = blocker?.code ?? 'search_limit';
-                    diagnosticPhase = blocker ? 'target' : 'search';
-                    status = 'blocked'; reason = blocker ? 'The target is not loaded.' : 'No newly loaded safe route segment appeared before the chunk wait deadline.'; break;
-                }
-                const blocker = reachPositionTargetBlocker(bot, target, allowDig);
-                if (blocker) {
-                    resultCode = blocker.code;
-                    searchDiagnostic.targetBlocker = blocker;
-                    diagnosticPhase = 'target';
-                } else {
-                    resultCode = pathResult.status === 'timeout' || pathResult.status === 'partial' ? 'search_limit'
-                        : pathResult.status === 'noPath' ? 'route_not_found' : 'arrival_unconfirmed';
-                    diagnosticPhase = 'search';
-                }
-                lastSearchDiagnostics = reachPositionSearchSummary(searchDiagnostic);
-                log(bot, `[reachPosition-route] ${JSON.stringify(searchDiagnostic)}`);
-                status = 'blocked'; reason = `Path search ended ${pathResult.status} without a safe next segment.`; break;
-            }
-
-            const routeKey = `${start.x},${start.y},${start.z}>${endpoint.x},${endpoint.y},${endpoint.z}:${pathResult.status}`;
-            const attempts = (routeAttempts.get(routeKey) ?? 0) + 1;
-            routeAttempts.set(routeKey, attempts);
-            searchDiagnostic.attempt = attempts;
-            lastSearchDiagnostics = reachPositionSearchSummary(searchDiagnostic);
-            log(bot, `[reachPosition-route] ${JSON.stringify(searchDiagnostic)}`);
-            if (attempts >= REACH_POSITION_NO_PROGRESS_LIMIT) {
-                resultCode = 'no_progress';
-                status = 'stalled'; reason = 'The same route segment failed repeatedly without progress.'; break;
-            }
-            let checkpoint = goal;
-            if (pathResult.status !== 'success') {
-                // postProcessPath mutates feet coordinates, including partial-block
-                // heights. Move.hash retains the original integer A* coordinates.
-                const node = typeof endpoint.hash === 'string' ? endpoint.hash.split(',').map(Number) : [];
-                if (node.length !== 3 || !node.every(Number.isSafeInteger)) {
-                    throw new Error('Pathfinder checkpoint is missing its original A* coordinates.');
-                }
-                checkpoint = new pf.goals.GoalBlock(...node);
-            }
-            activeGoal = checkpoint;
-            const before = bot.entity.position.clone();
-            let navigationFailure = null;
-            try {
-                await withNativeNavigationEditScope(() => goToGoal(bot, checkpoint, movement));
-            } catch (error) {
-                navigationFailure = error;
-            } finally {
-                await drainNavigationEdits();
-            }
-            if (navigationFailure) {
-                const error = navigationFailure;
-                lastNavigationError = String(error.message ?? error);
-                if (error.navigation) {
-                    resultCode = error.navigation.code;
-                    lastSearchDiagnostics = error.navigation;
-                    diagnosticPhase = error.navigation.phase ?? diagnosticPhase;
-                }
-                if (cancelled()) throw error;
-                if (error.name === 'NavigationHazardError') {
-                    interruptedByHazard = error;
-                    continue;
-                }
-                if (unconfirmedScaffolds.length) {
-                    status = 'blocked';
-                    resultCode = 'edit_unconfirmed';
-                    reason = 'A scaffold placement was attempted but not server-confirmed.';
-                    break;
-                }
-                if (budgetExpired || error.name === 'NavigationStallTimeoutError' || error.name === 'Timeout') {
-                    resultCode = error.navigation?.code ?? (error.name === 'NavigationStallTimeoutError' ? 'no_progress' : 'search_limit');
-                    status = 'stalled'; reason = lastNavigationError; break;
-                }
-                if (bot.entity.position.distanceTo(before) < 0.5 && attempts + 1 >= REACH_POSITION_NO_PROGRESS_LIMIT) {
-                    resultCode = 'no_progress';
-                    status = 'stalled'; reason = lastNavigationError; break;
-                }
-                continue;
-            }
-            active();
-            if (bot.entity.position.distanceTo(before) < 0.5 && !arrivalCandidate()) {
-                if (reachPositionHasUnknownNeighbor(bot, bot.entity.position)) {
-                    const loaded = await waitForReachPositionChunk(bot, context, REACH_POSITION_CHUNK_WAIT_MS);
-                    active();
-                    if (loaded) continue;
-                }
-                if (attempts + 1 >= REACH_POSITION_NO_PROGRESS_LIMIT) { resultCode = 'no_progress'; status = 'stalled'; reason = 'Navigation returned without observable route progress.'; break; }
-            }
-        }
-
-        if (status === 'blocked' && reason === 'No safe route was found.' && !cancelled()) {
-            status = 'stalled'; reason = 'Reach exceeded its bounded route-segment budget.';
-        }
-
-        if (cleanupOwnedScaffolds && scaffoldRecords.length && !cancelled()) await cleanupScaffolds();
-        if (cancelled()) { status = 'cancelled'; reason = 'Action was cancelled; no further edits were started.'; }
-        else if (budgetExpired) { status = 'stalled'; reason = 'Reach exceeded its elapsed-time budget.'; }
-        else if (status === 'reached' && !arrivalCandidate()) { status = 'blocked'; resultCode = 'arrival_unconfirmed'; reason = 'Cleanup completed, but the final position no longer satisfies the requested arrival condition.'; }
-        else if (status !== 'reached' && status === 'blocked' && lastNavigationError) reason = `${reason} Last navigation error: ${lastNavigationError}`;
-    } catch (error) {
-        if (cancelled() || error.name === 'ReachCancelledError') { status = 'cancelled'; reason = 'Action was cancelled; no further edits were started.'; }
-        else if (budgetExpired || error.name === 'NavigationStallTimeoutError' || error.name === 'Timeout') { status = 'stalled'; reason = String(error.message ?? error); }
-        else { status = 'blocked'; resultCode = error.navigation?.code ?? (error.name === 'NavigationArrivalUnconfirmedError' ? 'arrival_unconfirmed' : 'runtime_error'); reason = String(error.message ?? error); }
-        if (error.navigation) {
-            lastSearchDiagnostics = error.navigation;
-            diagnosticPhase = error.navigation.phase ?? diagnosticPhase;
-        }
-        if (cleanupOwnedScaffolds && status !== 'cancelled' && scaffoldRecords.length) await cleanupScaffolds();
-        if (cleanupRequired.length && status === 'reached') status = 'blocked';
-    } finally {
-        await drainNavigationEdits();
-        clearTimeout(hardTimer);
-        restoreWrappers();
-        if (reachPositionMovementOwners.get(bot.pathfinder) === movementOwner) {
-            // Mineflayer-pathfinder leaves stateGoal set when goto rejects for
-            // NoPath/Timeout. Clear only this call's goal before restoring the
-            // caller's movements, or physicsTick can resume it with broader
-            // digging/scaffolding permissions after this skill has failed.
-            if (activeGoal && bot.pathfinder.goal === activeGoal) bot.pathfinder.setGoal(null);
-            if (ownedMovements.has(bot.pathfinder.movements) && originalMovements) bot.pathfinder.setMovements(originalMovements);
-            reachPositionMovementOwners.delete(bot.pathfinder);
-        }
-    }
-    for (const scaffold of scaffoldRecords) {
-        const block = bot.blockAt(new Vec3(scaffold.position.x, scaffold.position.y, scaffold.position.z));
-        if ((!block || block.type !== 0) && !cleanupRequired.some(entry => entry.x === scaffold.position.x && entry.y === scaffold.position.y && entry.z === scaffold.position.z)) {
-            cleanupRequired.push({ ...scaffold.position, block: scaffold.block, reason: cancelled() ? 'Action cancelled before owned scaffold cleanup.' : 'Owned scaffold remains or became unobserved after route completion.' });
-        }
-    }
-    let finalPosition = snapshotPosition();
-    let finalObservedAt = new Date().toISOString();
-    if (status === 'reached' && cleanupRequired.length && requireScaffoldCleanup) {
-        status = 'blocked';
-        resultCode = 'cleanup_incomplete';
-        reason = `Reached the target, but ${cleanupRequired.length} owned scaffold(s) could not be removed.`;
-    } else if (status === 'reached' && cleanupRequired.length) {
-        reason = `Reached the target; ${cleanupRequired.length} owned scaffold(s) remain and are listed in cleanupRequired for optional cleanup.`;
-    }
-    if (status === 'reached' && unconfirmedScaffolds.length) {
-        status = 'blocked';
-        resultCode = 'edit_unconfirmed';
-        reason = 'A scaffold placement was attempted but not server-confirmed.';
-    }
-    if (budgetExpired || startedAt && Date.now() - startedAt >= REACH_POSITION_MAX_DURATION_MS) {
-        budgetExpired = true;
-        if (status === 'reached') {
-            status = 'stalled';
-            reason = 'Reach exceeded its elapsed-time budget.';
-        }
-    }
-    if (status === 'reached' && arrivalCandidate()) {
-        diagnosticPhase = 'arrival';
-        const observation = await confirmArrival();
-        if (observation) {
-            finalPosition = observation.position;
-            finalObservedAt = observation.observedAt;
-            const observedPosition = new Vec3(finalPosition.x, finalPosition.y, finalPosition.z);
-            const diagnostics = { phase: 'arrival', target: { x: target.x, y: target.y, z: target.z,
-                block: { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z) } },
-                finalPosition, distance: observedPosition.distanceTo(target), displacement: startedPosition.distanceTo(observedPosition),
-                feet: observation.feet ?? bot.blockAt(observedPosition.floored())?.name ?? null,
-                head: observation.head ?? bot.blockAt(observedPosition.floored().offset(0, 1, 0))?.name ?? null,
-                support: observation.support ?? bot.blockAt(observedPosition.floored().offset(0, -1, 0))?.name ?? null,
-                onGround: observation.onGround ?? bot.entity.onGround === true, velocity: observation.velocity ?? null,
-                lastSearch: reachPositionSearchSummary(lastSearchDiagnostics), physicsTicks: observation.physicsTicks,
-                observedAt: finalObservedAt };
-            log(bot, `Reached ${target} within ${tolerance} blocks; confirmed ${edits.length} route edits.`);
-            recordNavigationDiagnostic(bot, 'navigation_route_arrived', { routeId, routeKind: 'reachPosition',
-                elapsedMs: Date.now() - Date.parse(routeStartedAt), finalPosition, confirmedEditCount: edits.length,
-                cleanupRequiredCount: cleanupRequired.length, diagnostics });
-            return reachPositionResult('reached', finalPosition, reason, edits, cleanupRequired, true, resultCode ?? 'arrived', diagnostics);
-        }
-        finalPosition = snapshotPosition();
-        finalObservedAt = new Date().toISOString();
-    }
-    if (status === 'reached') { status = 'blocked'; resultCode = arrivalMode === 'block' ? 'unsafe_state' : 'arrival_unconfirmed'; reason = 'Final arrival state was not confirmed.'; }
-    if (cleanupRequired.length) reason += ` Cleanup required at ${cleanupRequired.map(item => `(${item.x}, ${item.y}, ${item.z})`).join(', ')}.`;
-    log(bot, `Could not complete route to ${target}: ${reason}`);
-    const code = resultCode ?? (status === 'cancelled' ? 'cancelled' : status === 'stalled' ? 'search_limit' : 'arrival_unconfirmed');
-    const diagnostics = { phase: cleanupRequired.length ? 'cleanup' : diagnosticPhase, target: { x: target.x, y: target.y, z: target.z,
-            block: { x: Math.floor(target.x), y: Math.floor(target.y), z: Math.floor(target.z) } },
-        finalPosition, distance: finalDistance(), displacement: startedPosition.distanceTo(bot.entity.position),
-        feet: bot.blockAt(bot.entity.position.floored())?.name ?? null,
-        head: bot.blockAt(bot.entity.position.floored().offset(0, 1, 0))?.name ?? null,
-        support: bot.blockAt(bot.entity.position.floored().offset(0, -1, 0))?.name ?? null,
-        onGround: bot.entity.onGround === true, velocity: bot.entity.velocity ? { x: bot.entity.velocity.x, y: bot.entity.velocity.y, z: bot.entity.velocity.z } : null,
-        lastSearch: reachPositionSearchSummary(lastSearchDiagnostics), observedAt: finalObservedAt };
-    recordNavigationDiagnostic(bot, status === 'stalled' ? 'navigation_stall' : 'navigation_route_result', {
-        routeId, routeKind: 'reachPosition', status, code, reason: reason.slice(0, 2000),
-        elapsedMs: Date.now() - Date.parse(routeStartedAt), finalPosition, confirmedEditCount: edits.length,
-        cleanupRequiredCount: cleanupRequired.length, diagnostics });
-    return reachPositionResult(status, finalPosition, reason, edits, cleanupRequired, arrivalCandidate(), code, diagnostics);
+    return navigationPolicy() ? run() : runWithNavigationPolicy(bot, {
+        allowDig, scaffold: allowScaffold ? 'leave' : 'forbid', scaffoldBlocks,
+    }, run);
 }
 
-export async function reachPosition(bot, options = {}) {
-    return reachPositionCore(bot, options);
-}
-
-export async function reachPositionWithScaffoldCleanup(bot, options = {}) {
-    if (!options || typeof options !== 'object' || Array.isArray(options)) {
-        return reachPositionResult('blocked', bot?.entity?.position ?? null, 'Options must be an object.');
+async function navigateToPosition(bot, options) {
+    const { scaffold = 'forbid', allowDig = false } = options;
+    if (!['forbid', 'leave'].includes(scaffold)) {
+        return reachPositionResult('blocked', bot?.entity?.position ?? null, 'Scaffold policy must be forbid or leave.');
     }
-    return reachPositionCore(bot, {
-        ...options,
-        allowDig: options.allowDig ?? false,
-        allowScaffold: true,
-    }, { requireScaffoldCleanup: true });
-}
-
-/**
- * Unified native position navigation. Legacy positional goToPosition remains
- * boolean-compatible; this public contract reports arrival and route cleanup
- * separately and keeps temporary scaffolds as a success condition.
- */
-async function navigateToPosition(bot, options = {}) {
-    if (!options || typeof options !== 'object' || Array.isArray(options)) {
-        return reachPositionResult('blocked', bot?.entity?.position ?? null, 'Options must be an object.');
-    }
-    const { scaffold = 'forbid', allowDig = false, scaffoldBlocks = ['dirt', 'cobblestone'] } = options;
-    if (!['forbid', 'temporary', 'leave'].includes(scaffold)) {
-        return reachPositionResult('blocked', bot?.entity?.position ?? null, 'Scaffold policy must be forbid, temporary, or leave.');
-    }
-    if (typeof allowDig !== 'boolean') {
-        return reachPositionResult('blocked', bot?.entity?.position ?? null, 'allowDig must be a boolean.');
-    }
-    return reachPositionCore(bot, {
-        ...options,
-        allowDig,
-        allowScaffold: scaffold !== 'forbid',
-        scaffoldBlocks,
-    }, { requireScaffoldCleanup: scaffold === 'temporary', retainEmergencyScaffolds: true });
+    return reachPosition(bot, { ...options, allowDig, allowScaffold: scaffold === 'leave' });
 }
 
 export async function goToPosition(bot, x, y, z, min_distance=2) {
@@ -4678,78 +4257,69 @@ export async function followPlayer(bot, username, distance=4) {
     if (!player)
         return failSkill(bot, 'target_not_found', `Could not find ${username}.`, { playerName: username });
 
-    return trackNavigationSegment(bot, async () => {
-    const move = navigationMovements(bot);
-    move.digCost = 10;
-    const followGoal = new pf.goals.GoalFollow(player, distance);
-    const owner = operationContext() ?? getActionContext(bot);
-    await awaitNavigationLanding(bot);
-    await escapeHazard(bot, move, followGoal);
-    if (isActionCancelled(bot, owner)) return false;
-    bot.pathfinder.setMovements(move);
-    let doorCheckInterval = navigationPolicy() || operationContext()?.nativeNavigationNoEdits
-        ? null : startDoorInterval(bot);
-
-    const hazardWatch = watchDynamicNavigation(bot, move);
-    bot.pathfinder.setGoal(followGoal, true);
-    const stopFollowing = () => {
-        if (bot.pathfinder.goal === followGoal) bot.pathfinder.setGoal(null);
-    };
-    owner?.signal?.addEventListener('abort', stopFollowing, { once: true });
-    log(bot, `You are now actively following player ${username}.`);
-
-    try {
-    while (!isActionCancelled(bot, owner)) {
-        await new Promise(resolve => setTimeout(resolve, 250));
-        await hazardWatch.resume();
-        if (isActionCancelled(bot, owner)) break;
-        // in cheat mode, if the distance is too far, teleport to the player
-        const distance_from_player = bot.entity.position.distanceTo(player.position);
-
-        const teleport_distance = 100;
-        const ignore_modes_distance = 30; 
-        const nearby_distance = distance + 2;
-
-        if (distance_from_player > teleport_distance && bot.modes.isOn('cheat')) {
-            // teleport with cheat mode
-            await goToPlayer(bot, username);
-        }
-        else if (distance_from_player > ignore_modes_distance) {
-            // these modes slow down the bot, and we want to catch up
-            bot.modes.pause('item_collecting');
-            bot.modes.pause('hunting');
-            bot.modes.pause('torch_placing');
-        }
-        else if (distance_from_player <= ignore_modes_distance) {
-            bot.modes.unpause('item_collecting');
-            bot.modes.unpause('hunting');
-            bot.modes.unpause('torch_placing');
-        }
-
-        if (distance_from_player <= nearby_distance) {
-            clearInterval(doorCheckInterval);
-            doorCheckInterval = null;
-            bot.modes.pause('elbow_room');
-        }
-        else {
-            if (!doorCheckInterval) {
-            doorCheckInterval = navigationPolicy() || operationContext()?.nativeNavigationNoEdits
-                ? null : startDoorInterval(bot);
-            }
-            bot.modes.unpause('elbow_room');
-        }
-    }
-    return true;
-    } catch (error) {
+    const move = routeMovements(bot);
+    const run = async hazardWatch => {
+        const followGoal = new pf.goals.GoalFollow(player, distance);
+        const owner = operationContext() ?? getActionContext(bot);
+        await awaitNavigationLanding(bot);
+        await escapeHazard(bot, move, followGoal);
         if (isActionCancelled(bot, owner)) return false;
-        return failSkill(bot, error.navigation?.code ?? 'runtime_error', error.message, { navigation: error.navigation });
-    } finally {
-        hazardWatch.close();
-        owner?.signal?.removeEventListener('abort', stopFollowing);
-        stopFollowing();
-        clearInterval(doorCheckInterval);
-    }
-    });
+        let doorCheckInterval = navigationPolicy() || operationContext()?.nativeNavigationNoEdits
+            ? null : startDoorInterval(bot);
+
+        hazardWatch.setGoal(followGoal);
+        log(bot, `You are now actively following player ${username}.`);
+
+        try {
+        while (!isActionCancelled(bot, owner)) {
+            await new Promise(resolve => setTimeout(resolve, 250));
+            await hazardWatch.resume();
+            if (isActionCancelled(bot, owner)) break;
+            // in cheat mode, if the distance is too far, teleport to the player
+            const distance_from_player = bot.entity.position.distanceTo(player.position);
+
+            const teleport_distance = 100;
+            const ignore_modes_distance = 30;
+            const nearby_distance = distance + 2;
+
+            if (distance_from_player > teleport_distance && bot.modes.isOn('cheat')) {
+                // teleport with cheat mode
+                await goToPlayer(bot, username);
+            }
+            else if (distance_from_player > ignore_modes_distance) {
+                // these modes slow down the bot, and we want to catch up
+                bot.modes.pause('item_collecting');
+                bot.modes.pause('hunting');
+                bot.modes.pause('torch_placing');
+            }
+            else if (distance_from_player <= ignore_modes_distance) {
+                bot.modes.unpause('item_collecting');
+                bot.modes.unpause('hunting');
+                bot.modes.unpause('torch_placing');
+            }
+
+            if (distance_from_player <= nearby_distance) {
+                clearInterval(doorCheckInterval);
+                doorCheckInterval = null;
+                bot.modes.pause('elbow_room');
+            }
+            else {
+                if (!doorCheckInterval) {
+                doorCheckInterval = navigationPolicy() || operationContext()?.nativeNavigationNoEdits
+                    ? null : startDoorInterval(bot);
+                }
+                bot.modes.unpause('elbow_room');
+            }
+        }
+        return failSkill(bot, 'cancelled', 'Following was cancelled.', { status: 'cancelled' });
+        } catch (error) {
+            if (isActionCancelled(bot, owner)) return failSkill(bot, 'cancelled', 'Following was cancelled.', { status: 'cancelled' });
+            return failSkill(bot, error.navigation?.code ?? 'runtime_error', error.message, { navigation: error.navigation });
+        } finally {
+            clearInterval(doorCheckInterval);
+        }
+    };
+    return navigate(bot, null, { movementOverride: move, continuous: { run } });
 }
 
 
@@ -4765,10 +4335,10 @@ export async function moveAway(bot, distance) {
     const pos = bot.entity.position;
     let goal = new pf.goals.GoalNear(pos.x, pos.y, pos.z, distance);
     let inverted_goal = new pf.goals.GoalInvert(goal);
-    bot.pathfinder.setMovements(navigationMovements(bot));
+    bot.pathfinder.setMovements(routeMovements(bot));
 
     if (bot.modes.isOn('cheat')) {
-        const move = navigationMovements(bot);
+        const move = routeMovements(bot);
         const path = await bot.pathfinder.getPathTo(move, inverted_goal, 10000);
         let last_move = path.path[path.path.length-1];
         if (last_move) {
@@ -4810,67 +4380,65 @@ export async function avoidEnemies(bot, distance=16) {
      * await skills.avoidEnemies(bot, 8);
      **/
     bot.modes.pause('self_preservation'); // prevents damage-on-low-health from interrupting the bot
-    return trackNavigationSegment(bot, async () => {
-    const movement = navigationMovements(bot);
+    const movement = routeMovements(bot);
     movement.canDig = false;
     movement.allow1by1towers = false;
-    let key = null;
-    let pathFailure = null;
-    let bestClearance = -Infinity;
-    let progressAt = Date.now();
-    let deadline = Date.now() + 30_000;
-    const hazardWatch = watchDynamicNavigation(bot, movement);
-    const onPath = result => {
-        if (['noPath', 'timeout'].includes(result?.status)) pathFailure = result.status;
-    };
-    bot.on('path_update', onPath);
-    try {
-        while (!bot.interrupt_code) {
-            const beforeRecovery = Date.now();
-            if (await hazardWatch.resume()) {
-                pathFailure = null;
-                progressAt = Date.now();
-                deadline += progressAt - beforeRecovery;
+    const run = async hazardWatch => {
+        const owner = operationContext() ?? getActionContext(bot);
+        let key = null;
+        let pathFailure = null;
+        let bestClearance = -Infinity;
+        let progressAt = Date.now();
+        let deadline = Date.now() + 30_000;
+        const onPath = result => {
+            if (['noPath', 'timeout'].includes(result?.status)) pathFailure = result.status;
+        };
+        bot.on('path_update', onPath);
+        try {
+            while (!isActionCancelled(bot, owner)) {
+                const beforeRecovery = Date.now();
+                if (await hazardWatch.resume()) {
+                    pathFailure = null;
+                    progressAt = Date.now();
+                    deadline += progressAt - beforeRecovery;
+                }
+                if (isActionCancelled(bot, owner)) return false;
+                const enemies = await world.getNearbyThreats(bot, distance);
+                if (isActionCancelled(bot, owner)) return false;
+                if (!enemies.length) {
+                    log(bot, `No threatening enemies remain within ${distance} blocks.`);
+                    return true;
+                }
+                const clearance = Math.min(...enemies.map(enemy => bot.entity.position.distanceTo(enemy.position)));
+                if (clearance > bestClearance + 0.5) {
+                    bestClearance = clearance;
+                    progressAt = Date.now();
+                }
+                if (pathFailure || Date.now() >= deadline || Date.now() - progressAt >= 5_000) {
+                    return failSkill(bot, 'retreat_stopped', `Retreat stopped: ${pathFailure ?? (Date.now() >= deadline ? 'time limit' : 'no distance progress')}.`);
+                }
+                const nextKey = enemies.map(enemy => `${enemy.id}:${Math.floor(enemy.position.x)},${Math.floor(enemy.position.y)},${Math.floor(enemy.position.z)}`).sort().join(';');
+                if (nextKey !== key) {
+                    const goal = allRetreatGoals(enemies.map(enemy => {
+                        const p = enemy.position;
+                        return new pf.goals.GoalInvert(new pf.goals.GoalNear(p.x, p.y, p.z, distance + 1));
+                    }));
+                    if (key === null) await escapeHazard(bot, movement, goal);
+                    if (isActionCancelled(bot, owner)) return false;
+                    hazardWatch.setGoal(goal);
+                    key = nextKey;
+                }
+                await new Promise(resolve => setTimeout(resolve, 250));
             }
-            if (bot.interrupt_code) return false;
-            const enemies = await world.getNearbyThreats(bot, distance);
-            if (bot.interrupt_code) return false;
-            if (!enemies.length) {
-                log(bot, `No threatening enemies remain within ${distance} blocks.`);
-                return true;
-            }
-            const clearance = Math.min(...enemies.map(enemy => bot.entity.position.distanceTo(enemy.position)));
-            if (clearance > bestClearance + 0.5) {
-                bestClearance = clearance;
-                progressAt = Date.now();
-            }
-            if (pathFailure || Date.now() >= deadline || Date.now() - progressAt >= 5_000) {
-                return failSkill(bot, 'retreat_stopped', `Retreat stopped: ${pathFailure ?? (Date.now() >= deadline ? 'time limit' : 'no distance progress')}.`);
-            }
-            const nextKey = enemies.map(enemy => `${enemy.id}:${Math.floor(enemy.position.x)},${Math.floor(enemy.position.y)},${Math.floor(enemy.position.z)}`).sort().join(';');
-            if (nextKey !== key) {
-                const goal = allRetreatGoals(enemies.map(enemy => {
-                    const p = enemy.position;
-                    return new pf.goals.GoalInvert(new pf.goals.GoalNear(p.x, p.y, p.z, distance + 1));
-                }));
-                if (key === null) await escapeHazard(bot, movement, goal);
-                if (bot.interrupt_code) return false;
-                bot.pathfinder.setMovements(movement);
-                bot.pathfinder.setGoal(goal, true);
-                key = nextKey;
-            }
-            await new Promise(resolve => setTimeout(resolve, 250));
+            return false;
+        } catch (error) {
+            if (isActionCancelled(bot, owner)) return false;
+            return failSkill(bot, error.navigation?.code ?? 'runtime_error', error.message, { navigation: error.navigation });
+        } finally {
+            bot.removeListener('path_update', onPath);
         }
-        return false;
-    } catch (error) {
-        if (bot.interrupt_code) return false;
-        return failSkill(bot, error.navigation?.code ?? 'runtime_error', error.message, { navigation: error.navigation });
-    } finally {
-        hazardWatch.close();
-        bot.removeListener('path_update', onPath);
-        bot.pathfinder.setGoal(null);
-    }
-    });
+    };
+    return navigate(bot, null, { movementOverride: movement, continuous: { run } });
 }
 
 export async function stay(bot, seconds=30) {
@@ -5169,7 +4737,7 @@ export async function tillAndSow(bot, x, y, z, seedType=null) {
     // if distance is too far, move to the block
     if (bot.entity.position.distanceTo(block.position) > 4.5) {
         let pos = block.position;
-        bot.pathfinder.setMovements(navigationMovements(bot));
+        bot.pathfinder.setMovements(routeMovements(bot));
         await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
     }
     if (block.name !== 'farmland') {
@@ -5225,7 +4793,7 @@ export async function activateNearestBlock(bot, type, position=null) {
             block = bot.blockAt(pos);
             if (!block || block.name !== type) return failSkill(bot, 'target_changed', `The requested ${type} changed during approach.`, { position });
         } else {
-            bot.pathfinder.setMovements(navigationMovements(bot));
+            bot.pathfinder.setMovements(routeMovements(bot));
             await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
         }
     }
@@ -6599,7 +6167,6 @@ receiveFromPlayer = trackSkill("skills.receiveFromPlayer", receiveFromPlayer);
 goToGoal = trackSkill("skills.goToGoal", goToGoal);
 goToPosition = trackSkill("skills.goToPosition", goToPosition);
 reachPosition = trackSkill("skills.reachPosition", reachPosition);
-reachPositionWithScaffoldCleanup = trackSkill("skills.reachPositionWithScaffoldCleanup", reachPositionWithScaffoldCleanup);
 goToNearestBlock = trackSkill("skills.goToNearestBlock", goToNearestBlock);
 goToNearestEntity = trackSkill("skills.goToNearestEntity", goToNearestEntity);
 goToPlayer = trackSkill("skills.goToPlayer", goToPlayer);

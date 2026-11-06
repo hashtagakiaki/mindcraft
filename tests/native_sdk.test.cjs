@@ -153,8 +153,8 @@ async function main() {
   assert.deepEqual(await sdk.skills.exploreUntilBlock({ blockTypes: ['bell'] }), [botA, { blockTypes: ['bell'], searchRadius: 64, stepDistance: 32, timeoutMs: 300000 }])
   invalid(sdk.skills.exploreUntilBlock, [{}], 'blockTypes')
   invalid(sdk.skills.followPlayer, [{ playerName: 'Steve', preserveEnvironment: false }], 'preserveEnvironment')
-  assert.deepEqual(sdk.skills.goToPosition({ position: input.position }), [botA, {
-    position: input.position, arrivalMode: 'block', allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false, cleanupOwnedScaffolds: false,
+  assert.deepEqual(await sdk.skills.goToPosition({ position: input.position }), [botA, {
+    position: input.position, arrivalMode: 'block', allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'], safeWater: false,
   }])
   invalid(sdk.skills.goToPosition, [{ position: input.position, minDistance: 2 }], 'minDistance')
   invalid(sdk.skills.goToPosition, [{ position: input.position, allowDig: false }], 'allowDig')

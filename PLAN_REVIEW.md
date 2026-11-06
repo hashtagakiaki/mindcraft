@@ -2,7 +2,7 @@
 
 レビュー日: 2026-11-06（JST）
 
-- 対象: [PLAN.md](PLAN.md)「移動処理の再設計」
+- 対象: `PLAN.md`「移動処理の再設計」
 - 照合した実装: `autonomy` / `00f1fe60e9221b6f1a9e69cd8aacb831b11db624`
 - 対象PLANのSHA-256: `bce20fa160db15255472137f4003e3da487d2579492b53bcb6ab71387c23edaa`
 

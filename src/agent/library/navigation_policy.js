@@ -1,23 +1,49 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { beginOwnedWait, finishOwnedWait, markOwnedWaitProgress, operationContext, registerOwnedPromise } from './operation_context.js';
+import { beginOwnedWait, finishOwnedWait, markOwnedWaitProgress, operationContext, recordConfirmation, registerOwnedPromise } from './operation_context.js';
 
 const policyStorage = new AsyncLocalStorage();
-let cleanupOwnedScaffolds = async () => [];
 const NAVIGATION_PLACEMENT_CONFIRM_TIMEOUT_MS = 2_000;
 const NAVIGATION_SCAFFOLD_CLEARANCE_TIMEOUT_MS = 5_000;
 export const NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT = 1.1;
 const pendingScaffoldPlacements = new WeakMap();
 const scaffoldPlacementTails = new WeakMap();
 const pendingNavigationEdits = new WeakMap();
+const navigationEditPromises = new WeakMap();
 const navigationScaffoldSettledCallbacks = new WeakMap();
+const unresolvedNavigationCells = new WeakMap();
+const activeNavigationObservations = new WeakMap();
+const navigationSnapshots = new WeakMap();
 
 export function navigationPolicy() { return policyStorage.getStore()?.policy ?? null; }
 export function navigationScaffoldsPlaced(bot) {
     const context = policyStorage.getStore();
-    return context?.bot === bot ? context.scaffolds.length : 0;
+    return context?.bot === bot ? context.confirmedScaffoldCount : 0;
 }
 export function navigationScaffoldPlacementPending(bot) {
-    return scaffoldPlacementTails.has(bot) || (pendingNavigationEdits.get(bot) ?? 0) > 0;
+    return (pendingNavigationEdits.get(bot) ?? 0) > 0;
+}
+
+export function navigationUnconfirmedAt(bot, position) {
+    return unresolvedNavigationCells.get(bot)?.has(positionKey(position)) ?? false;
+}
+
+export function isNavigationScaffoldUnconfirmed(error) {
+    return error?.name === 'NavigationScaffoldUnconfirmedError' && error?.code === 'scaffold_unconfirmed';
+}
+
+export function navigationEditSnapshot(bot) {
+    const context = policyStorage.getStore();
+    return immutableSnapshot(context?.bot === bot ? context : navigationSnapshots.get(bot));
+}
+
+function immutableSnapshot(context) {
+    if (!context) return Object.freeze({ edits: Object.freeze([]), scaffolds: Object.freeze([]),
+        unconfirmedScaffolds: Object.freeze([]), unresolvedScaffolds: Object.freeze([]), arrivals: Object.freeze([]) });
+    const clone = values => Object.freeze((values ?? []).map(value => Object.freeze(structuredClone(value))));
+    return Object.freeze({ edits: clone(context.edits), scaffolds: clone(context.scaffolds),
+        unconfirmedScaffolds: clone(context.unconfirmedScaffolds),
+        unresolvedScaffolds: clone(context.bot ? [...(unresolvedNavigationCells.get(context.bot)?.values() ?? [])] : []),
+        arrivals: clone(context.arrivals) });
 }
 
 export function beginNavigationEdit(bot) {
@@ -32,16 +58,14 @@ export function beginNavigationEdit(bot) {
     };
 }
 
-// Holds the pathfinder's movement loop while an owned route edit is unsettled, so
-// it neither replans nor starts another edit before the server confirms the last.
+// Holds the pathfinder's movement loop while an owned route edit is in flight.
+// Once an edit settles without confirmation, planning resumes around its unknown cell.
 export function navigationEditGatePlugin(bot) {
     bot.pathfinder.tickPaused = () => navigationScaffoldPlacementPending(bot);
-}
-
-export function registerNavigationCleanup(cleanup) {
-    const previous = cleanupOwnedScaffolds;
-    cleanupOwnedScaffolds = cleanup;
-    return previous;
+    bot.pathfinder.navigationUnconfirmedAt = position => navigationUnconfirmedAt(bot, position);
+    if (typeof bot.pathfinder.isWaterFilled !== 'function' && typeof bot.pathfinder.movements?.constructor?.isWaterFilled === 'function') {
+        bot.pathfinder.isWaterFilled = bot.pathfinder.movements.constructor.isWaterFilled;
+    }
 }
 
 export function registerNavigationScaffoldSettledCallback(bot, callback) {
@@ -60,7 +84,8 @@ export function registerNavigationScaffoldSettledCallback(bot, callback) {
 
 
 export async function placeAndConfirmNavigationScaffold(bot, position, blockName, action, prepare = null) {
-    const key = `${position.x},${position.y},${position.z}`;
+    ensureNavigationObservation(bot);
+    const key = positionKey(position);
     let pending = pendingScaffoldPlacements.get(bot);
     if (!pending) {
         pending = new Map();
@@ -82,17 +107,25 @@ export async function placeAndConfirmNavigationScaffold(bot, position, blockName
     const done = new Promise(resolve => { resolveDone = resolve; });
     const attempt = { confirmation, done };
     pending.set(key, attempt);
-    const previousPlacement = scaffoldPlacementTails.get(bot) ?? Promise.resolve(true);
+    const observations = activeNavigationObservations.get(bot);
+    const observation = { revision: 0 };
+    observations.set(key, observation);
+    const releaseGate = beginNavigationEdit(bot);
+    const previousPlacement = scaffoldPlacementTails.get(bot) ?? Promise.resolve();
     let releasePlacement;
     const currentPlacement = new Promise(resolve => { releasePlacement = resolve; });
     scaffoldPlacementTails.set(bot, currentPlacement);
     try {
-        // Pathfinder can replan while an earlier placement's optimistic block
-        // update is still in flight. Serialize all owned scaffold attempts for
-        // this bot, not just attempts targeting the same coordinate.
-        const previousConfirmed = await previousPlacement;
-        if (!previousConfirmed) throw placementNotAttempted('Navigation stopped after an unconfirmed scaffold placement.');
+        await previousPlacement;
         if (navigationCancelled(bot)) throw placementNotAttempted('Action cancelled before the next navigation edit.');
+        const currentTarget = bot.blockAt(position);
+        const targetWater = currentTarget && bot.pathfinder?.isWaterFilled?.(currentTarget) === true;
+        const replaceables = bot.pathfinder?.movements?.replaceables;
+        const targetReplaceable = currentTarget && (currentTarget.type === 0 || replaceables?.has?.(currentTarget.type) ||
+            currentTarget.boundingBox === 'empty' || targetWater);
+        if (!targetReplaceable) {
+            throw placementNotAttempted(`Scaffold target ${key} is no longer replaceable.`);
+        }
         // Turning can take longer than a jump. Finish it before checking body
         // clearance so the placement does not wait for aim while falling back
         // into the target block.
@@ -132,7 +165,14 @@ export async function placeAndConfirmNavigationScaffold(bot, position, blockName
         const confirmedBlock = first.kind === 'confirmation' ? first.block : await confirmation;
         if (!confirmedBlock) {
             const detail = actionOutcome?.error ? `: ${String(actionOutcome.error.message ?? actionOutcome.error)}` : '';
-            throw new Error(`Scaffold placement at ${key} was not server-confirmed before the deadline${detail}.`);
+            if (observation.revision === 0) {
+                const unconfirmedError = new NavigationScaffoldUnconfirmedError(position, blockName,
+                    `Scaffold placement at ${key} was not server-confirmed before the deadline${detail}.`);
+                markNavigationCellUnconfirmed(bot, position, blockName, unconfirmedError.message);
+                throw unconfirmedError;
+            }
+            throw new NavigationScaffoldUnconfirmedError(position, blockName,
+                `Scaffold placement at ${key} was not confirmed, but the target received an authoritative block update${detail}.`);
         }
         // The plugin may reject on an intermediate update even though the
         // later server block update proves that placement succeeded. Still wait
@@ -149,15 +189,50 @@ export async function placeAndConfirmNavigationScaffold(bot, position, blockName
         clearTimeout(timer);
         if (listener) bot.removeListener('blockUpdate', listener);
         if (pending.get(key) === attempt) pending.delete(key);
-        releasePlacement(confirmed);
+        if (observations.get(key) === observation) observations.delete(key);
+        releasePlacement();
         if (scaffoldPlacementTails.get(bot) === currentPlacement) scaffoldPlacementTails.delete(bot);
+        releaseGate();
         if (wait) finishOwnedWait(wait, { outcome: confirmed ? 'confirmed' : 'unconfirmed', endedAt: new Date().toISOString() });
     }
 }
 
+class NavigationScaffoldUnconfirmedError extends Error {
+    constructor(position, block, message) {
+        super(message);
+        this.name = 'NavigationScaffoldUnconfirmedError';
+        this.code = 'scaffold_unconfirmed';
+        this.position = point(position);
+        this.block = block;
+    }
+}
+
+function ensureNavigationObservation(bot) {
+    if (unresolvedNavigationCells.has(bot)) return;
+    const unresolved = new Map();
+    const observations = new Map();
+    unresolvedNavigationCells.set(bot, unresolved);
+    activeNavigationObservations.set(bot, observations);
+    bot.on('blockUpdate', (_oldBlock, newBlock) => {
+        if (!newBlock?.position) return;
+        const key = positionKey(newBlock.position);
+        const observation = observations.get(key);
+        if (observation) observation.revision++;
+        unresolved.delete(key);
+    });
+}
+
+function markNavigationCellUnconfirmed(bot, position, block, reason) {
+    ensureNavigationObservation(bot);
+    const entry = Object.freeze({ ...point(position), block, reason });
+    unresolvedNavigationCells.get(bot).set(positionKey(position), entry);
+}
+
 export async function awaitNavigationPlacementSettled(bot) {
-    const pending = scaffoldPlacementTails.get(bot);
-    if (pending && !await pending) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
+    const scaffoldPending = scaffoldPlacementTails.get(bot);
+    const pending = navigationEditPromises.get(bot);
+    if (scaffoldPending) await scaffoldPending;
+    while (pending?.size) await Promise.allSettled([...pending]);
 }
 
 function placementNotAttempted(message) {
@@ -215,7 +290,8 @@ export async function withEmergencyNavigation(bot, policy, body) {
 }
 
 export async function runWithNavigationPolicy(bot, policy, body) {
-    const context = { bot, policy, edits: [], scaffolds: [], unconfirmedScaffolds: [], arrivals: [], segment: null, active: true, goal: null };
+    const context = { bot, policy, edits: [], scaffolds: [], unconfirmedScaffolds: [], confirmedScaffoldCount: 0,
+        arrivals: [], segment: null, active: true, goal: null };
     const pathfinder = bot.pathfinder;
     const originalSetGoal = pathfinder?.setGoal;
     const ownedSetGoal = typeof originalSetGoal === 'function' ? function (goal, ...args) {
@@ -236,30 +312,17 @@ export async function runWithNavigationPolicy(bot, policy, body) {
         });
     }
     catch (error) { failure = error; }
-    let cleanupFailure = null;
-    if (policy.scaffold === 'temporary' && !navigationCancelled(bot) && result?.status !== 'cancelled') {
-        try { context.cleanupRequired = await cleanupOwnedScaffolds(bot, context); }
-        catch (error) {
-            cleanupFailure = String(error?.message ?? error);
-            context.cleanupRequired = inspectRemainingScaffolds(bot, context.scaffolds, `Cleanup failed: ${cleanupFailure}`);
-            if (!context.cleanupRequired.length) context.cleanupRequired.push({ reason: `Cleanup failed: ${cleanupFailure}` });
-        }
-    } else {
-        context.cleanupRequired = inspectRemainingScaffolds(bot, context.scaffolds,
-            policy.scaffold === 'temporary' ? 'Action cancelled before cleanup began.' : 'Scaffold policy allows this placement to remain.');
-    }
-    context.cleanupRequired.push(...context.unconfirmedScaffolds);
+    navigationSnapshots.set(bot, context);
     const cancelled = navigationCancelled(bot) || result?.status === 'cancelled';
     if (failure) throw failure;
     if (cancelled && result !== false && result?.status !== 'cancelled') throw new Error('Action was cancelled before the navigation policy settled.');
-    if (context.unconfirmedScaffolds.length) throw new Error('A route scaffold placement was not server-confirmed.');
-    if (cleanupFailure || policy.scaffold === 'temporary' && context.cleanupRequired.length) {
-        throw new Error(cleanupFailure ?? `Work settled, but ${context.cleanupRequired.length} temporary scaffold(s) remain.`);
-    }
     return result;
 }
 
 export function normalizeNavigationPolicy(value = {}) {
+    if (value.scaffold != null && !['forbid', 'leave'].includes(value.scaffold)) {
+        throw new TypeError(`Unsupported navigation scaffold policy: ${value.scaffold}`);
+    }
     return {
         allowDig: value.allowDig ?? false,
         scaffold: value.scaffold ?? 'forbid',
@@ -281,40 +344,55 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
     const originalPlace = bot.placeBlock;
     const originalEquip = bot.equip;
     const segment = context.segment = { workTargets: workTarget ? [workTarget] : [], pendingPlacements: new Set() };
+    const runInCapturedContext = AsyncLocalStorage.snapshot();
     const ownPlacement = (taskFactory, { gate = true } = {}) => {
         const releaseGate = gate ? beginNavigationEdit(bot) : () => {};
-        const task = Promise.resolve().then(taskFactory).finally(releaseGate);
+        const task = Promise.resolve().then(() => runInCapturedContext(taskFactory)).finally(releaseGate);
+        let pending = navigationEditPromises.get(bot);
+        if (!pending) navigationEditPromises.set(bot, pending = new Set());
+        pending.add(task);
         segment.pendingPlacements.add(task);
-        registerOwnedPromise(task);
-        task.then(() => segment.pendingPlacements.delete(task), () => segment.pendingPlacements.delete(task));
+        runInCapturedContext(() => registerOwnedPromise(task));
+        task.then(() => {
+            segment.pendingPlacements.delete(task);
+            pending.delete(task);
+        }, () => {
+            segment.pendingPlacements.delete(task);
+            pending.delete(task);
+        });
         return task;
     };
     const equip = function (...args) {
         return ownPlacement(async () => {
-            await awaitNavigationPlacementSettled(bot);
             if (!context.active) throw new Error('Navigation policy ended before the next edit.');
             if (navigationCancelled(bot)) throw new Error('Action cancelled before the next navigation edit.');
-            if (context.unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
-            return originalEquip.call(this, ...args);
+            const result = await originalEquip.call(this, ...args);
+            if (navigationCancelled(bot)) throw new Error('Action cancelled after equipping; no route placement was started.');
+            return result;
         });
     };
     const dig = function (block, ...args) {
         const workTargetDig = segment.workTargets.some(target => ['x', 'y', 'z'].every(axis => block.position[axis] === target[axis]));
         return ownPlacement(async () => {
-        await awaitNavigationPlacementSettled(bot);
         if (!context.active) throw new Error('Navigation policy ended before the next edit.');
         if (navigationCancelled(bot)) throw new Error('Action cancelled before the next navigation edit.');
-        if (context.unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
         if (workTargetDig) {
             return originalDig.call(this, block, ...args);
         }
         if ((context.emergencyPolicy ?? context.policy).allowDig !== true) throw new Error('Navigation policy forbids digging route blocks.');
-        const protectedArea = bot.navigationProtection?.areaAt(block.position);
-        if (protectedArea) throw new Error(`Protected area ${protectedArea.name} forbids digging route blocks.`);
+        const protection = bot.navigationProtection;
+        const protectedArea = protection?.areaAt?.(block.position);
+        if (protectedArea || protection?.contains?.(block.position) === true) {
+            throw new Error(`Protected area ${protectedArea?.name ?? 'unknown'} forbids digging route blocks.`);
+        }
         const result = await originalDig.call(this, block, ...args);
         const observed = bot.blockAt(block.position);
         if (!observed || observed.type !== 0) throw new Error('Route excavation was not server-confirmed.');
-        context.edits.push({ kind: 'dug', block: block.name, position: point(block.position) });
+        const edit = { kind: 'dug', block: block.name, position: point(block.position) };
+        context.scaffolds = context.scaffolds.filter(scaffold => positionKey(scaffold.position) !== positionKey(edit.position));
+        context.edits.push(edit);
+        recordConfirmation({ phase: 'navigation', quantity: 1, unit: 'block', target: { block: block.name, position: edit.position },
+            evidence: 'server-observed route block removal' });
         return result;
         }, { gate: !workTargetDig });
     };
@@ -322,14 +400,39 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
         return ownPlacement(async () => {
         if (!context.active) throw new Error('Navigation policy ended before the next edit.');
         if (navigationCancelled(bot)) throw new Error('Action cancelled before the next navigation edit.');
-        if (context.unconfirmedScaffolds.length) throw new Error('Navigation stopped after an unconfirmed scaffold placement.');
         const policy = context.emergencyPolicy ?? context.policy;
         if (policy.scaffold === 'forbid') throw new Error('Navigation policy forbids scaffolding.');
         const blockName = bot.heldItem?.name;
         if (!policy.scaffoldBlocks.includes(blockName)) throw new Error(`Navigation policy forbids scaffold block ${blockName ?? 'unknown'}.`);
         const target = reference.position.plus(face).floored();
-        const protectedArea = bot.navigationProtection?.areaAt(target);
-        if (protectedArea) throw new Error(`Protected area ${protectedArea.name} forbids scaffolding.`);
+        if (navigationUnconfirmedAt(bot, target)) {
+            const error = new NavigationScaffoldUnconfirmedError(target, blockName,
+                `Scaffold target ${positionKey(target)} remains unresolved from an earlier placement.`);
+            error.navigationPlacementAttempted = false;
+            throw error;
+        }
+        const protection = bot.navigationProtection;
+        const protectedArea = protection?.areaAt?.(target);
+        if (protectedArea || protection?.contains?.(target) === true) {
+            throw placementNotAttempted(`Protected area ${protectedArea?.name ?? 'unknown'} forbids scaffolding.`);
+        }
+        const observedTarget = bot.blockAt(target);
+        const targetName = observedTarget?.name;
+        if (!observedTarget || targetName === 'lava' || targetName === 'flowing_lava') {
+            throw placementNotAttempted('Navigation cannot place a scaffold into an unknown or lava-filled cell.');
+        }
+        if (bot.pathfinder?.isWaterFilled?.(observedTarget) === true) {
+            const feet = bot.entity.position.floored();
+            const bodyHeight = Number.isFinite(bot.entity.height) && bot.entity.height > 0 ? bot.entity.height : 1.8;
+            const headOffset = Math.max(1, Math.ceil(bodyHeight - 0.01) - 1);
+            const overlapsBody = target.x === feet.x && target.z === feet.z && target.y >= feet.y && target.y <= feet.y + headOffset;
+            const waterAllowed = context.emergencyPolicy != null || bot.pathfinder.movements?.allowWaterScaffold === true;
+            if (overlapsBody || !waterAllowed) {
+                throw placementNotAttempted(overlapsBody
+                    ? 'Navigation cannot place a scaffold into the bot body.'
+                    : 'Navigation scaffold policy does not allow placement into water.');
+            }
+        }
         let placement;
         try {
             placement = await placeAndConfirmNavigationScaffold(bot, target, blockName,
@@ -337,7 +440,6 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
                     try {
                         if (!context.active) throw placementNotAttempted('Navigation policy ended before the next edit.');
                         if (navigationCancelled(bot)) throw placementNotAttempted('Action cancelled before the next navigation edit.');
-                        if (context.unconfirmedScaffolds.length) throw placementNotAttempted('Navigation stopped after an unconfirmed scaffold placement.');
                         const freshReference = bot.blockAt(reference.position);
                         if (!freshReference || freshReference.type === 0) throw placementNotAttempted('Scaffold support block is no longer available.');
                         return originalPlace.call(this, freshReference, face, ...args);
@@ -348,16 +450,21 @@ export async function trackNavigationSegment(bot, body, { workTarget = null } = 
                 }, () => bot.lookAt(reference.position.offset(
                     0.5 + face.x * 0.5, 0.5 + face.y * 0.5, 0.5 + face.z * 0.5)));
         } catch (error) {
-            if (error.navigationPlacementAttempted !== false && !context.unconfirmedScaffolds.some(entry => ['x', 'y', 'z'].every(axis => entry[axis] === target[axis]))) {
+            if (isNavigationScaffoldUnconfirmed(error) && error.navigationPlacementAttempted !== false) {
                 context.unconfirmedScaffolds.push({ ...point(target), block: blockName,
-                    reason: 'Scaffold placement was attempted but not server-confirmed; target state is unknown.' });
+                    reason: 'Scaffold placement was attempted but server confirmation was not observed.' });
             }
             throw error;
         }
         const observed = placement.block;
         const position = point(target);
+        context.scaffolds = context.scaffolds.filter(scaffold => positionKey(scaffold.position) !== positionKey(position));
         context.scaffolds.push({ position, block: blockName, stateId: observed.stateId });
-        context.edits.push({ kind: 'scaffold_placed', block: blockName, position });
+        context.confirmedScaffoldCount++;
+        const edit = { kind: 'scaffold_placed', block: blockName, position };
+        context.edits.push(edit);
+        recordConfirmation({ phase: 'navigation', quantity: 1, unit: 'block', target: { block: blockName, position },
+            evidence: 'server-confirmed route scaffold placement' });
         for (const callback of navigationScaffoldSettledCallbacks.get(bot) ?? []) {
             if (context.active) await callback({ bot, context, scaffold: context.scaffolds.at(-1) });
         }
@@ -384,17 +491,7 @@ export function recordNavigationArrival(bot) {
 }
 
 function point(position) { return { x: position.x, y: position.y, z: position.z }; }
-function inspectRemainingScaffolds(bot, scaffolds, reason) {
-    const remaining = [];
-    for (const scaffold of scaffolds) {
-        const block = bot.blockAt(new bot.entity.position.constructor(scaffold.position.x, scaffold.position.y, scaffold.position.z));
-        if (block?.type === 0) continue;
-        remaining.push({ ...scaffold.position, block: scaffold.block,
-            reason: block?.name === scaffold.block && (scaffold.stateId == null || block.stateId === scaffold.stateId)
-                ? reason : 'Owned scaffold state changed or became unknown.' });
-    }
-    return remaining;
-}
+function positionKey(position) { return `${position.x},${position.y},${position.z}`; }
 function navigationCancelled(bot) {
     return !!bot.interrupt_code || !!operationContext()?.signal?.aborted || !!bot.getActionCancellationContext?.()?.signal?.aborted;
 }

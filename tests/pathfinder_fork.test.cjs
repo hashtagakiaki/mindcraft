@@ -179,6 +179,14 @@ async function testProtectedAreasForbidRouteEdits () {
     bot.navigationProtection.replace([area('minecraft:overworld')])
     assert.notEqual(route(bot).status, 'success', `${obstacle}: no route edits inside a protected area`)
   }
+
+  for (const unresolved of [{ x: 1, y: 63, z: 0 }, { x: 2, y: 63, z: 0 }]) {
+    const bot = corridor('gap')
+    bot.pathfinder.navigationUnconfirmedAt = position =>
+      position.x === unresolved.x && position.y === unresolved.y && position.z === unresolved.z
+    assert.notEqual(route(bot).status, 'success',
+      `an unresolved scaffold reference/target at ${unresolved.x},${unresolved.y},${unresolved.z} is excluded from A*`)
+  }
 }
 
 // Routes wade and swim at the surface but never plan a node whose head cell is
@@ -256,6 +264,14 @@ function testRoutesDoNotDive () {
   assert.notEqual(sideways.status, 'success', 'a submerged start does not travel further under water')
   assert.equal(route(world(steps), m => { m.allowSubmerged = true }, new goals.GoalBlock(-1, 64, 0)).status, 'success',
     'the sideways cell is reachable when diving is allowed')
+
+  const unresolved = corridor({ 64: 'air', 65: 'air' })
+  let cellUnconfirmed = true
+  unresolved.pathfinder.navigationUnconfirmedAt = position => cellUnconfirmed &&
+    position.x === 3 && position.y === 64 && position.z === 0
+  assert.notEqual(route(unresolved).status, 'success', 'an unresolved placement cell is treated as unknown during A* previews')
+  cellUnconfirmed = false
+  assert.equal(route(unresolved).status, 'success', 'an authoritative observation can make the same cell usable again')
 }
 
 async function main () {

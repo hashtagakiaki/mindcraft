@@ -57,11 +57,8 @@ function makeBot() {
   bot.pathfinder = {
     movements: null,
     setMovements(movements) { this.movements = movements },
-    getPathTo(_movements, goal) {
-      bot.lastGoal = goal
-      return { status: 'success' }
-    },
     async goto(goal) {
+      bot.lastGoal = goal
       assert.equal(this.movements.canDig, false)
       assert.equal(this.movements.canPlaceOn, false)
       assert.equal(this.movements.allow1by1towers, false)
