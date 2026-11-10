@@ -118,6 +118,28 @@ async function main() {
       agent.coder = new Coder(agent)
       return agent
     }
+    const script = path.join(root, 'evaluation.mjs')
+    await fs.writeFile(script, `export async function run(execute) {
+      const result = await execute('await Promise.resolve(); log(bot, "scripted operation");');
+      if (!result.success) throw new Error(result.message);
+      return 'Scripted fixture complete';
+    }`)
+    const originalSettings = { ...settings }
+    const scriptAgent = makeAgent('ScriptFixture')
+    try {
+      Object.assign(settings, { evaluation_script: script, host: '127.0.0.1', port: 25568 })
+      assert.throws(() => new CodexRuntime(scriptAgent), /fresh isolated Codex runtime/)
+      settings.port = 25569
+      const scriptRuntime = new CodexRuntime(scriptAgent)
+      scriptAgent.codexRuntime = scriptRuntime
+      await until(() => scriptAgent.coder.code_template && scriptAgent.coder.code_lint_template)
+      assert.equal(await scriptRuntime.run('operator', () => true, 'script-fixture'), true)
+      assert.equal(routed.pop(), 'Scripted fixture complete')
+      rows.length = 0
+    } finally {
+      for (const key of Object.keys(settings)) delete settings[key]
+      Object.assign(settings, originalSettings)
+    }
     const agent = makeAgent('NativeFixture')
     const nativeObservation = observedState(agent.bot, agent.getObservationScope())
     assert.equal(nativeObservation.observationScope.dimension, 'overworld')

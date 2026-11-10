@@ -128,6 +128,10 @@ Native decision instructions require comparing the entire request with observed 
 
 The Node20 `tests/targeted_sdk.test.cjs`, `tests/vision_sdk_validation.test.cjs` and `tests/codex_session.test.cjs` fixtures exercise the real Coder/SES/ActionManager boundary. They cover distinct targets, validation before side effects, unknown/occluded/unreachable targets, cancellation and close, compatibility, and diagnosis in a new task after a saved TypeError.
 
+### 隔離評価用の台本
+
+評価runnerは `agent_runtime: "codex-session"` の設定に、信頼済みES moduleの絶対パスを `evaluation_script` として渡せます。Minecraftの接続先は `127.0.0.1:25569` または `127.0.0.1:25570` に限り、Goalsとworldを指定した永続セッションには使えません。moduleの `run(execute, signal)` は通常と同じ操作経路で `await execute(code)` を呼び、終了メッセージを返します。module自体はrunnerと同じ権限で動くため、評価側が管理する台本だけを指定します。
+
 ### Fell one tree and clean up its pillars
 
 Use `skills.fellTree(bot)` for a complete single-tree job rather than collecting a requested number of logs:

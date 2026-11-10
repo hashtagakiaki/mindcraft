@@ -1,5 +1,7 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { randomUUID, createHash } from 'node:crypto';
+import { isAbsolute } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { CodexSession } from '../process/codex_session.js';
 import { createSdkDocumentation } from '../process/codex_sdk.js';
 import { getNativeSdkDocs } from './library/native_sdk.js';
@@ -42,6 +44,33 @@ export function validateCodexRuntime(profile) {
     }
     for (const key of ['max_operations', 'max_turns']) if (config[key] !== null && !Number.isInteger(config[key])) throw new Error(`Invalid codex_session.${key}`);
     return { model: selected.model, effort: selected.params?.reasoning_effort ?? 'medium', config };
+}
+
+function scriptedSessionFactory(scriptPath) {
+    if (typeof scriptPath !== 'string' || !isAbsolute(scriptPath)
+        || settings.host !== '127.0.0.1' || ![25569, 25570].includes(settings.port)
+        || settings.codex_session?.goals || settings.place_world_id) {
+        throw new Error('evaluation_script requires an absolute path and a fresh isolated Codex runtime on loopback 25569/25570');
+    }
+    return ({ execute }) => {
+        let run, signal;
+        return {
+            async open(taskSignal) {
+                signal = taskSignal;
+                ({ run } = await import(pathToFileURL(scriptPath).href));
+                if (typeof run !== 'function') throw new Error('evaluation_script must export run');
+            },
+            async runTurn() {
+                signal.throwIfAborted();
+                const message = await run(execute, signal);
+                if (typeof message !== 'string' || !message.trim()) {
+                    throw new Error('evaluation_script must return a terminal message');
+                }
+                return { messages: [message] };
+            },
+            async close() {},
+        };
+    };
 }
 
 // Kick reasons arrive as chat components; String() reduced them to "[object Object]".
@@ -111,7 +140,8 @@ export class CodexRuntime {
     constructor(agent, options = {}) {
         this.agent = agent;
         this.selection = validateCodexRuntime(agent.prompter.profile);
-        this.makeSession = options.makeSession ?? (opts => new CodexSession(opts));
+        this.makeSession = options.makeSession ?? (settings.evaluation_script === undefined
+            ? opts => new CodexSession(opts) : scriptedSessionFactory(settings.evaluation_script));
         this.traceFilePath = options.traceFilePath;
         const configuredDiagnostics = settings.diagnostics;
         if (configuredDiagnostics !== undefined && (configuredDiagnostics?.schema_version !== 1
