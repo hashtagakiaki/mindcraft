@@ -15,6 +15,10 @@ function trimPassedNodes (path, position) {
   for (let i = 0; i < path.length; i++) {
     const node = path[i]
     if (node.toBreak.length !== 0 || node.toPlace.length !== 0) break
+    // A node more than a block below the bot has not been passed: before a long
+    // drop, the next node beneath the bot is closer in 3D than the drop target
+    // beside it, and dropping the drop left the bot walking toward its own feet.
+    if (i > 0 && path[i - 1].y < position.y - 1) break
     const dist = position.distanceSquared(node)
     if (dist < minDistance) {
       minDistance = dist

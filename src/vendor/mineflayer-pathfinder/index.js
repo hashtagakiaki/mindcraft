@@ -188,10 +188,18 @@ function inject (bot) {
 
   bot.on('physicsTick', monitorMovement)
 
-  function postProcessPath (path) {
+  // Moves raw block coordinates to the standing position, up to the first node
+  // that still has edits. autonomy fork: monitorMovement calls this again once
+  // an edit node's edits are done, so that node and the plain moves after it
+  // are centered too (upstream left them at block corners for the rest of the
+  // path; a drop next to a broken leaf then aimed at the corner and the bot
+  // stayed on the neighboring leaf instead of falling).
+  function centerPlainNodes (path) {
     for (let i = 0; i < path.length; i++) {
       const curPoint = path[i]
       if (curPoint.toBreak.length > 0 || curPoint.toPlace.length > 0) break
+      if (curPoint.centered) continue
+      curPoint.centered = true
       const b = bot.blockAt(new Vec3(curPoint.x, curPoint.y, curPoint.z))
 
       // openned doors have small Collision box
@@ -221,6 +229,10 @@ function inject (bot) {
         curPoint.z = Math.floor(curPoint.z) + 0.5
       }
     }
+  }
+
+  function postProcessPath (path) {
+    centerPlainNodes(path)
 
     if (!bot.pathfinder.enablePathShortcut || stateMovements.exclusionAreasStep.length !== 0 || path.length === 0) return path
 
@@ -497,8 +509,13 @@ function inject (bot) {
     // Handle digging
     if (digging || nextPoint.toBreak.length > 0) {
       if (!digging && (bot.entity.onGround || bot.entity.isInWater)) {
-        digging = true
         const b = nextPoint.toBreak.shift()
+        // autonomy fork: a search that started before a dig finished can
+        // return that block in toBreak. It no longer blocks the move, so skip
+        // it instead of digging air (mining sync rejects that and the route
+        // failed while chasing a dropped item).
+        if (stateMovements.getBlock(new Vec3(b.x, b.y, b.z), 0, 0, 0).safe) return
+        digging = true
         const block = bot.blockAt(new Vec3(b.x, b.y, b.z), false)
         const eye = bot.entity.position.offset(0, bot.entity.eyeHeight ?? 1.62, 0)
         const submergedDig = bot.entity.isInWater || Movements.isWaterFilled(bot.blockAt(eye))
@@ -673,6 +690,7 @@ function inject (bot) {
       return
     }
 
+    if (!nextPoint.centered) centerPlainNodes(path)
     let dx = nextPoint.x - p.x
     let dy = nextPoint.y - p.y
     let dz = nextPoint.z - p.z

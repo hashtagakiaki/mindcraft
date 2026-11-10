@@ -31,6 +31,16 @@ function testTrimKeepsMoveBeforeEditNode () {
   const climb = [move(-144.5, 66, -109.5), move(-143.5, 67, -108.5), move(-142.5, 68, -107.5)]
   trimPassedNodes(climb, new Vec3(-144.69, 65.75, -108.53))
   assert.equal(climb[0].y, 66, 'a node above the bot is not passed')
+
+  // Benchmark seed 42 (2026-11-10): on a leaf canopy at y=82, the swim node 19 blocks
+  // below the bot was closer than the drop into the water beside it.
+  const drop = [move(-27.5, 62, 2.5), move(-28.5, 63, 2.5), move(-25.5, 63, 2.5)]
+  trimPassedNodes(drop, new Vec3(-28.55, 82, 2.5))
+  assert.equal(drop[0].x, -27.5, 'a drop target below the bot is not passed before the drop')
+
+  const landed = [move(-27.5, 62, 2.5), move(-28.5, 63, 2.5), move(-25.5, 63, 2.5)]
+  trimPassedNodes(landed, new Vec3(-27.6, 62.4, 2.5))
+  assert.equal(landed[0].x, -28.5, 'after landing, the passed drop target is dropped')
 }
 
 const { EventEmitter } = require('node:events')
