@@ -114,7 +114,12 @@ class Physics {
       state.yaw = Math.atan2(-dx, -dz)
 
       state.control.forward = true
-      state.control.jump = jump && tick >= jumpAfter
+      // autonomy fork: monitorMovement holds jump whenever the bot is in water;
+      // simulate the same. Upstream predicted a water exit without jumping, so a
+      // diagonal step out of water with one side walled was judged unreachable
+      // in the air after each hop, forward was released and the bot bobbed in
+      // the corner (2026-11-10, seed 42).
+      state.control.jump = (jump && tick >= jumpAfter) || state.isInWater
       state.control.sprint = sprint
     }
   }
