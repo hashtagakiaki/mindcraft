@@ -756,6 +756,13 @@ function inject (bot) {
     } else if (physics.canWalkJump(path)) {
       bot.setControlState('jump', true)
       bot.setControlState('sprint', false)
+    } else if (!bot.entity.onGround && dy > -1) {
+      // autonomy fork: airborne toward a node that is not below, keep walking.
+      // Upstream released forward whenever no simulation reached the node. A
+      // diagonal step out of water with one side walled made each water-exit hop
+      // too short to reach it, so forward dropped at every hop and the bot
+      // bobbed in the water corner without moving (2026-11-10, seed 42).
+      bot.setControlState('sprint', false)
     } else {
       bot.setControlState('forward', false)
       bot.setControlState('sprint', false)
