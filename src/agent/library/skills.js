@@ -188,6 +188,7 @@ const COLLECT_MAX_LINE_CLEARS = 8;
 const COLLECT_DROP_WAIT_MS = 1_000;
 const ITEM_PICKUP_WAIT_MS = 750;
 const SURFACE_SEARCH_RADIUS = 16;
+const SURFACE_WATER_PREVIEW_MS = 3000;
 const SURFACE_ARRIVAL_Y_TOLERANCE = 0.25;
 const SURFACE_SETTLE_TICKS = 2;
 const SURFACE_CONNECTED_STEP_HEIGHT = 1;
@@ -5281,6 +5282,24 @@ export async function goToSurface(bot) {
     requireActiveTarget(bot);
     const goal = new pf.goals.GoalCompositeAny(surfaceCandidates.map(candidate =>
         new pf.goals.GoalBlock(candidate.x, candidate.y, candidate.z)));
+    // From open water, a partial path toward an unreachable surface (the top of a floor overhead)
+    // led the bot under it and stalled for minutes (mindcraft-qa chest-search). In water, follow
+    // only a complete path; otherwise fail at once so the caller can swim or build its own way out.
+    if (bot.entity.isInWater && typeof bot.pathfinder.getPathFromTo === 'function') {
+        // getPathFromTo yields 'partial' after each tick of work; step it until the search settles.
+        const search = bot.pathfinder.getPathFromTo(movements, bot.entity.position, goal, { timeout: SURFACE_WATER_PREVIEW_MS });
+        let step = search.next();
+        while (!step.done && step.value.result.status === 'partial') {
+            await new Promise(resolve => setTimeout(resolve, 0));
+            requireActiveTarget(bot);
+            step = search.next();
+        }
+        const preview = step.done ? null : step.value.result;
+        if (preview?.status !== 'success') {
+            return failSkill(bot, 'route_not_found', `No complete path from the water to any of ${surfaceCandidates.length} surface candidates `
+                + `(search ${preview?.status ?? 'unknown'}); swim toward land or place blocks to climb out.`);
+        }
+    }
     let moved = false;
     let navigationFailure = null;
     try {

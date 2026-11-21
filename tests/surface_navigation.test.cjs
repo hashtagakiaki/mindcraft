@@ -132,6 +132,28 @@ async function main() {
     assert.notDeepEqual([Math.floor(bot.entity.position.x), bot.entity.position.y, Math.floor(bot.entity.position.z)], [0, 13, 0], 'a collision-free avoided block is not standing space')
     assert.notDeepEqual([Math.floor(bot.entity.position.x), bot.entity.position.y, Math.floor(bot.entity.position.z)], [1, 13, 0], 'unsafe vegetation is not standing space')
 
+    // In water, a search that settles without a complete path fails at once instead of
+    // following a partial path toward an unreachable surface (qa chest-search, 2026-11-21).
+    bot = makeBot()
+    bot.fillSurface()
+    bot.entity.isInWater = true
+    let previewSteps = 0
+    bot.pathfinder.getPathFromTo = function * () {
+      previewSteps++
+      yield { result: { status: 'partial', path: [] } }
+      yield { result: { status: 'noPath', path: [] } }
+    }
+    bot.pathfinder.goto = async () => { throw new Error('navigation must not start without a complete path') }
+    assert.equal(await runSurface(bot), false)
+    assert.equal(previewSteps, 1)
+    assert.match(bot.output, /No complete path from the water.*search noPath/, bot.output)
+
+    bot = makeBot()
+    bot.fillSurface()
+    bot.entity.isInWater = true
+    bot.pathfinder.getPathFromTo = function * () { yield { result: { status: 'success', path: [] } } }
+    assert.equal(await runSurface(bot), true, 'a complete path from the water is followed')
+
     // On a ledge above a ravine floor, the floor far below is not chosen as the surface.
     bot = makeBot()
     bot.fillSurface()
