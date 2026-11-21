@@ -123,9 +123,26 @@ function discoverDiagnosticsRoots(ownerRoot) {
     return [...new Set(roots)];
 }
 
-function ownerSegmentFiles(ownerRoot, pool) {
+// The owner walk visits every directory to depth 6 (run worlds, runtime exports, Codex homes)
+// and ran up to three times per append; with ~70 runs under one owner root, appends held the
+// quota lock almost continuously and evaluation reads timed out (mindcraft-qa, 2026-11-21).
+// Root lists are reused briefly; segment files are always read fresh, and the caller's own
+// root is always included so its run quota stays exact.
+const ROOT_DISCOVERY_TTL_MS = 10_000;
+const discoveredRoots = new Map();
+
+function ownerSegmentFiles(ownerRoot, pool, ownRoot = null) {
+    const key = path.resolve(ownerRoot);
+    const now = Date.now();
+    let cached = discoveredRoots.get(key);
+    if (!cached || now - cached.at >= ROOT_DISCOVERY_TTL_MS || now < cached.at) {
+        cached = { at: now, roots: discoverDiagnosticsRoots(key) };
+        discoveredRoots.set(key, cached);
+    }
+    const own = ownRoot && path.resolve(ownRoot);
+    const roots = own && !cached.roots.includes(own) ? [...cached.roots, own] : cached.roots;
     const files = [];
-    for (const root of discoverDiagnosticsRoots(ownerRoot)) files.push(...segmentFiles(path.join(root, pool)));
+    for (const root of roots) files.push(...segmentFiles(path.join(root, pool)));
     return files;
 }
 
@@ -148,8 +165,8 @@ function validClosedSegment(entry, pool) {
     } catch { return false; }
 }
 
-function reconcileStaleWriters(ownerRoot, pool, now) {
-    for (const entry of ownerSegmentFiles(ownerRoot, pool)) {
+function reconcileStaleWriters(ownerRoot, pool, now, ownRoot = null) {
+    for (const entry of ownerSegmentFiles(ownerRoot, pool, ownRoot)) {
         const meta = entry.meta;
         if (!meta || meta.closed !== false || !Number.isInteger(meta.pid) || typeof meta.processStartTicks !== 'string') continue;
         const liveTicks = processStartTicks(meta.pid);
@@ -390,7 +407,7 @@ export class DiagnosticWriter {
         const bytes = Buffer.byteLength(lines);
         const release = lock(this.ownerRoot);
         try {
-            reconcileStaleWriters(this.ownerRoot, this.pool, now);
+            reconcileStaleWriters(this.ownerRoot, this.pool, now, path.dirname(this.poolRoot));
             const files = segmentFiles(this.poolRoot);
             const rotate = !this.current || this.current.meta.versionId !== (this.identity.versionId ?? null)
                 || this.current.meta.bytes + bytes > this.segmentBytes
@@ -399,7 +416,7 @@ export class DiagnosticWriter {
             const currentManifestBytes = this.current ? statSync(this.current.manifest).size : 0;
             const releasedReservation = rotate && this.current
                 ? Math.max(0, this.current.meta.reservedBytes - this.current.meta.bytes - currentManifestBytes) : 0;
-            const ownerFiles = ownerSegmentFiles(this.ownerRoot, this.pool);
+            const ownerFiles = ownerSegmentFiles(this.ownerRoot, this.pool, path.dirname(this.poolRoot));
             const ranked = ownerFiles.filter(item => validClosedSegment(item, this.pool))
                 .map(item => ({ ...item, ...candidatePriority(item, this.retentionDays, now) }));
             const eligible = ranked.filter(item => item.eligible !== false)
@@ -407,7 +424,7 @@ export class DiagnosticWriter {
             const unknownVersionSegments = ranked.filter(item => item.eligible === false);
             const deletedSegments = [];
             const projected = () => {
-                const all = ownerSegmentFiles(this.ownerRoot, this.pool);
+                const all = ownerSegmentFiles(this.ownerRoot, this.pool, path.dirname(this.poolRoot));
                 const local = segmentFiles(this.poolRoot);
                 const usage = entries => entries.reduce((sum, item) => sum + item.bytes
                     + (item.meta?.closed === false ? Math.max(0, item.meta.reservedBytes - item.bytes) : 0), 0);
