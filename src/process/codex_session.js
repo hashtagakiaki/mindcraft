@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline';
 import { authorizeAndStart, getCodexEnvironment } from '../models/codex.js';
 
 const REQUEST_TIMEOUT_MS = 120000;
+const GOAL_BLOCKED_MIN_TURNS = 3;
 const BOT_SKILL_CATALOG_TOKEN_LIMIT = 1;
 const AUTO_COMPACT_TOKEN_LIMIT = 180000;
 const instructionsPath = new URL('./codex/AGENTS.md', import.meta.url);
@@ -204,6 +205,18 @@ export class CodexSession {
         } else if (message.method === 'thread/goal/updated' && message.params.threadId === this.threadId) {
             this.goal = message.params.goal;
             this.record('goal_updated', { goal: this.goal });
+            // Codex's update_goal allows `blocked` only after the same blocker held for three
+            // consecutive goal turns. The model set it on the first or second turn four times in
+            // mindcraft-qa runs (2026-11-21), ending tasks it could still progress. Turns are
+            // counted here exactly, so an early `blocked` is returned to active.
+            if (this.goalMode && this.goal?.status === 'blocked' && this.startedTurns < GOAL_BLOCKED_MIN_TURNS) {
+                const objective = this.goal.objective;
+                this.record('goal_block_rejected', { turns: this.startedTurns, required: GOAL_BLOCKED_MIN_TURNS });
+                this.goal = { ...this.goal, status: 'active' };
+                this.request('thread/goal/set', { threadId: this.threadId, objective, origin: 'user', status: 'active' })
+                    .then(response => { if (response?.goal) this.goal = response.goal; this.record('goal_reactivated', { goal: this.goal }); })
+                    .catch(error => this.fail(error));
+            }
         } else if (message.method === 'turn/started' && message.params.threadId === this.threadId && this.turn) {
             if (this.goalMode && this.startedTurns++ > 0) {
                 this.record('goal_continuation', { turnId: message.params.turn.id });

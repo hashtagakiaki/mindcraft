@@ -913,6 +913,32 @@ Agent.prototype.start = async function() {
     assert.equal(goalReplies.length, 1)
     assert.equal(goalEvents.filter(event => event.type === 'goal_continuation').length, 1)
     await goalSession.close()
+    // `blocked` before the third goal turn is returned to active (qa runs, 2026-11-21).
+    const blockedEvents = [], blockedSets = []
+    const blockedGoal = new CodexSession({ model: 'fixture', record: (type, detail) => blockedEvents.push({ type, detail }),
+      onContinuation: () => {} })
+    blockedGoal.threadId = 'blocked-thread'
+    blockedGoal.request = async (method, params) => {
+      if (method === 'thread/goal/set') { blockedSets.push(params.status); return { goal: { status: 'active', objective: params.objective } } }
+      assert.equal(method, 'turn/start')
+      queueMicrotask(async () => {
+        const notify = (method, params) => blockedGoal.receive({ method, params: { threadId: 'blocked-thread', ...params } })
+        await notify('turn/started', { turn: { id: 'b-1' } })
+        await notify('thread/goal/updated', { goal: { status: 'blocked', objective: 'logs = 4' } })
+        await notify('turn/completed', { turn: { id: 'b-1', status: 'completed' } })
+        assert.ok(blockedGoal.turn, 'an early blocked goal keeps the task running')
+        await notify('turn/started', { turn: { id: 'b-2' } })
+        await notify('thread/goal/updated', { goal: { status: 'complete', objective: 'logs = 4' } })
+        await notify('item/completed', { item: { type: 'agentMessage', text: '4個集めた', phase: 'final_answer' } })
+        await notify('turn/completed', { turn: { id: 'b-2', status: 'completed' } })
+      })
+      return {}
+    }
+    const blockedResult = await blockedGoal.runTurn('task', { goalObjective: 'logs = 4' })
+    assert.equal(blockedResult.goal.status, 'complete')
+    assert.deepEqual(blockedSets, ['active', 'active'], 'the goal is set active at start and again after the early block')
+    assert.equal(blockedEvents.filter(event => event.type === 'goal_block_rejected').length, 1)
+    await blockedGoal.close()
     // Completing a verified goal before the final message needs no automatic turn.
     const sameTurnEvents = []
     const sameTurnGoal = new CodexSession({ model: 'fixture',
