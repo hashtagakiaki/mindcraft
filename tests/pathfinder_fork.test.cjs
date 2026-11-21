@@ -313,8 +313,21 @@ function testLookAtBlockReachIsMeasuredFromTheEyes () {
   assert.equal(goal.isEnd(new Vec3(787, 79, -123)), false, 'a block four below the feet is out of reach of the eyes')
 }
 
+function testFullStopDoesNotRecenterOverAir () {
+  // obstacle-recovery qa runs (2026-11-21): sneaking mid-bridge at x=825.07, a path reset's
+  // fullStop moved the bot to x=825.5 over the ravine three times.
+  const { recenterTarget } = pathfinderFork('./lib/recenter')
+  const solid = new Set(['824,68,-123'])
+  const blockAt = p => ({ boundingBox: solid.has(`${p.x},${p.y},${p.z}`) ? 'block' : 'empty' })
+  assert.equal(recenterTarget(blockAt, new Vec3(825.07, 69, -122.5), true), null, 'no recentring onto an unsupported column')
+  assert.deepEqual(recenterTarget(blockAt, new Vec3(825.07, 69, -122.5), false), { x: 825.5, z: -122.5 }, 'airborne recentring is unchanged')
+  solid.add('825,68,-123')
+  assert.deepEqual(recenterTarget(blockAt, new Vec3(825.07, 69, -122.5), true), { x: 825.5, z: -122.5 }, 'a supported column is recentred')
+}
+
 async function main () {
   testTrimKeepsMoveBeforeEditNode()
+  testFullStopDoesNotRecenterOverAir()
   testLookAtBlockReachIsMeasuredFromTheEyes()
   testRoutesDoNotDive()
   await testGotoContract()

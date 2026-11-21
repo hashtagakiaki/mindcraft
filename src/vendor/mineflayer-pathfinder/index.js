@@ -10,6 +10,7 @@ const Vec3 = require('vec3').Vec3
 
 const Physics = require('./lib/physics')
 const { trimPassedNodes } = require('./lib/trim')
+const { recenterTarget } = require('./lib/recenter')
 const { holdClimbableDrift } = require('./lib/climbable')
 const nbt = require('prismarine-nbt')
 const interactableBlocks = require('./lib/interactable.json')
@@ -354,13 +355,12 @@ function inject (bot) {
     bot.entity.velocity.x = 0
     bot.entity.velocity.z = 0
 
-    const blockX = Math.floor(bot.entity.position.x) + 0.5
-    const blockZ = Math.floor(bot.entity.position.z) + 0.5
-
     // Make sure our bounding box don't collide with neighboring blocks
-    // otherwise recenter the position
-    if (Math.abs(bot.entity.position.x - blockX) > 0.2) { bot.entity.position.x = blockX }
-    if (Math.abs(bot.entity.position.z - blockZ) > 0.2) { bot.entity.position.z = blockZ }
+    // otherwise recenter the position (never onto a column without support).
+    const center = recenterTarget(position => bot.blockAt(position), bot.entity.position, bot.entity.onGround)
+    if (!center) return
+    if (Math.abs(bot.entity.position.x - center.x) > 0.2) { bot.entity.position.x = center.x }
+    if (Math.abs(bot.entity.position.z - center.z) > 0.2) { bot.entity.position.z = center.z }
   }
 
   function moveToEdge (refBlock, edge) {
