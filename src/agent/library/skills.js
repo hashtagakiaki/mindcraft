@@ -2887,6 +2887,8 @@ async function runStaticNavigation(bot, goal, movementOverride, positionRoute) {
     const ownedMovements = new Set([movements]);
     const attempts = new Map();
     const unconfirmed = new Map();
+    let hazardBest = null;
+    let hazardRepeats = 0;
     const recover = async hazard => {
         const kind = observedHazard(bot);
         const before = kind && hazardEvidence(bot, kind);
@@ -2959,6 +2961,14 @@ async function runStaticNavigation(bot, goal, movementOverride, positionRoute) {
             } catch (error) {
                 active();
                 if (error.name === 'NavigationHazardError') {
+                    // A route into a submerged target re-enters the hazard after every egress; without
+                    // getting closer this looped until the 180 s budget (mindcraft-qa, 46 interruptions).
+                    const distance = goal.heuristic(navigationGoalPosition(bot));
+                    if (hazardBest == null || distance <= hazardBest - 1) { hazardBest = distance; hazardRepeats = 0; }
+                    else if (++hazardRepeats >= REACH_POSITION_NO_PROGRESS_LIMIT) {
+                        throw navigationFailure('no_progress', `The route kept entering ${error.navigation?.hazard?.kind ?? 'a hazard'} without getting closer to the goal.`,
+                            { ...error.navigation, hazardInterruptions: hazardRepeats + 1 });
+                    }
                     await recover(error);
                     continue;
                 }
