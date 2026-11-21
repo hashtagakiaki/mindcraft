@@ -164,6 +164,13 @@ export function getNearestBlocks(bot, block_types=null, distance=8, count=10000)
     else {
         if (!Array.isArray(block_types))
             block_types = [block_types];
+        // An unknown name would match nothing and read as "none nearby", so it fails instead.
+        const unknown = block_types.filter(name => !Number.isInteger(mc.getBlockId(name)));
+        if (unknown.length) {
+            const namespaced = unknown.some(name => typeof name === 'string' && name.includes(':'));
+            throw new TypeError(`world.getNearestBlocks: unknown block types ${unknown.join(', ')}`
+                + (namespaced ? '; use registry names without a namespace, e.g. "oak_fence".' : '.'));
+        }
         for(let block_type of block_types) {
             block_ids.push(mc.getBlockId(block_type));
         }
