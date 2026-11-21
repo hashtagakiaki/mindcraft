@@ -246,6 +246,17 @@ function testRoutesDoNotDive () {
   }
   const flooded = { 64: 'water', 65: 'water' }
 
+  // Parkour across a 3-wide gap: allowed over a shallow pit, not over a ravine (qa obstacle-recovery, 2026-11-21).
+  const gap = depth => {
+    const blocks = new Map()
+    for (const x of [0, 1, 5, 6]) blocks.set(key({ x, y: 63, z: 0 }), 'stone')
+    if (depth != null) for (let x = 2; x <= 4; x++) blocks.set(key({ x, y: 63 - depth, z: 0 }), 'stone')
+    return world(blocks)
+  }
+  const jump = movements => Object.assign(movements, { allowParkour: true, allowSprinting: true, scafoldingBlocks: [] })
+  assert.equal(route(gap(2), jump, new goals.GoalBlock(6, 64, 0)).status, 'success', 'a gap with footing two blocks down can be jumped')
+  assert.notEqual(route(gap(null), jump, new goals.GoalBlock(6, 64, 0)).status, 'success', 'a bottomless gap is not jumped')
+
   assert.notEqual(route(corridor(flooded)).status, 'success', 'the default movements plan no route through a flooded tunnel')
   assert.equal(route(corridor(flooded), m => { m.allowSubmerged = true }).status, 'success', 'allowSubmerged=true still dives')
   const around = route(corridor(flooded, { detour: true }))

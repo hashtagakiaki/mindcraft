@@ -720,6 +720,15 @@ class Movements {
   }
 
   // Jump up, down or forward over a 1 block gap
+  deepParkourGap (node, dx, dz) {
+    if (this.getBlock(node, dx, -1, dz).physical) return false
+    for (let dy = -2; dy >= -1 - this.maxDropDown; dy--) {
+      const block = this.getBlock(node, dx, dy, dz)
+      if (block.physical || block.liquid) return false
+    }
+    return true
+  }
+
   getMoveParkourForward (node, dir, neighbors) {
     const block0 = this.getBlock(node, 0, -1, 0)
     const block1 = this.getBlock(node, dir.x, -1, dir.z)
@@ -742,6 +751,9 @@ class Movements {
     const maxD = this.allowSprinting ? 4 : 2
 
     for (let d = 2; d <= maxD; d++) {
+      // A missed jump falls into the gap. Do not jump a gap with no footing within maxDropDown
+      // (qa obstacle-recovery, 2026-11-21: a 4-block jump across a ravine fell from y=69 to y=0).
+      if (this.deepParkourGap(node, dir.x * (d - 1), dir.z * (d - 1))) return
       const dx = dir.x * d
       const dz = dir.z * d
       const blockA = this.getBlock(node, dx, 2, dz)

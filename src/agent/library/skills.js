@@ -3013,10 +3013,15 @@ async function runNavigationSegment(bot, goal, final_movements, { explicit = tru
     // A route edit renews the stall clock only at a block not edited before in
     // this call; pathfinder can place and dig the same block indefinitely.
     const editedPositions = new Set();
+    // Set by a repeated edit: pending edits stop pausing the stall clock until real progress.
+    let repeatedEditSinceProgress = false;
     const firstEditAt = position => {
         if (!position || ![position.x, position.y, position.z].every(Number.isFinite)) return false;
         const key = `${Math.floor(position.x)},${Math.floor(position.y)},${Math.floor(position.z)}`;
-        if (editedPositions.has(key)) return false;
+        if (editedPositions.has(key)) {
+            repeatedEditSinceProgress = true;
+            return false;
+        }
         editedPositions.add(key);
         return true;
     };
@@ -3174,20 +3179,24 @@ async function runNavigationSegment(bot, goal, final_movements, { explicit = tru
             // A dig owns its own finite ground/look/break deadlines; restart the
             // stall clock when it ends instead of cutting a slow, normal break.
             const miningDeadline = bot.miningSync?.activeDeadline();
-            // Pending edits pause the stall clock instead of restarting it: a place/dig loop on
-            // one cell keeps an edit pending most of the time and otherwise never stalls.
+            // Pending edits pause the stall clock instead of restarting it. Once an edit repeats a
+            // cell, they stop pausing it: a place/dig loop on one cell keeps an edit pending almost
+            // all the time (qa obstacle-recovery, 2026-11-21: 46 edits on two cells for 68 s).
             const tickAt = Date.now();
-            if (navigationScaffoldPlacementPending(bot) || miningDeadline != null && tickAt <= miningDeadline)
+            if (!repeatedEditSinceProgress && (navigationScaffoldPlacementPending(bot)
+                || miningDeadline != null && tickAt <= miningDeadline))
                 lastProgressAt = Math.min(tickAt, lastProgressAt + tickAt - lastStallTickAt);
             lastStallTickAt = tickAt;
             if (digProgressPending) {
                 digProgressPending = false;
+                repeatedEditSinceProgress = false;
                 lastProgressAt = Date.now();
                 earlyReplanArmed = true;
                 markOwnedWaitProgress(navigationWait);
             }
             if (currentGoalDistance <= bestGoalDistance - 0.5) {
                 bestGoalDistance = currentGoalDistance;
+                repeatedEditSinceProgress = false;
                 lastProgressAt = Date.now();
                 earlyReplanArmed = true;
                 // The action stall watchdog only sees owned-wait progress.

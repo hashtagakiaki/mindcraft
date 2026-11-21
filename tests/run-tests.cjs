@@ -479,6 +479,17 @@ async function testNavigation(root) {
   bot.pathfinder.setGoal = goal => { bot.pathfinder.goal = goal; rejectDig(new Error('stalled in edit loop')) }
   await assert.rejects(skills.goToGoal(bot, { heuristic: () => 10 }), error => error.navigation?.code === 'no_progress')
   assert.ok(Date.now() - loopStartedAt < 400, `an intermittent edit loop still stalls (${Date.now() - loopStartedAt}ms)`)
+  // Once an edit repeats a cell, pending edits no longer pause the clock, even when one is
+  // pending all the time (the loop inside reachPosition: 46 edits on two cells for 68 s).
+  bot = makeBot()
+  const repeatStartedAt = Date.now()
+  bot.miningSync = { activeDeadline: () => Date.now() + 5 }
+  bot.pathfinder.goto = goal => { bot.pathfinder.goal = goal; return new Promise((resolve, reject) => { rejectDig = reject }) }
+  bot.pathfinder.setGoal = goal => { bot.pathfinder.goal = goal; rejectDig(new Error('stalled in repeated edits')) }
+  const repeatTimer = setInterval(() => bot.emit('diggingCompleted', { position: { x: 300, y: 63, z: -240 } }), 5)
+  await assert.rejects(skills.goToGoal(bot, { heuristic: () => 10 }), error => error.navigation?.code === 'no_progress')
+  clearInterval(repeatTimer)
+  assert.ok(Date.now() - repeatStartedAt < 200, `repeated edits with a pending dig still stall (${Date.now() - repeatStartedAt}ms)`)
   // A dig whose deadline passed no longer holds the clock.
   bot = makeBot()
   stopCalls = 0
