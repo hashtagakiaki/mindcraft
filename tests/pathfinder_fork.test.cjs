@@ -313,8 +313,23 @@ function testLookAtBlockReachIsMeasuredFromTheEyes () {
   assert.equal(goal.isEnd(new Vec3(787, 79, -123)), false, 'a block four below the feet is out of reach of the eyes')
 }
 
+function testSearchStartsFromTheSupportingColumn () {
+  // obstacle-recovery qa run (2026-11-21): sneaking mid-bridge at x=825.14 over air, a replan
+  // started from column 825 and centred the bot there, dropping it into the ravine.
+  const { standingColumn } = pathfinderFork('./lib/start')
+  const solid = new Set(['824,67,-110'])
+  const blockAt = p => ({ boundingBox: solid.has(`${p.x},${p.y},${p.z}`) ? 'block' : 'empty' })
+  const overhang = standingColumn(blockAt, new Vec3(825.14, 68, -109.42), true)
+  assert.deepEqual([overhang.x, overhang.y, overhang.z], [824, 68, -110], 'the column holding the bot up is the start')
+  const falling = standingColumn(blockAt, new Vec3(825.14, 68, -109.42), false)
+  assert.equal(falling.x, 825, 'a bot in the air keeps its floored column')
+  solid.add('825,67,-110')
+  assert.equal(standingColumn(blockAt, new Vec3(825.14, 68, -109.42), true).x, 825, 'a supported floored column is kept')
+}
+
 async function main () {
   testTrimKeepsMoveBeforeEditNode()
+  testSearchStartsFromTheSupportingColumn()
   testLookAtBlockReachIsMeasuredFromTheEyes()
   testRoutesDoNotDive()
   await testGotoContract()

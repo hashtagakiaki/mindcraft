@@ -212,6 +212,7 @@ pathfinderは `src/vendor/mineflayer-pathfinder/` のfork（mineflayer-pathfinde
 - 経路上の装備・採掘・設置の失敗を握りつぶさず `path_edit_error` を出し、`goto` は元のエラーで失敗する。装備失敗で装備ロックと設置中状態が残り続ける問題も解消した（旧 `navigateWithEditErrors`）。
 - `GoalLookAtBlock` の到達距離の事前判定を、目の位置からブロック中心までで行う（正確な到達は従来どおり目からのraycastで判定）。upstreamは足元とブロックの1.6上の点を比べていたため、頭上3ブロックの原木を届かないと判定し、`collectBlock` がその場で掘れる幹の上部に経路探索の時間切れを5回繰り返した（2026-11-21のmindcraft-qa、obstacle-recovery）。
 - parkourは、跳び越す隙間の下に `maxDropDown`（4ブロック）以内の足場も液体もなければ計画しない。upstreamは隙間の深さを見ないため、裂け目の上の4ブロックの跳躍に失敗してy69からy0まで落下死した（2026-11-21のmindcraft-qa、obstacle-recovery）。浅い穴の跳躍と、足場を置いて渡る経路は従来どおり。
+- 探索の開始マスは、接地中に足元の列の下が空気なら、当たり判定が実際に乗っている隣の列にする（`lib/start.js`）。upstreamは位置を切り捨てた列から探索するため、足場を置きながらしゃがんで縁から身を乗り出したbotの再探索が空中のマスから始まり、botをその列の中央へ動かして裂け目へ落とした（2026-11-21のmindcraft-qa、obstacle-recovery）。
 - `bot.pathfinder.tickPaused()` がtrueの間は移動ループを止める。navigation policyは所有する経路編集のサーバー確認待ちの間これを使う（旧 `bot.on` の差し替え）。
 - 次ノード到達予測用に `Physics` を公開する。
 - 既定のMovementsは、頭のマスが水で満たされたノード（水・海草・昆布・気泡柱・waterloggedのブロック。判定は `Movements.isWaterFilled`）を計画しない（`allowSubmerged=false`）。足だけの渡渉と水面の泳ぎは計画し、水没したノードからは上へ向かう移動だけを残す。`allowSubmerged=true` にするのは危険脱出と水生mobとの戦闘だけ。2026-11-06のBot3溺死（`collectBlock` が天井まで水で満たされた横穴を経路に選んだ）の対策。
