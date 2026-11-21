@@ -2921,8 +2921,18 @@ async function runStaticNavigation(bot, goal, movementOverride, positionRoute) {
                         const targetBlocker = reachPositionTargetBlocker(bot, positionRoute.target, movements.canDig);
                         const code = hasUnconfirmedNavigationCell(bot, unconfirmed) ? 'no_progress' : targetBlocker?.code ??
                             (['partial', 'timeout'].includes(path.status) ? 'search_limit' : 'route_not_found');
-                        throw navigationFailure(code, `Path search ended ${path.status} without a safe next segment.`,
-                            { ...search, phase: targetBlocker ? 'target' : 'search', targetBlocker });
+                        // An allowed scaffold with none in inventory is a cause the caller can fix by gathering.
+                        // movements lists only carried scaffolds, so read the allowed names from the policy.
+                        const editPolicy = navigationPolicy();
+                        const scaffoldNames = editPolicy ? (editPolicy.scaffold === 'forbid' ? [] : [...(editPolicy.scaffoldBlocks ?? [])])
+                            : positionRoute.policy?.allowScaffold ? [...(positionRoute.policy.scaffoldBlocks ?? [])] : [];
+                        const scaffoldCount = bot.inventory.items().filter(item => scaffoldNames.includes(item.name))
+                            .reduce((total, item) => total + item.count, 0);
+                        const noScaffold = scaffoldNames.length > 0 && scaffoldCount === 0;
+                        throw navigationFailure(code, `Path search ended ${path.status} without a safe next segment.`
+                            + (noScaffold ? ` No scaffold blocks (${scaffoldNames.join('/')}) are in inventory, so the search could not pillar or bridge.` : ''),
+                            { ...search, phase: targetBlocker ? 'target' : 'search', targetBlocker,
+                                scaffold: { allowed: scaffoldNames, inInventory: scaffoldCount } });
                     }
                     const node = typeof end.hash === 'string' ? end.hash.split(',').map(Number) : [];
                     if (node.length !== 3 || !node.every(Number.isSafeInteger)) {

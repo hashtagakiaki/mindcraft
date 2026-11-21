@@ -338,6 +338,8 @@ async function main() {
       })
       // Digging searches have no cost cap, so the search may also end on its time limit.
       assert.ok(['route_not_found', 'search_limit'].includes(unbreakable.code), JSON.stringify(unbreakable))
+      // With scaffolding allowed but none carried, the cause names the missing blocks (qa chest-search, 2026-11-21).
+      assert.match(unbreakable.reason, /No scaffold blocks \(dirt\/cobblestone\) are in inventory/, unbreakable.reason)
       assert.deepEqual(unbreakableRoute.testState.edits, [])
 
       // Use the installed pathfinder plugin here so its default postProcessPath
