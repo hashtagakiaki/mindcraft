@@ -2942,7 +2942,7 @@ async function runStaticNavigation(bot, goal, movementOverride, positionRoute) {
                             .reduce((total, item) => total + item.count, 0);
                         const noScaffold = scaffoldNames.length > 0 && scaffoldCount === 0;
                         throw navigationFailure(code, `Path search ended ${path.status} without a safe next segment.`
-                            + (noScaffold ? ` No scaffold blocks (${scaffoldNames.join('/')}) are in inventory, so the search could not pillar or bridge.` : ''),
+                            + (noScaffold ? ` No scaffold blocks (${scaffoldNames.join('/')}) are in inventory, so the search could not pillar or bridge; collect some first, for example with collectBlock({blockType:"dirt"}).` : ''),
                             { ...search, phase: targetBlocker ? 'target' : 'search', targetBlocker,
                                 scaffold: { allowed: scaffoldNames, inInventory: scaffoldCount } });
                     }
@@ -6073,7 +6073,7 @@ export async function fellTree(bot, options = {}) {
     try {
         const requiredHeight = Math.max(...tree.logs.map(p => p.y)) - tree.root.y;
         const available = TREE_SCAFFOLD_ITEMS.reduce((sum, name) => sum + inventoryItemCount(bot, name), 0);
-        if (requiredHeight > 4 && available < requiredHeight) throw new Error(`Bring at least ${requiredHeight} dirt/cobblestone blocks for this tree (have ${available}).`);
+        if (requiredHeight > 4 && available < requiredHeight) throw new Error(`Bring at least ${requiredHeight} dirt/cobblestone blocks for this tree (have ${available}); collect them first, for example with collectBlock({blockType:"dirt"}).`);
         if (bot.inventory.emptySlotCount() < 2) throw new Error('Need two free inventory slots for logs and recovered materials.');
         await harvestReachable();
         await approachInitialWork();
