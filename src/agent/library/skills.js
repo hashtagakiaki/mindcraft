@@ -5258,6 +5258,12 @@ export async function goToSurface(bot) {
         return failSkill(bot, 'target_not_found', `No connected loaded surface candidate found within ${SURFACE_SEARCH_RADIUS} blocks.`);
     }
 
+    // Standing on a cliff edge, the floor of a ravine below is also a sky-exposed surface, and the
+    // default movements treat any drop into water as safe: the bot jumped 65 blocks into a ravine it
+    // could not climb out of (mindcraft-qa obstacle-recovery). Prefer surfaces not far below the feet.
+    const feetY = Math.floor(position.y);
+    const notBelow = surfaceCandidates.filter(candidate => candidate.y >= feetY - REACH_POSITION_MAX_SAFE_FEET_DROP);
+    if (notBelow.length) surfaceCandidates.splice(0, surfaceCandidates.length, ...notBelow);
     surfaceCandidates.sort((a, b) =>
         Math.hypot(a.x + 0.5 - position.x, a.y - position.y, a.z + 0.5 - position.z) -
         Math.hypot(b.x + 0.5 - position.x, b.y - position.y, b.z + 0.5 - position.z));

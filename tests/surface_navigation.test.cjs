@@ -132,6 +132,15 @@ async function main() {
     assert.notDeepEqual([Math.floor(bot.entity.position.x), bot.entity.position.y, Math.floor(bot.entity.position.z)], [0, 13, 0], 'a collision-free avoided block is not standing space')
     assert.notDeepEqual([Math.floor(bot.entity.position.x), bot.entity.position.y, Math.floor(bot.entity.position.z)], [1, 13, 0], 'unsafe vegetation is not standing space')
 
+    // On a ledge above a ravine floor, the floor far below is not chosen as the surface.
+    bot = makeBot()
+    bot.fillSurface()
+    for (let x = 0; x <= 3; x++) for (let z = -1; z <= 1; z++) bot.put(x, 29, z, 'stone')
+    bot.entity.position = new Vec3(0.5, 30, 0.5)
+    assert.equal(await runSurface(bot), true)
+    assert.equal(bot.lastGoal.goals.some(candidate => candidate.y < 27), false, 'ravine-floor candidates far below are excluded')
+    assert.equal(bot.entity.position.y, 30, 'the bot stays on the ledge surface')
+
     bot = makeBot()
     bot.fillSurface()
     bot.interrupt_code = true
