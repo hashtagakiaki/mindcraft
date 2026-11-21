@@ -3111,6 +3111,7 @@ async function runNavigationSegment(bot, goal, final_movements, { explicit = tru
         bestGoalDistance = goal.heuristic(navigationGoalPosition(bot));
         seenRouteSegments.add(positionKey(bot.entity.position.floored()));
         lastProgressAt = Date.now();
+        let lastStallTickAt = lastProgressAt;
         bot.on?.('path_update', onPathUpdate);
         bot.on?.('path_reset', onPathReset);
         if (goal.observedEscape) bot.on?.('physicsTick', onEscapeTick);
@@ -3173,7 +3174,12 @@ async function runNavigationSegment(bot, goal, final_movements, { explicit = tru
             // A dig owns its own finite ground/look/break deadlines; restart the
             // stall clock when it ends instead of cutting a slow, normal break.
             const miningDeadline = bot.miningSync?.activeDeadline();
-            if (navigationScaffoldPlacementPending(bot) || miningDeadline != null && Date.now() <= miningDeadline) lastProgressAt = Date.now();
+            // Pending edits pause the stall clock instead of restarting it: a place/dig loop on
+            // one cell keeps an edit pending most of the time and otherwise never stalls.
+            const tickAt = Date.now();
+            if (navigationScaffoldPlacementPending(bot) || miningDeadline != null && tickAt <= miningDeadline)
+                lastProgressAt = Math.min(tickAt, lastProgressAt + tickAt - lastStallTickAt);
+            lastStallTickAt = tickAt;
             if (digProgressPending) {
                 digProgressPending = false;
                 lastProgressAt = Date.now();

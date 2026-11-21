@@ -470,6 +470,15 @@ async function testNavigation(root) {
   await assert.rejects(skills.goToGoal(bot, { heuristic: () => 10 }), error => error.name === 'NavigationStallTimeoutError' && error.navigation.code === 'no_progress')
   assert.ok(Date.now() - digStartedAt >= 75, 'a slow normal dig is not cut by the movement stall clock')
   assert.equal(stopCalls, 1)
+  // Edits that keep one block pending most of the time only pause the clock (qa obstacle-recovery,
+  // 2026-11-21: placing and digging one pillar cell ran until the 180 s navigation budget).
+  bot = makeBot()
+  const loopStartedAt = Date.now()
+  bot.miningSync = { activeDeadline: () => (Date.now() - loopStartedAt) % 10 < 6 ? Date.now() + 5 : null }
+  bot.pathfinder.goto = goal => { bot.pathfinder.goal = goal; return new Promise((resolve, reject) => { rejectDig = reject }) }
+  bot.pathfinder.setGoal = goal => { bot.pathfinder.goal = goal; rejectDig(new Error('stalled in edit loop')) }
+  await assert.rejects(skills.goToGoal(bot, { heuristic: () => 10 }), error => error.navigation?.code === 'no_progress')
+  assert.ok(Date.now() - loopStartedAt < 400, `an intermittent edit loop still stalls (${Date.now() - loopStartedAt}ms)`)
   // A dig whose deadline passed no longer holds the clock.
   bot = makeBot()
   stopCalls = 0
