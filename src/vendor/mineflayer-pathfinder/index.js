@@ -10,7 +10,6 @@ const Vec3 = require('vec3').Vec3
 
 const Physics = require('./lib/physics')
 const { trimPassedNodes } = require('./lib/trim')
-const { standingColumn } = require('./lib/start')
 const { holdClimbableDrift } = require('./lib/climbable')
 const nbt = require('prismarine-nbt')
 const interactableBlocks = require('./lib/interactable.json')
@@ -93,7 +92,7 @@ function inject (bot) {
     if (options.startMove) {
       start = options.startMove
     } else {
-      const p = standingColumn(position => bot.blockAt(position), startPos, bot.entity.onGround)
+      const p = startPos.floored()
       const dy = startPos.y - p.y
       const b = bot.blockAt(p) // The block we are standing in
       // Offset the floored bot position by one if we are standing on a block that has not the full height but is solid
