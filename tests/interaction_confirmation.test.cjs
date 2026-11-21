@@ -198,6 +198,24 @@ async function main() {
   assert.equal(await skills.useDoor(unreachableDoor, doorPos), false, 'door navigation failure prevents crossing')
   assert.equal(unreachableDoor.controlStates, undefined)
 
+  // A gate closed on a mob standing in its cell names that mob (qa sheep-pen, 2026-11-21).
+  {
+    const gateBlock = makeBlock('oak_fence_gate', doorPos, { open: true })
+    const gateBot = makeBot({ block: gateBlock, blockStates: [[doorPos, gateBlock]] })
+    gateBot.entities = {
+      1: gateBot.entity,
+      2: { name: 'sheep', position: { x: 2.5, y: 0, z: -0.1 }, width: 0.9, height: 1.3 },
+      3: { name: 'cow', position: { x: 6.5, y: 0, z: 0.5 }, width: 0.9, height: 1.4 },
+    }
+    assert.equal(await skills.activateNearestBlock(gateBot, 'oak_fence_gate', doorPos), true)
+    assert.match(gateBot.output, /Entities overlapping the oak_fence_gate cell: sheep at x:2\.5, z:-0\.1/, gateBot.output)
+    assert.doesNotMatch(gateBot.output, /cow/, 'an entity away from the gate is not listed')
+    const emptyGate = makeBot({ block: gateBlock, blockStates: [[doorPos, gateBlock]] })
+    emptyGate.entities = { 1: emptyGate.entity }
+    assert.equal(await skills.activateNearestBlock(emptyGate, 'oak_fence_gate', doorPos), true)
+    assert.doesNotMatch(emptyGate.output, /Entities overlapping/, 'an empty gateway reports nothing')
+  }
+
   for (const name of ['oak_door', 'oak_fence_gate', 'bamboo_fence_gate', 'warped_fence_gate']) {
     let state = makeBlock(name, doorPos, { open: false })
     let activations = 0
