@@ -1514,7 +1514,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                 // The block is already broken; a drop that cannot be reached must not end the collection.
                 try {
                     await collectionTracker.waitForDrop(COLLECT_DROP_WAIT_MS);
-                    await pickupNearbyItems(bot);
+                    await pickupNearbyItems(bot, movements);
                 }
                 catch (err) {
                     log(bot, `Could not pick up nearby items: ${err}.`);
@@ -1555,7 +1555,7 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
     return finish(collected > 0);
 }
 
-export async function pickupNearbyItems(bot) {
+export async function pickupNearbyItems(bot, movements = null) {
     /**
      * Pick up all nearby items.
      * @param {MinecraftBot} bot, reference to the minecraft bot.
@@ -1573,7 +1573,8 @@ export async function pickupNearbyItems(bot) {
         // a partial block (farmland, slab) shares that block's cell; standing on
         // top is within range 1, while range 0 would dig the block out.
         const itemCellBlocked = bot.blockAt(nearestItem.position)?.boundingBox === 'block';
-        await goToGoal(bot, new pf.goals.GoalFollow(nearestItem, itemCellBlocked ? 1 : 0));
+        // collectBlock passes its movements so pickups do not scaffold with the collected item either.
+        await goToGoal(bot, new pf.goals.GoalFollow(nearestItem, itemCellBlocked ? 1 : 0), movements);
         let prev = nearestItem;
         // A fresh drop cannot be picked up for its first 10 ticks.
         const pickupDeadline = Date.now() + ITEM_PICKUP_WAIT_MS;
