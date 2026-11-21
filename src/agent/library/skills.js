@@ -1387,6 +1387,15 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
 
     const movements = routeMovements(bot);
     movements.dontMineUnderFallingBlock = false;
+    // Scaffolding with the collected item spends what the call is collecting: collecting stone,
+    // the route placed a cobblestone, so three confirmed pickups left only +2 (mindcraft-qa, 2026-11-21).
+    const collectedDropIds = new Set(blocktypes.flatMap(name => bot.registry?.blocksByName?.[name]?.drops ?? [])
+        .map(drop => typeof drop === 'number' ? drop : typeof drop?.drop === 'number' ? drop.drop : drop?.drop?.id)
+        .filter(id => Number.isInteger(id) && id > 0));
+    if (Array.isArray(movements.scafoldingBlocks) && movements.scafoldingBlocks.some(id => collectedDropIds.has(id))) {
+        movements.scafoldingBlocks = movements.scafoldingBlocks.filter(id => !collectedDropIds.has(id));
+        if (!movements.scafoldingBlocks.length) Object.assign(movements, { canPlaceOn: false, allow1by1towers: false });
+    }
     // A released liquid is recoverable; excluding the target would report it as not found.
     movements.dontCreateFlow = false;
 
