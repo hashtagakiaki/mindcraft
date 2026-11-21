@@ -284,8 +284,27 @@ function testRoutesDoNotDive () {
   assert.equal(route(unresolved).status, 'success', 'an authoritative observation can make the same cell usable again')
 }
 
+function testLookAtBlockReachIsMeasuredFromTheEyes () {
+  // obstacle-recovery qa run (2026-11-21): standing under the trunk at y=72, the log at y=75
+  // was rejected before its ray was cast, so collectBlock path-searched until timeout 5 times.
+  const { goals } = pathfinderFork('./index.js')
+  const target = new Vec3(787, 75, -123)
+  const world = { raycast: (from, direction, range) => {
+    for (let t = 0; t <= range; t += 0.05) {
+      const point = from.plus(direction.scaled(t)).floored()
+      if (point.equals(target)) return { position: point, face: 0 }
+    }
+    return null
+  } }
+  const goal = new goals.GoalLookAtBlock(target, world)
+  assert.equal(goal.isEnd(new Vec3(787, 72, -123)), true, 'a block three above the feet is within reach of the eyes')
+  assert.equal(goal.isEnd(new Vec3(787, 66, -123)), false, 'a block nine above the feet is out of reach')
+  assert.equal(goal.isEnd(new Vec3(787, 79, -123)), false, 'a block four below the feet is out of reach of the eyes')
+}
+
 async function main () {
   testTrimKeepsMoveBeforeEditNode()
+  testLookAtBlockReachIsMeasuredFromTheEyes()
   testRoutesDoNotDive()
   await testGotoContract()
   await testProtectedAreasForbidRouteEdits()

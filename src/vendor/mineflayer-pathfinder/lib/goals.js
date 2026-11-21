@@ -172,7 +172,13 @@ class GoalLookAtBlock extends Goal {
   }
 
   isEnd (node) {
-    if (node.distanceTo(this.pos.offset(0, this.entityHeight, 0)) > this.reach) return false
+    // Prefilter from the eyes to the block centre; the raycast below enforces the exact reach.
+    // Upstream measured from the feet to a point entityHeight above the block, so a log three
+    // blocks overhead looked out of reach and collectBlock searched for a path until timeout.
+    const ex = node.x + 0.5 - (this.pos.x + 0.5)
+    const ey = node.y + this.entityHeight - (this.pos.y + 0.5)
+    const ez = node.z + 0.5 - (this.pos.z + 0.5)
+    if (Math.sqrt(ex * ex + ey * ey + ez * ez) > this.reach + Math.sqrt(3) / 2) return false
     // Check faces that could be seen from the current position. If the delta is smaller then 0.5 that means the bot cam most likely not see the face as the block is 1 block thick
     // this could be false for blocks that have a smaller bounding box then 1x1x1
     const dx = node.x - (this.pos.x + 0.5)

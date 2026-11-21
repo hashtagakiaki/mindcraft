@@ -210,6 +210,7 @@ pathfinderは `src/vendor/mineflayer-pathfinder/` のfork（mineflayer-pathfinde
 - つた・はしご: 全探索で同じ高さのまま登れるブロックへ入る移動にコスト2を加え（A*で適用するので他pluginのMovementsにも効く）、実行中は登れるブロック内で次ノードが上にない場合にジャンプ入力を、0.5ブロックを超えて上にずれた場合は前進・ダッシュ入力も解除する。予定された登りは変えない（`lib/climbable.js`、旧 `climbable_navigation.js`）。
 - `goto` は観測した結果だけで終わる。noPath・timeout・goalを満たさない空経路・botの切断/死亡で失敗して自分のgoalを解除し、別goalのgoal_reachedや空のpartial経路では終わらない（`lib/goto.js`、旧mining_syncの契約）。
 - 経路上の装備・採掘・設置の失敗を握りつぶさず `path_edit_error` を出し、`goto` は元のエラーで失敗する。装備失敗で装備ロックと設置中状態が残り続ける問題も解消した（旧 `navigateWithEditErrors`）。
+- `GoalLookAtBlock` の到達距離の事前判定を、目の位置からブロック中心までで行う（正確な到達は従来どおり目からのraycastで判定）。upstreamは足元とブロックの1.6上の点を比べていたため、頭上3ブロックの原木を届かないと判定し、`collectBlock` がその場で掘れる幹の上部に経路探索の時間切れを5回繰り返した（2026-11-21のmindcraft-qa、obstacle-recovery）。
 - `bot.pathfinder.tickPaused()` がtrueの間は移動ループを止める。navigation policyは所有する経路編集のサーバー確認待ちの間これを使う（旧 `bot.on` の差し替え）。
 - 次ノード到達予測用に `Physics` を公開する。
 - 既定のMovementsは、頭のマスが水で満たされたノード（水・海草・昆布・気泡柱・waterloggedのブロック。判定は `Movements.isWaterFilled`）を計画しない（`allowSubmerged=false`）。足だけの渡渉と水面の泳ぎは計画し、水没したノードからは上へ向かう移動だけを残す。`allowSubmerged=true` にするのは危険脱出と水生mobとの戦闘だけ。2026-11-06のBot3溺死（`collectBlock` が天井まで水で満たされた横穴を経路に選んだ）の対策。
