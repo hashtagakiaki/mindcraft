@@ -102,6 +102,10 @@ const modes_list = [
             const hazard = skills.observedHazard(bot);
             if (hazard === 'water') {
                 if (skills.ownsNavigationHazardRecovery(bot)) return;
+                // A bot bobbing at the surface under a low ceiling kept full air but re-triggered this
+                // every second, cancelling every action including goToSurface (mindcraft-qa chest-search,
+                // 2026-11-21: 170 s in water, 34 triggers). Act once air is actually falling.
+                if (!skills.losingAir(bot)) return;
                 execute(this, agent, () => skills.escapeHazard(bot), -1, modeDecision(this, bot, 'submerged'));
             }
             else if (this.fall_blocks.some(name => blockAbove.name.includes(name))) {
