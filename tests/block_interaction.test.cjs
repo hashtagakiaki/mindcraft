@@ -281,6 +281,7 @@ async function main() {
     for(const outcome of ['ready','unchanged','unloaded','changed']) {
       const bot=scene({feet:new Vec3(-8.5,64,.5),obstruction:false})
       bot.onGoto=()=>{
+        assert.equal(bot.pathfinder.movements.infiniteLiquidDropdownDistance,false,'an approach without edits takes no long drop into water')
         if(outcome==='unchanged') return
         bot.entity.position=new Vec3(.5,64,-2.5)
         if(outcome==='unloaded') bot.missing.add(key(target))

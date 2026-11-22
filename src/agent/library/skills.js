@@ -2343,6 +2343,8 @@ export async function approachBlock(bot, x, y, z) {
     movements.allow1by1towers = false;
     movements.allowFreeMotion = false;
     movements.scafoldingBlocks = [];
+    // Without digging or placing, a long drop into water has no way back up.
+    movements.infiniteLiquidDropdownDistance = false;
     const block = bot.blockAt(new Vec3(x, y, z).floored());
     const goal = makeBlockInteractionGoal(bot, block.position);
     let navigationError = null;
