@@ -1405,6 +1405,17 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
 
     // Targets that disappeared during the approach; they do not use up the count.
     const skipped = [...(exclude ?? [])];
+    // The nearest match can be the block under the feet. Digging it is ordinary unless nothing
+    // below is within the route drop height: collecting dirt on a one-block bridge fell 32 blocks.
+    const isFootingOverDrop = ({ x, y, z }) => {
+        const feet = bot.entity.position;
+        if (x !== Math.floor(feet.x) || y !== Math.floor(feet.y) - 1 || z !== Math.floor(feet.z)) return false;
+        for (let depth = 1; depth <= movements.maxDropDown; depth++) {
+            if (bot.blockAt(new Vec3(x, y - depth, z))?.boundingBox === 'block') return false;
+        }
+        return true;
+    };
+    let footing = null;
     const isCancelled = () => !!bot.interrupt_code || operationContext()?.signal?.aborted === true;
     while (collected + unconfirmed < num) {
         if (isCancelled()) {
@@ -1427,11 +1438,16 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                 return block.metadata === 0;
             }
             
+            if (isFootingOverDrop(block.position)) {
+                footing = block.position;
+                return false;
+            }
             return movements.safeToBreak(block) || unsafeBlocks.includes(block.name);
         }, 64, 1);
 
         if (blocks.length === 0) {
-            stop = { code: 'not_found', reason: `No ${collected === 0 ? '' : 'more '}${blockType} nearby to collect.` };
+            stop = { code: 'not_found', reason: `No ${collected === 0 ? '' : 'more '}${blockType} nearby to collect.`
+                + (footing ? ` The one at ${footing.x},${footing.y},${footing.z} was skipped because the bot stands on it over a drop; use breakBlockAt to break it anyway.` : '') };
             log(bot, stop.reason);
             break;
         }

@@ -502,6 +502,25 @@ async function main() {
     assert.deepEqual(scenario.followRanges, [0])
   }
 
+  // The block under the feet is an ordinary target unless it is the only support over a drop
+  // (mindcraft-qa regress-ravine-detour fell from y=71 to y=40).
+  for (const [floor, collects] of [[-5, true], [-6, false]]) {
+    const scenario = scenarioFor({ ...ore(), position: { x: 0, y: -1, z: 0, offset(dx, dy, dz) { return { x: dx, y: dy - 1, z: dz } } } },
+      async (_block, bot) => {
+        const drop = droppedItem(10, 0.5)
+        drop.position.y = -0.5
+        spawnAndPickup(bot, drop)
+        scenario.currentAir = true
+      })
+    const bot = createBot(scenario)
+    const blockAt = bot.blockAt
+    bot.blockAt = position => position.x === 0 && position.z === 0 && position.y < -1
+      ? { name: position.y <= floor ? 'stone' : 'air', boundingBox: position.y <= floor ? 'block' : 'empty', position }
+      : blockAt(position)
+    assert.equal(await collectBlock(bot, 'iron_ore'), collects, `footing with the floor at ${floor}\n${bot.output}`)
+    if (!collects) assert.match(bot.output, /stands on it over a drop/)
+  }
+
   console.log('mining integration tests passed')
 }
 

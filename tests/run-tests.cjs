@@ -149,7 +149,7 @@ export default function Vec3(x, y, z) {
       heuristic(p) { return Math.max(Math.abs(p.x-this.x),Math.abs(p.y-this.y),Math.abs(p.z-this.z))-this.range }
     }, GoalFollow: class { constructor(entity, range) { (globalThis.farmScenario.followRanges ??= []).push(range); Object.assign(this,{entity,rangeSq:range*range}) } }, GoalLookAtBlock: class { constructor(position, world) { Object.assign(this,{position,world}) }
       heuristic(p) { return Math.max(Math.abs(p.x-this.position.x),Math.abs(p.y-this.position.y),Math.abs(p.z-this.position.z)) }
-    } }, Movements: class { constructor() { this.blocksCantBreak=new Set() }
+    } }, Movements: class { constructor() { this.blocksCantBreak=new Set(); this.maxDropDown=4 }
       static isWaterFilled(block) { return block?.name === 'water' }
       safeToBreak() { return true }
     }
