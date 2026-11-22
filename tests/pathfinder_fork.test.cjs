@@ -323,6 +323,18 @@ function testFullStopDoesNotRecenterOverAir () {
   assert.deepEqual(recenterTarget(blockAt, new Vec3(825.07, 69, -122.5), false), { x: 825.5, z: -122.5 }, 'airborne recentring is unchanged')
   solid.add('825,68,-123')
   assert.deepEqual(recenterTarget(blockAt, new Vec3(825.07, 69, -122.5), true), { x: 825.5, z: -122.5 }, 'a supported column is recentred')
+
+  // The helper alone does not cover fullStop's use of it.
+  solid.delete('825,68,-123')
+  const bot = Object.assign(new EventEmitter(), {
+    registry: req('prismarine-registry')('1.21.1'), version: '1.21.1', game: { minY: -64, height: 384 },
+    entity: { position: new Vec3(825.07, 69, -122.5), velocity: new Vec3(0, 0, 0), onGround: true },
+    entities: {}, inventory: { items: () => [], slots: [] }, clearControlStates () {}, blockAt: position => blockAt(position.floored())
+  })
+  pathfinderFork().pathfinder(bot)
+  bot.pathfinder.stop()
+  bot.pathfinder.setGoal(null)
+  assert.equal(bot.entity.position.x, 825.07, 'fullStop leaves a grounded bot off the unsupported column')
 }
 
 async function testDeathEndsRouteDig () {

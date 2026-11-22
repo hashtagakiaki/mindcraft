@@ -521,6 +521,34 @@ async function main() {
     if (!collects) assert.match(bot.output, /stands on it over a drop/)
   }
 
+  // Neither the approach nor the drop pickup may scaffold with the collected item
+  // (mindcraft-qa tool-break-recovery: three confirmed pickups left +2 in inventory).
+  {
+    const scenario = scenarioFor(ore(), async (_block, bot) => {
+      spawnAndPickup(bot)
+      scenario.currentAir = true
+    })
+    scenario.scaffolds = [10, 99] // 10 is the ore's drop
+    scenario.items = [{ name: 'raw_iron', type: 10, count: 1, stackSize: 64 }, { name: 'dirt', type: 99, count: 1, stackSize: 64 }]
+    const bot = createBot(scenario)
+    bot.registry.blocksByName = { iron_ore: { id: 15, drops: [10] } }
+    bot.registry.items[99] = { name: 'dirt' }
+    Object.assign(bot.registry.itemsByName, { raw_iron: { id: 10 }, dirt: { id: 99 } })
+    let dropLeft = true
+    bot.nearestEntity = () => scenario.currentAir && dropLeft ? { name: 'item', position: { x: 1.5, y: 0, z: 0.5 } } : null
+    const routes = []
+    let active
+    bot.pathfinder.setMovements = movements => { active = movements }
+    bot.pathfinder.getPathTo = movements => ({ status: movements.scafoldingBlocks?.length ? 'success' : 'noPath' })
+    bot.pathfinder.goto = async () => {
+      routes.push({ stage: scenario.currentAir ? 'pickup' : 'approach', scaffolds: active.scafoldingBlocks })
+      if (scenario.currentAir) dropLeft = false
+    }
+    assert.equal(await collectBlock(bot, 'iron_ore'), true, bot.output)
+    assert.deepEqual(routes, [{ stage: 'approach', scaffolds: [99] }, { stage: 'pickup', scaffolds: [99] }],
+      `collection routes never scaffold with the collected item\n${bot.output}`)
+  }
+
   console.log('mining integration tests passed')
 }
 

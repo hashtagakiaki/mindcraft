@@ -282,6 +282,14 @@ async function main() {
     assert.deepEqual(cancelled.state.opened, ['8,64,0'])
     assert.deepEqual(cancelled.state.closed, ['8,64,0'], 'cancelled transfer still closes its opened window')
 
+    const unloaded = makeBot()
+    unloaded.state.missing.add('8,64,0')
+    const approach = unloaded.pathfinder.goto
+    unloaded.pathfinder.goto = async goal => { await approach.call(unloaded.pathfinder, goal); unloaded.entity.position = new Vec3(9.5, 64, 0.5); unloaded.state.missing.clear() }
+    assert.equal(await skills.putInChest(unloaded, 'oak_log', 1, { chestPosition: { x: 8, y: 64, z: 0 } }), true,
+      `an unloaded exact chest is approached before the transfer\n${unloaded.output}`)
+    assert.deepEqual(unloaded.state.opened, ['8,64,0'], 'the loaded exact chest is the one opened')
+
     for (const mode of ['unknown', 'not_chest', 'blocked', 'disappeared']) {
       const failed = makeBot()
       if (mode === 'unknown') failed.state.missing.add('8,64,0')
