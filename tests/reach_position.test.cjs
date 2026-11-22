@@ -1244,6 +1244,9 @@ async function main() {
       const shallowWater = makeBot({ corridor: true, hazards: [{ x: 2, y: 64, z: 0, name: 'water' }] })
       const waterCrossed = await reachPosition(shallowWater, { position: { x: 6.5, y: 64, z: 0.5 }, safeWater: true })
       assert.equal(waterCrossed.status, 'reached', JSON.stringify(waterCrossed))
+      const wadingStart = makeBot({ corridor: true, scaffoldInventory: {}, hazards: [0, 1, 2].map(x => ({ x, y: 64, z: 0, name: 'water' })) })
+      const wadedOut = await reachPosition(wadingStart, { position: { x: 6.5, y: 64, z: 0.5 }, allowDig: false, allowScaffold: false })
+      assert.equal(wadedOut.status, 'reached', `a route starting in one-deep water wades out: ${JSON.stringify(wadedOut)}`)
       const deepWater = makeBot({ corridor: true, hazards: [
         { x: 2, y: 64, z: 0, name: 'water' }, { x: 2, y: 63, z: 0, name: 'water' },
       ] })

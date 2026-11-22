@@ -4005,10 +4005,13 @@ export async function reachPosition(bot, options = {}) {
         const goal = reachPositionGoal(target, tolerance, arrivalMode);
         const arrived = () => arrivalMode === 'block'
             ? reachPositionBlockMatches(bot.entity.position, target) : bot.entity.position.distanceTo(target) <= tolerance;
-        const surfaceSwimming = isWaterFilled(bot.blockAt(bot.entity.position)) &&
+        const startsInWater = isWaterFilled(bot.blockAt(bot.entity.position));
+        const surfaceSwimming = startsInWater &&
             isWaterFilled(bot.blockAt(bot.entity.position.floored().offset(0, -1, 0)));
+        // Avoiding the water the bot already stands in leaves no first move: from one-deep water at a
+        // ravine bottom the search ended noPath at once, though the same dry pit was dug out of.
         const policy = { allowDig, allowScaffold, scaffoldBlocks: availableScaffolds(bot, scaffoldBlocks),
-            safeWater: safeWater || surfaceSwimming, surfaceSwimming };
+            safeWater: safeWater || startsInWater, surfaceSwimming };
         const owner = operationContext() ?? getActionContext(bot);
         const active = () => {
             if (isActionCancelled(bot, owner)) throw Object.assign(new Error('Navigation cancelled.'), { name: 'ReachCancelledError' });
