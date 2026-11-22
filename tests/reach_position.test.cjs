@@ -1313,10 +1313,18 @@ async function main() {
         { x: 0, y: 64, z: 0, name: 'water' }, { x: 0, y: 65, z: 0, name: 'water' },
       ]
       const roof = { x: 0, y: 66, z: 0, name: 'stone' }
-      const submerged = makeBot({ hazards: waterColumn, solidBlocks: [roof] })
+      const sideExit = makeBot({ hazards: waterColumn, solidBlocks: [roof] })
+      sideExit.entity.onGround = false
+      assert.equal(await skills.escapeHazard(sideExit), true)
+      assert.equal(sideExit.testState.edits.length, 0,
+        'an open exit beside a lidded column is taken instead of a bare-hand ceiling dig that drowns the bot')
+
+      const enclosure = [-1, 0, 1].flatMap(x => [-1, 0, 1].flatMap(z => x || z ?
+        [64, 65, 66].map(y => ({ x, y, z, name: 'bedrock' })) : []))
+      const submerged = makeBot({ hazards: waterColumn, solidBlocks: [roof], wall: enclosure })
       submerged.entity.onGround = false
       assert.equal(await skills.escapeHazard(submerged), true)
-      assert.match(submerged.output, /"mode":"water-column"/)
+      assert.match(submerged.output, /"mode":"local-search"/)
       assert.equal(submerged.blockAt(new Vec3(0, 66, 0)).name, 'air',
         'a submerged bare-hand dig costs more than 32 and still plans and confirms the ceiling edit')
       assert.equal(skills.isWaterFilled(skills.eyeLevelBlock(submerged)), false)
@@ -1326,9 +1334,7 @@ async function main() {
       assert.equal(openWater.testState.edits.length, 0)
       assert.match(openWater.output, /"mode":"water-column"/)
 
-      const protectedWater = makeBot({ hazards: waterColumn, solidBlocks: [roof],
-        wall: [-1, 0, 1].flatMap(x => [-1, 0, 1].flatMap(z => x || z ?
-          [64, 65, 66].map(y => ({ x, y, z, name: 'bedrock' })) : [])) })
+      const protectedWater = makeBot({ hazards: waterColumn, solidBlocks: [roof], wall: enclosure })
       protectedWater.navigationProtection = { contains: () => true }
       await assert.rejects(() => skills.escapeHazard(protectedWater),
         error => error.navigation?.code === 'route_not_found' && error.navigation.hazard.eyeBlock === 'water')

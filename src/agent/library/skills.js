@@ -3832,17 +3832,17 @@ function observedEscape(bot) {
     return safeEscapeCell(feet, eye, support) && bot.entity.onGround === true;
 }
 
-function openWaterColumn(bot, movements, start) {
+// Only a column that needs no digging is taken without comparing exits: confining the search to a
+// lidded column had the bot hand-digging stone until it drowned, beside an open shaft (mindcraft-qa
+// regress-underwater-exit). A lidded column competes on labor cost in the local search instead.
+function openWaterColumn(bot, start) {
     const eye = eyeLevelBlock(bot);
     if (!eye?.position || !isWaterFilled(eye)) return null;
-    let firstSolidY = null;
     for (let y = eye.position.y + 1; y <= start.y + NAVIGATION_RECOVERY_RADIUS; y++) {
         const block = bot.blockAt(new Vec3(start.x, y, start.z));
         if (!block || REACH_POSITION_CONTACT_EXIT_HAZARDS.has(block.name) || LAVA_NAMES.has(block.name)) return null;
         if (isWaterFilled(block) && block.boundingBox === 'empty') continue;
-        if (block.boundingBox === 'empty') return (firstSolidY ?? y) - Math.floor(bot.entity.eyeHeight ?? 1.62);
-        if (!movements.safeToBreak(block)) return null;
-        firstSolidY ??= y;
+        return block.boundingBox === 'empty' ? y - Math.floor(bot.entity.eyeHeight ?? 1.62) : null;
     }
     return null;
 }
@@ -3866,7 +3866,7 @@ function escapeMovements(bot, supplied, start, kind, scaffoldNames) {
     movements.navigationRecoveryKind = kind;
     const getNeighbors = movements.getNeighbors.bind(movements);
     const withinRadius = next => start.distanceSquared(next) <= NAVIGATION_RECOVERY_RADIUS ** 2;
-    const columnY = kind === 'water' ? openWaterColumn(bot, movements, start) : null;
+    const columnY = kind === 'water' ? openWaterColumn(bot, start) : null;
     movements.getNeighbors = node => {
         const neighbors = getNeighbors(node);
         if (columnY != null) return neighbors.filter(next =>
