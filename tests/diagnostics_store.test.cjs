@@ -214,6 +214,16 @@ os.close(fd)
       'independent runs share one owner reservation quota')
     runA.close()
     runB.close()
+
+    // Walking the whole owner root on every append held the quota lock (mindcraft-qa, 2026-11-21).
+    // A run directory without a manifest makes the walk throw, so it shows whether the walk is repeated.
+    const walkedRoot = path.join(root, 'owner-walk')
+    const walker = new DiagnosticWriter({ ...sharedOptions, ownerRoot: walkedRoot, limitBytes: 100000, ownerLimitBytes: 100000,
+      runLimitBytes: 100000, segmentBytes: 16384, root: path.join(walkedRoot, 'case/run/diagnostics'), processRunId: 'walker' })
+    walker.append('accepted', { taskId: 'first' })
+    mkdirSync(path.join(walkedRoot, 'other/stream/segments'), { recursive: true })
+    assert.doesNotThrow(() => walker.append('accepted', { taskId: 'second' }), 'appends reuse the owner root discovery')
+    walker.close()
   } finally { rmSync(root, { recursive: true, force: true }) }
   console.log('diagnostics store fixtures passed: bounded reservations, shared owner quotas, rotation and redaction')
 }

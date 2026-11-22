@@ -373,7 +373,16 @@ async function testDeathEndsRouteDig () {
   assert.equal(bot.pathfinder.isMining(), false, 'a death ends the route dig, so the respawned bot can move')
 }
 
+function testWaterExitPredictionHoldsJump () {
+  // seed 42 (2026-11-10): predicted without the jump the controller holds, a water exit looked unreachable.
+  const Physics = pathfinderFork('./lib/physics')
+  const state = { pos: new Vec3(0, 63, 0), control: {}, isInWater: true }
+  Physics.prototype.getController(new Vec3(1, 64, 1), false, false)(state, 0)
+  assert.equal(state.control.jump, true, 'a simulated step out of water holds jump')
+}
+
 async function main () {
+  testWaterExitPredictionHoldsJump()
   testTrimKeepsMoveBeforeEditNode()
   testFullStopDoesNotRecenterOverAir()
   testLookAtBlockReachIsMeasuredFromTheEyes()

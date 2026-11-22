@@ -19,7 +19,7 @@ async function main() {
     await fs.writeFile(path.join(root, 'src/agent/settings.js'), 'export default {};')
     await fs.writeFile(path.join(root, 'src/agent/conversation.js'), 'export default { getInGameAgents() { return [] } };')
     await fs.writeFile(path.join(root, 'src/utils/mcdata.js'), `
-export function getBlockId() { return 1; }
+export function getBlockId(name) { return name === 'minecraft:oak_fence' ? null : 1; }
 export function getAllBlockIds() { return []; }
 export function getAllBiomes() { return [{ name: 'plains' }]; }
 `)
@@ -45,6 +45,8 @@ export function getAllBiomes() { return [{ name: 'plains' }]; }
       modes: { getMiniDocs: () => [] },
       blockAt: () => null,
     }
+    assert.throws(() => world.getNearestBlocks({ ...bot, findBlocks: () => [] }, 'minecraft:oak_fence'), /unknown block types minecraft:oak_fence/,
+      'an unknown block name fails instead of reading as none nearby')
     assert.equal(world.getBlockAtPosition(bot, 0, 0, 0), null, 'unloaded block remains null instead of fabricated air')
     assert.deepEqual(world.getSurroundingBlocks(bot), [
       'Block Below: unknown', 'Block at Legs: unknown', 'Block at Head: unknown',
