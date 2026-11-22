@@ -161,9 +161,8 @@ async function main() {
     assert.equal(await triggeredMode({ enemies: [enemy(22, 5.5, 'creeper')], health: 8 }), 'cowardice:dangerous_encounter',
       'a low-health bot still retreats from a creeper within the retreat distance')
     // self_preservation in a submerged column (feet and head in water) under the given block.
-    const submerged = async (ceilingName, { feetY = 64.2, column = { 64: 'water', 65: 'water' }, oxygen } = {}) => {
+    const submerged = async (ceilingName, { feetY = 64.2, column = { 64: 'water', 65: 'water' } } = {}) => {
       const bot = makeBot(), base = bot.blockAt
-      if (oxygen !== undefined) bot.oxygenLevel = oxygen
       bot.entity.position = new Vec3(.5, feetY, .5)
       bot.entity.onGround = false
       bot.blockAt = p => {
@@ -197,10 +196,6 @@ async function main() {
       assert.equal(result.reason, 'submerged', `${name} over the head is passed to the shared egress`)
       assert.ok(result.controls.includes('jump:true'), 'egress maintains the swim-up input')
     }
-    assert.equal((await submerged('stone', { oxygen: 20 })).reason, null, 'eyes in water with full air do not interrupt')
-    assert.equal((await submerged('stone', { oxygen: 19 })).reason, null, 'a one-level dip at the surface does not interrupt')
-    assert.equal((await submerged('stone', { oxygen: 18 })).reason, 'submerged', 'falling air starts the egress')
-    assert.equal((await submerged('stone', { oxygen: -1 })).reason, 'submerged', 'air not yet reported keeps the egress')
     const inKelp = await submerged('stone', { column: { 64: 'kelp_plant', 65: 'kelp' } })
     assert.equal(inKelp.reason, 'submerged', 'kelp at the eyes counts as water')
     // Floating at the surface: the feet+1 cell is water but the eyes are in the air.

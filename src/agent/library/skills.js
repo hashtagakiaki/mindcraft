@@ -2746,17 +2746,6 @@ function watchNavigationHazard(bot, onHazard, { requireGoal = false } = {}) {
     };
 }
 
-const MAX_OXYGEN = 20;
-
-// Floating at the surface dips the eyes in and out of water while the air supply stays full.
-// Treat water at the eyes as drowning only once air has fallen by the same margin navigation
-// uses, or while the server has not reported air yet (Mineflayer reports -1 until then).
-export function losingAir(bot) {
-    const oxygen = bot.oxygenLevel;
-    if (!Number.isFinite(oxygen) || oxygen < 0) return true;
-    return MAX_OXYGEN - oxygen >= NAVIGATION_DROWNING_OXYGEN_DROP;
-}
-
 export function ownsNavigationHazardRecovery(bot) {
     return navigationOwners.has(bot) || !!bot.pathfinder.goal?.observedEscape;
 }
