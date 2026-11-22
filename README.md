@@ -214,6 +214,7 @@ pathfinderは `src/vendor/mineflayer-pathfinder/` のfork（mineflayer-pathfinde
 - parkourは、跳び越す隙間の下に `maxDropDown`（4ブロック）以内の足場も液体もなければ計画しない。upstreamは隙間の深さを見ないため、裂け目の上の4ブロックの跳躍に失敗してy69からy0まで落下死した（2026-11-21のmindcraft-qa、obstacle-recovery）。浅い穴の跳躍と、足場を置いて渡る経路は従来どおり。
 - 経路の停止（`fullStop`）で位置を列の中央へ寄せるのは、接地中なら移動先の列の下にブロックがある場合だけにする（`lib/recenter.js`）。upstreamは0.2ブロック以上ずれていれば無条件に寄せるため、足場を置きながらしゃがんで縁から身を乗り出した状態で経路がリセットされると、botを空中の列の中央へ動かして裂け目へ落とした（2026-11-21のmindcraft-qa、obstacle-recoveryで同じ経緯の転落死を3回観測）。
 - `bot.pathfinder.tickPaused()` がtrueの間は移動ループを止める。navigation policyは所有する経路編集のサーバー確認待ちの間これを使う（旧 `bot.on` の差し替え）。
+- 死亡したら経路の掘削状態を解除する。mineflayerは死亡時に `diggingAborted` のlistenerを外してから掘削を取り消すため、upstreamでは掘削中に死ぬと、respawn後も別の掘削が終わるまで移動ループが何もしない。
 - 次ノード到達予測用に `Physics` を公開する。
 - 既定のMovementsは、頭のマスが水で満たされたノード（水・海草・昆布・気泡柱・waterloggedのブロック。判定は `Movements.isWaterFilled`）を計画しない（`allowSubmerged=false`）。足だけの渡渉と水面の泳ぎは計画し、水没したノードからは上へ向かう移動だけを残す。`allowSubmerged=true` にするのは危険脱出と水生mobとの戦闘だけ。危険脱出が真上だけに探索を絞るのは、掘らずに息のできる開いた水柱のときだけ。ふたのある列は、横の出口と掘削時間込みのcostで比べる（石のふたを素手で掘ると溺れるため）。2026-11-06のBot3溺死（`collectBlock` が天井まで水で満たされた横穴を経路に選んだ）の対策。
 - `bot.navigationProtection.contains(position)` が真の位置では、経路の掘削（`safeToBreak`）と足場・塔の設置候補を作らない。保護範囲は後述の共有 protected area で、forkのMovementsを使う探索（危険脱出の探索を含む）に効く。他依存のMovementsを渡すpluginの経路編集は、navigation policyの編集ゲートが同じ範囲で拒否する。

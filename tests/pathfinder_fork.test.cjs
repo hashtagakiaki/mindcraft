@@ -325,6 +325,42 @@ function testFullStopDoesNotRecenterOverAir () {
   assert.deepEqual(recenterTarget(blockAt, new Vec3(825.07, 69, -122.5), true), { x: 825.5, z: -122.5 }, 'a supported column is recentred')
 }
 
+async function testDeathEndsRouteDig () {
+  // qa regress-underwater-exit (2026-11-22): mineflayer drops the diggingAborted listeners on death,
+  // so a route dig cut short by drowning left the respawned bot unable to take a step.
+  const { pathfinder, Movements, goals } = pathfinderFork()
+  const registry = req('prismarine-registry')('1.21.1')
+  const Block = req('prismarine-block')(registry)
+  const bot = new EventEmitter()
+  Object.assign(bot, {
+    registry, version: '1.21.1', game: { minY: -64, height: 384, dimension: 'overworld', gameMode: 'survival' },
+    entity: { position: new Vec3(0.5, 64, 0.5), velocity: new Vec3(0, 0, 0), onGround: true, effects: {}, height: 1.8, eyeHeight: 1.62, yaw: 0, pitch: 0 },
+    entities: {}, inventory: { items: () => [], slots: [] }, heldItem: null, getEquipmentDestSlot: () => 5,
+    controlState: {}, clearControlStates () {}, setControlState () {}, getControlState: () => false,
+    supportFeature: () => false, _client: { write () {} }, swingArm () {}, lookAt: async () => {}, _updateBlockState () {},
+    blockAt (position) {
+      const p = position.floored()
+      const solid = p.y === 63 || (p.x === 1 && (p.y === 64 || p.y === 65)) || (p.z !== 0 && (p.y === 64 || p.y === 65))
+      const block = Block.fromStateId(registry.blocksByName[solid ? 'stone' : 'air'].defaultState, 0)
+      block.position = p
+      return block
+    }
+  })
+  req('mineflayer/lib/plugins/digging')(bot)
+  pathfinder(bot)
+  bot.pathfinder.setMovements(Object.assign(new Movements(bot), { maxMoveCost: Infinity, allowParkour: false, scafoldingBlocks: [] }))
+  bot.pathfinder.setGoal(new goals.GoalBlock(2, 64, 0))
+  for (let tick = 0; tick < 50 && !bot.targetDigBlock; tick++) {
+    bot.emit('physicsTick')
+    await sleep(0)
+  }
+  assert.ok(bot.targetDigBlock, 'the route starts digging the wall')
+  bot.emit('death')
+  bot.pathfinder.setGoal(null)
+  await sleep(0)
+  assert.equal(bot.pathfinder.isMining(), false, 'a death ends the route dig, so the respawned bot can move')
+}
+
 async function main () {
   testTrimKeepsMoveBeforeEditNode()
   testFullStopDoesNotRecenterOverAir()
@@ -332,6 +368,7 @@ async function main () {
   testRoutesDoNotDive()
   await testGotoContract()
   await testProtectedAreasForbidRouteEdits()
+  await testDeathEndsRouteDig()
 }
 
 main().then(() => console.log('pathfinder fork tests passed')).catch(error => { console.error(error); process.exit(1) })

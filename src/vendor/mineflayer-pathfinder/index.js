@@ -188,6 +188,9 @@ function inject (bot) {
   }
 
   bot.on('physicsTick', monitorMovement)
+  // autonomy fork: mineflayer removes every diggingAborted listener before it
+  // cancels the dig on death, and a reset route ignores the dig's rejection.
+  bot.on('death', detectDiggingStopped)
 
   // Moves raw block coordinates to the standing position, up to the first node
   // that still has edits. autonomy fork: monitorMovement calls this again once
