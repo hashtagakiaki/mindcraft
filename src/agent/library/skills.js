@@ -5288,11 +5288,19 @@ export async function goToSurface(bot) {
     if (bot.entity.isInWater && typeof bot.pathfinder.getPathFromTo === 'function') {
         // getPathFromTo yields 'partial' after each tick of work; step it until the search settles.
         const search = bot.pathfinder.getPathFromTo(movements, bot.entity.position, goal, { timeout: SURFACE_WATER_PREVIEW_MS });
-        let step = search.next();
-        while (!step.done && step.value.result.status === 'partial') {
-            await new Promise(resolve => setTimeout(resolve, 0));
-            requireActiveTarget(bot);
+        // Nothing else steers during the search: without the swim input the bot sinks, and the
+        // submerged reflex then cancels this very call before the search can answer.
+        const releaseSwim = holdNavigationRecoverySwim(bot);
+        let step;
+        try {
             step = search.next();
+            while (!step.done && step.value.result.status === 'partial') {
+                await new Promise(resolve => setTimeout(resolve, 0));
+                requireActiveTarget(bot);
+                step = search.next();
+            }
+        } finally {
+            releaseSwim();
         }
         const preview = step.done ? null : step.value.result;
         if (preview?.status !== 'success') {

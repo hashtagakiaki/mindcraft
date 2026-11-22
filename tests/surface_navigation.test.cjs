@@ -138,14 +138,19 @@ async function main() {
     bot.fillSurface()
     bot.entity.isInWater = true
     let previewSteps = 0
+    let swimming = false
+    bot.entity.onGround = false
+    bot.setControlState = (control, state) => { if (control === 'jump') swimming = state }
     bot.pathfinder.getPathFromTo = function * () {
       previewSteps++
+      assert.equal(swimming, true, 'the swim-up input is held while the water search runs')
       yield { result: { status: 'partial', path: [] } }
       yield { result: { status: 'noPath', path: [] } }
     }
     bot.pathfinder.goto = async () => { throw new Error('navigation must not start without a complete path') }
     assert.equal(await runSurface(bot), false)
     assert.equal(previewSteps, 1)
+    assert.equal(swimming, false, 'the swim-up input is released when the search settles')
     assert.match(bot.output, /No complete path from the water.*search noPath/, bot.output)
 
     bot = makeBot()
