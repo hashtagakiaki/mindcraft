@@ -157,6 +157,17 @@ async function main() {
       assert.equal(bot.blockAt(new Vec3(-2,65,-1)).name,'stone','the obstruction remains untouched')
     }
 
+    {
+      // The regress-chest-deposit arrival: in reach from the node centre, out of reach 0.149 short of it.
+      const bot=scene({name:'chest',obstruction:false}), eyeAt=(x,z)=>new Vec3(x,target.y+bot.entity.eyeHeight,z)
+      const ready=eye=>helper.resolveBlockInteraction(bot,bot.blockAt(target),{eye}).status
+      assert.equal(ready(eyeAt(-2.5,-3.5)),'ready','the node centre reaches the chest')
+      assert.equal(ready(eyeAt(-2.649,-3.649)),'blocked','the observed stopping point does not')
+      const goal=helper.makeBlockInteractionGoal(bot,target)
+      assert.equal(goal.isEnd(new Vec3(-3,target.y,-4)),false,'a node that only its centre satisfies is not a goal')
+      assert.equal(goal.isEnd(new Vec3(-3,target.y,-3)),true,'the next node reaches from anywhere in the arrival window')
+    }
+
     // Replay the seven terrain failures relative to this fixture's target.
     // Native's old center-distance check rejects these reachable surfaces.
     const terrainFeet = [

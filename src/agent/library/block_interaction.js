@@ -126,13 +126,22 @@ export function resolveBlockInteraction(bot, block, { eye = interactionEye(bot),
     return unknown ?? blocked ?? outcome('blocked', 'No reachable surface aim point found.');
 }
 
+// The centring window of the vendored pathfinder's node arrival check.
+const NODE_CENTRE_TOLERANCE = 0.175;
+
 export function makeBlockInteractionGoal(bot, position, { reach = BLOCK_INTERACTION_REACH } = {}) {
     const goal = new pf.goals.GoalLookAtBlock(position, bot.world, { reach,
         entityHeight: bot.entity.eyeHeight ?? STANDING_EYE_HEIGHT });
     goal.isEnd = node => {
         const eye = new Vec3(node.x + 0.5, node.y, node.z + 0.5).offset(0,
             bot.entity.eyeHeight ?? (bot.getControlState?.('sneak') ? SNEAK_EYE_HEIGHT : STANDING_EYE_HEIGHT), 0);
-        return resolveBlockInteraction(bot, bot.blockAt(position), { eye, reach }).status === 'ready';
+        const block = bot.blockAt(position);
+        if (resolveBlockInteraction(bot, block, { eye, reach }).status !== 'ready') return false;
+        // The pathfinder calls a node reached within NODE_CENTRE_TOLERANCE of its centre, so also
+        // require reach from the corner of that window farthest from the target. Judged from the
+        // centre alone, a chest 4.45 blocks away was 4.66 from where the bot stopped.
+        const away = new Vec3(Math.sign(node.x - position.x), 0, Math.sign(node.z - position.z)).scaled(NODE_CENTRE_TOLERANCE);
+        return resolveBlockInteraction(bot, block, { eye: eye.plus(away), reach }).status === 'ready';
     };
     return goal;
 }
