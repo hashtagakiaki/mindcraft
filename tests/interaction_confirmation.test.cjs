@@ -518,6 +518,9 @@ async function main() {
   const craftCalls = []
   craftingSync.run = async (_bot, callback) => callback(async (recipe, count, table) => {
     craftCalls.push({ recipe, count, table })
+    const after = { ..._bot.navigation.inventory }  // world.getInventoryCounts returns a fresh object per call
+    for (const [name, used] of Object.entries(recipe.requiredItems)) after[name] -= used
+    _bot.navigation.inventory = after
     return 1
   })
   const tableRecipe = {
@@ -598,6 +601,9 @@ async function main() {
     const tableResult = await skills.craftRecipe(craftBot({ table: tableBlock }), 'stone_pickaxe')
     assert.equal(tableResult, true, 'a table recipe still reaches crafting with the observed table')
     assert.equal(craftCalls.at(-1).table, tableBlock, 'the table recipe retains its 3x3-table path')
+    const detailed = await skills.craftRecipe(craftBot({ table: tableBlock }), 'stone_pickaxe', 1, { details: true, quantity: 1 })
+    assert.deepEqual(detailed.consumedItems, { cobblestone: 3, stick: 2 },
+      'the detailed result reports the observed ingredient use, not just the output')
     const craftCallsBeforeRejectedTable = craftCalls.length
 
     const blockedTable = craftBot({ table: tableBlock, interaction: { status: 'blocked', reason: 'no reachable surface aim point' } })

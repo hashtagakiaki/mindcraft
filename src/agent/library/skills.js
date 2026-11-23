@@ -645,6 +645,11 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
     const craftLimit = mc.calculateLimitingResource(inventory, requiredIngredients);
     const requestedRecipes = nativeOptions?.quantity == null ? num : Math.ceil(nativeOptions.quantity / recipe.result.count);
     const craftedCount = await craft(recipe, Math.min(craftLimit.num, requestedRecipes), craftingTable);
+    const afterCraft = world.getInventoryCounts(bot);
+    // Observed ingredient use, so a caller counting a material it also crafts with sees the drop.
+    const consumedItems = Object.fromEntries(Object.entries(inventory)
+        .filter(([name, count]) => name !== itemName && (afterCraft[name] ?? 0) < count)
+        .map(([name, count]) => [name, count - (afterCraft[name] ?? 0)]));
     if(craftedCount<requestedRecipes) log(bot, `Not enough ${craftLimit.limitingResource} to craft ${requestedRecipes}, crafted ${craftedCount}. You now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
     else log(bot, `Successfully crafted ${itemName}, you now have ${world.getInventoryCounts(bot)[itemName]} ${itemName}.`);
     if (placedTable) {
@@ -661,7 +666,7 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
         const complete = confirmedQuantity >= requestedQuantity;
         return { ok: complete, status: complete ? 'complete' : confirmedQuantity > 0 ? 'partial' : 'blocked', itemName,
             requestedQuantity, confirmedQuantity, remainingQuantity: Math.max(0, requestedQuantity - confirmedQuantity),
-            producedPerRecipe: recipe.result.count, executedRecipes: craftedCount,
+            producedPerRecipe: recipe.result.count, executedRecipes: craftedCount, consumedItems,
             ...(!complete ? { reason: confirmedQuantity ? 'materials_or_grid_limited' : 'craft_unavailable' } : {}) };
     }
     return craftedCount > 0;
