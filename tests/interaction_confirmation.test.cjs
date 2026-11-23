@@ -105,6 +105,7 @@ async function main() {
   const ownership = await import(pathToFileURL(path.join(fixture, 'src/agent/library/operation_context.js')))
   const navigation = await import(pathToFileURL(path.join(fixture, 'src/agent/library/navigation_policy.js')))
   const craftingSync = (await import(pathToFileURL(path.join(fixture, 'src/agent/library/crafting_sync.js')))).default
+  const { createNativeSdk } = await import(pathToFileURL(path.join(fixture, 'src/agent/library/native_sdk.js')))
 
   const waterPos = makePosition(1, 0, 0)
   const water = makeBlock('water', waterPos)
@@ -605,6 +606,11 @@ async function main() {
     assert.deepEqual(detailed.consumedItems, { cobblestone: 3, stick: 2 },
       'the detailed result reports the observed ingredient use, not just the output')
     const craftCallsBeforeRejectedTable = craftCalls.length
+    const stationless = craftBot()
+    const owner = ownership.createOperationContext({ id: 'craft-missing-station', controller: new AbortController() }, { bot: stationless }, { intentEpoch: 0 })
+    const nativeCraft = await ownership.runOwnedOperation(owner, () => createNativeSdk({ bot: stationless, skills }).skills.craftItem({ itemName: 'stone_pickaxe' }))
+    assert.equal(nativeCraft.code, 'missing_station', 'the native craftItem result keeps the cause reported where crafting stopped')
+    assert.deepEqual([nativeCraft.ok, nativeCraft.requestedQuantity, nativeCraft.confirmedQuantity], [false, 1, 0])
 
     const blockedTable = craftBot({ table: tableBlock, interaction: { status: 'blocked', reason: 'no reachable surface aim point' } })
     assert.equal(await skills.craftRecipe(blockedTable, 'stone_pickaxe'), false,

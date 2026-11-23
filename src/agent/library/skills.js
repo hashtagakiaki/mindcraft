@@ -624,12 +624,9 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
         const missingItems = Object.fromEntries(Object.entries(requiredItems)
             .filter(([name, count]) => (held[name] ?? 0) < count)
             .map(([name, count]) => [name, count - (held[name] ?? 0)]));
-        const reason = `You do not have the resources to craft a ${itemName}. It requires: ${Object.entries(requiredItems).map(([key, value]) => `${key}: ${value}`).join(', ')}.`;
-        if (!nativeOptions?.details) return failSkill(bot, 'missing_ingredients', reason, { itemName, requiredItems, missingItems });
-        log(bot, reason);
-        return { ok: false, status: 'blocked', code: 'missing_ingredients', reason, itemName,
-            requestedQuantity: nativeOptions.quantity, confirmedQuantity: 0, remainingQuantity: nativeOptions.quantity,
-            requiredItems, missingItems };
+        return failSkill(bot, 'missing_ingredients',
+            `You do not have the resources to craft a ${itemName}. It requires: ${Object.entries(requiredItems).map(([key, value]) => `${key}: ${value}`).join(', ')}.`,
+            { requiredItems, missingItems });
     }
     
     if (craftingTable) {
