@@ -407,67 +407,14 @@ export class DiagnosticWriter {
         const bytes = Buffer.byteLength(lines);
         const release = lock(this.ownerRoot);
         try {
-            reconcileStaleWriters(this.ownerRoot, this.pool, now, path.dirname(this.poolRoot));
-            const files = segmentFiles(this.poolRoot);
             const rotate = !this.current || this.current.meta.versionId !== (this.identity.versionId ?? null)
                 || this.current.meta.bytes + bytes > this.segmentBytes
                 || now - Date.parse(this.current.meta.openedAt) >= this.segmentMs;
-            const additionalReservation = rotate ? Math.max(this.segmentBytes, bytes) + RESERVATION_OVERHEAD_BYTES : 0;
-            const currentManifestBytes = this.current ? statSync(this.current.manifest).size : 0;
-            const releasedReservation = rotate && this.current
-                ? Math.max(0, this.current.meta.reservedBytes - this.current.meta.bytes - currentManifestBytes) : 0;
-            const ownerFiles = ownerSegmentFiles(this.ownerRoot, this.pool, path.dirname(this.poolRoot));
-            const ranked = ownerFiles.filter(item => validClosedSegment(item, this.pool))
-                .map(item => ({ ...item, ...candidatePriority(item, this.retentionDays, now) }));
-            const eligible = ranked.filter(item => item.eligible !== false)
-                .sort((a, b) => a.rank - b.rank || a.ended - b.ended);
-            const unknownVersionSegments = ranked.filter(item => item.eligible === false);
-            const deletedSegments = [];
-            const projected = () => {
-                const all = ownerSegmentFiles(this.ownerRoot, this.pool, path.dirname(this.poolRoot));
-                const local = segmentFiles(this.poolRoot);
-                const usage = entries => entries.reduce((sum, item) => sum + item.bytes
-                    + (item.meta?.closed === false ? Math.max(0, item.meta.reservedBytes - item.bytes) : 0), 0);
-                const reservation = rotate ? additionalReservation - releasedReservation : 0;
-                return { owner: usage(all) + reservation, run: usage(local) + reservation };
-            };
-            let usage = projected();
-            for (const candidate of eligible) {
-                if (usage.owner <= this.ownerLimitBytes && usage.run <= this.runLimitBytes
-                    && usage.run <= this.limitBytes) break;
-                const isLocal = candidate.root === this.root;
-                const localOver = usage.run > Math.min(this.runLimitBytes, this.limitBytes);
-                if ((localOver && !isLocal) || (!localOver && usage.owner <= this.ownerLimitBytes)) continue;
-                if (unlinkClosedSegment(candidate, this.pool)) {
-                    deletedSegments.push({ bytes: candidate.bytes, versionId: candidate.meta.versionId,
-                        reason: candidate.versioned ? candidate.rank === 0 ? 'older_version'
-                            : candidate.rank === 1 ? 'previous_capacity' : 'current_capacity'
-                            : candidate.rank === 0 ? 'expired' : 'capacity' });
-                    usage = projected();
-                }
-            }
-            if (deletedSegments.length) {
-                const manifestPath = path.join(this.root, 'manifest.json');
-                const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-                manifest.lastQuotaCleanup = { at: new Date(now).toISOString(), pool: this.pool,
-                    segmentCount: deletedSegments.length,
-                    bytes: deletedSegments.reduce((sum, item) => sum + item.bytes, 0),
-                    reasons: deletedSegments.reduce((counts, item) => {
-                        counts[item.reason] = (counts[item.reason] ?? 0) + 1;
-                        return counts;
-                    }, {}) };
-                writeManifest(manifestPath, manifest);
-            }
-            if (usage.owner > this.ownerLimitBytes || usage.run > this.runLimitBytes || usage.run > this.limitBytes) {
-                const detail = unknownVersionSegments.length
-                    ? `; ${unknownVersionSegments.length} closed segment(s) have unknown manual versions and were protected`
-                    : '';
-                throw new DiagnosticQuotaError(`diagnostics pool ${this.pool} owner/run quota is full${detail}`, this.pool);
-            }
-            if (rotate) {
-                this._closeSegment(now);
-                this._newSegment(now);
-            }
+            // The open segment already reserves its full size, so an append that stays in it cannot
+            // change the projected usage. The owner-wide scan reads every segment manifest under the
+            // owner root and ran on every event: with 391 qa segments it blocked the bot's event loop
+            // ~65ms per event, long enough to miss a pillar jump (mindcraft-qa, 2026-11-24).
+            if (rotate) this._rotateWithinQuota(now, bytes);
             writeSync(this.current.fd, lines);
             this.current.meta.bytes += bytes;
             this.current.meta.lastWriteAt = new Date(now).toISOString();
@@ -475,6 +422,64 @@ export class DiagnosticWriter {
             writeManifest(this.current.manifest, this.current.meta);
             return prepared.map(item => item.event);
         } finally { release(); }
+    }
+
+    _rotateWithinQuota(now, bytes) {
+        reconcileStaleWriters(this.ownerRoot, this.pool, now, path.dirname(this.poolRoot));
+        const additionalReservation = Math.max(this.segmentBytes, bytes) + RESERVATION_OVERHEAD_BYTES;
+        const currentManifestBytes = this.current ? statSync(this.current.manifest).size : 0;
+        const releasedReservation = this.current
+            ? Math.max(0, this.current.meta.reservedBytes - this.current.meta.bytes - currentManifestBytes) : 0;
+        const ownerFiles = ownerSegmentFiles(this.ownerRoot, this.pool, path.dirname(this.poolRoot));
+        const ranked = ownerFiles.filter(item => validClosedSegment(item, this.pool))
+            .map(item => ({ ...item, ...candidatePriority(item, this.retentionDays, now) }));
+        const eligible = ranked.filter(item => item.eligible !== false)
+            .sort((a, b) => a.rank - b.rank || a.ended - b.ended);
+        const unknownVersionSegments = ranked.filter(item => item.eligible === false);
+        const deletedSegments = [];
+        const projected = () => {
+            const all = ownerSegmentFiles(this.ownerRoot, this.pool, path.dirname(this.poolRoot));
+            const local = segmentFiles(this.poolRoot);
+            const usage = entries => entries.reduce((sum, item) => sum + item.bytes
+                + (item.meta?.closed === false ? Math.max(0, item.meta.reservedBytes - item.bytes) : 0), 0);
+            const reservation = additionalReservation - releasedReservation;
+            return { owner: usage(all) + reservation, run: usage(local) + reservation };
+        };
+        let usage = projected();
+        for (const candidate of eligible) {
+            if (usage.owner <= this.ownerLimitBytes && usage.run <= this.runLimitBytes
+                && usage.run <= this.limitBytes) break;
+            const isLocal = candidate.root === this.root;
+            const localOver = usage.run > Math.min(this.runLimitBytes, this.limitBytes);
+            if ((localOver && !isLocal) || (!localOver && usage.owner <= this.ownerLimitBytes)) continue;
+            if (unlinkClosedSegment(candidate, this.pool)) {
+                deletedSegments.push({ bytes: candidate.bytes, versionId: candidate.meta.versionId,
+                    reason: candidate.versioned ? candidate.rank === 0 ? 'older_version'
+                        : candidate.rank === 1 ? 'previous_capacity' : 'current_capacity'
+                        : candidate.rank === 0 ? 'expired' : 'capacity' });
+                usage = projected();
+            }
+        }
+        if (deletedSegments.length) {
+            const manifestPath = path.join(this.root, 'manifest.json');
+            const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+            manifest.lastQuotaCleanup = { at: new Date(now).toISOString(), pool: this.pool,
+                segmentCount: deletedSegments.length,
+                bytes: deletedSegments.reduce((sum, item) => sum + item.bytes, 0),
+                reasons: deletedSegments.reduce((counts, item) => {
+                    counts[item.reason] = (counts[item.reason] ?? 0) + 1;
+                    return counts;
+                }, {}) };
+            writeManifest(manifestPath, manifest);
+        }
+        if (usage.owner > this.ownerLimitBytes || usage.run > this.runLimitBytes || usage.run > this.limitBytes) {
+            const detail = unknownVersionSegments.length
+                ? `; ${unknownVersionSegments.length} closed segment(s) have unknown manual versions and were protected`
+                : '';
+            throw new DiagnosticQuotaError(`diagnostics pool ${this.pool} owner/run quota is full${detail}`, this.pool);
+        }
+        this._closeSegment(now);
+        this._newSegment(now);
     }
 
     close() {
