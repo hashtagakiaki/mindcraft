@@ -581,6 +581,24 @@ async function main() {
       assert.equal((await noMaterialSdk.skills.goToPosition({ position: { x: 5.5, y: 64, z: 0.5 } })).ok, true,
         'editable movement succeeds on a clear route without scaffold materials')
 
+      // Dirt dug from a lid on the way up arrives after the first search; later segments must place it.
+      const scaffoldGainedMidRoute = makeBot({ gap: [2, 3, 4], corridor: true })
+      scaffoldGainedMidRoute.testState.inventory.dirt = 0
+      scaffoldGainedMidRoute.testState.inventory.cobblestone = 0
+      for (const method of ['getPathFromTo', 'getPathTo']) {
+        const search = scaffoldGainedMidRoute.pathfinder[method].bind(scaffoldGainedMidRoute.pathfinder)
+        scaffoldGainedMidRoute.pathfinder[method] = (...args) => {
+          if (scaffoldGainedMidRoute.testState.paths.length > 0) scaffoldGainedMidRoute.testState.inventory.dirt = 4
+          return search(...args)
+        }
+      }
+      const gainedResult = await skills.goToPosition(scaffoldGainedMidRoute, {
+        position: { x: 6.5, y: 64, z: 0.5 }, allowDig: false, scaffold: 'leave', scaffoldBlocks: ['dirt'],
+      })
+      assert.equal(gainedResult.ok, true, JSON.stringify({ gainedResult, paths: scaffoldGainedMidRoute.testState.paths }))
+      assert.ok(scaffoldGainedMidRoute.testState.edits.some(edit => edit.kind === 'server_place'),
+        'a later route segment places scaffold picked up after the call started')
+
       const nativeTemporaryIncomplete = makeBot({ gap: [2, 3, 4], corridor: true, rejectScaffoldRemoval: true })
       const nativeTemporaryIncompleteResult = await skills.goToPosition(nativeTemporaryIncomplete, {
         position: { x: 6.5, y: 64, z: 0.5 }, scaffold: 'temporary', scaffoldBlocks: ['dirt'],

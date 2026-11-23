@@ -234,9 +234,11 @@ function routeMovements(bot, movementOverride = null, positionPolicy = null) {
     const editPolicy = navigationPolicy();
     if (!nativeNavigationEditScopeActive() && (editPolicy || operationContext()?.nativeNavigationNoEdits)) {
         const policy = editPolicy ?? { allowDig: false, scaffold: 'forbid', scaffoldBlocks: [] };
+        // Allowed names, not the ones carried now: each search counts the carried scaffolds, and a route
+        // that digs dirt on its way can place it in a later segment (mindcraft-qa, 2026-11-24).
         const scaffolds = policy.scaffold === 'forbid' || supplied?.canPlaceOn === false ? [] :
-            availableScaffolds(bot, policy.scaffoldBlocks).filter(name =>
-                !supplied?.scafoldingBlocks || supplied.scafoldingBlocks.includes(bot.registry.itemsByName[name].id));
+            policy.scaffoldBlocks.filter(name => Number.isInteger(bot.registry?.itemsByName?.[name]?.id) &&
+                (!supplied?.scafoldingBlocks || supplied.scafoldingBlocks.includes(bot.registry.itemsByName[name].id)));
         Object.assign(movements, { canDig: policy.allowDig === true && supplied?.canDig !== false, canPlaceOn: scaffolds.length > 0,
             allow1by1towers: scaffolds.length > 0 && policy.allowTowers !== false && supplied?.allow1by1towers !== false,
             allowFreeMotion: false, scafoldingBlocks: scaffolds.map(name => bot.registry.itemsByName[name].id),
@@ -250,12 +252,6 @@ function routeMovements(bot, movementOverride = null, positionPolicy = null) {
     for (const block of ['glass', 'glass_pane']) movements.blocksCantBreak.add(mc.getBlockId(block));
     if (positionPolicy) configurePositionRoute(bot, movements, positionPolicy);
     return movements;
-}
-
-function availableScaffolds(bot, names) {
-    const inventory = bot.inventory?.items?.() ?? [];
-    return names.filter(name => Number.isInteger(bot.registry?.itemsByName?.[name]?.id)
-        && inventory.some(item => item.name === name && item.count > 0));
 }
 
 function countWindowItems(slots, start, end, itemName) {
@@ -4032,7 +4028,7 @@ export async function reachPosition(bot, options = {}) {
             isWaterFilled(bot.blockAt(bot.entity.position.floored().offset(0, -1, 0)));
         // Avoiding the water the bot already stands in leaves no first move: from one-deep water at a
         // ravine bottom the search ended noPath at once, though the same dry pit was dug out of.
-        const policy = { allowDig, allowScaffold, scaffoldBlocks: availableScaffolds(bot, scaffoldBlocks),
+        const policy = { allowDig, allowScaffold, scaffoldBlocks,
             safeWater: safeWater || startsInWater, surfaceSwimming };
         const owner = operationContext() ?? getActionContext(bot);
         const active = () => {
