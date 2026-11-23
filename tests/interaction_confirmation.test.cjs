@@ -208,7 +208,7 @@ async function main() {
       3: { name: 'cow', position: { x: 6.5, y: 0, z: 0.5 }, width: 0.9, height: 1.4 },
     }
     assert.equal(await skills.activateNearestBlock(gateBot, 'oak_fence_gate', doorPos), true)
-    assert.match(gateBot.output, /Entities overlapping the oak_fence_gate cell: sheep at x:2\.5, z:-0\.1/, gateBot.output)
+    assert.match(gateBot.output, /Entities overlapping the oak_fence_gate cell: sheep at x:2\.5, y:[-0-9.]+, z:-0\.1/, gateBot.output)
     assert.doesNotMatch(gateBot.output, /cow/, 'an entity away from the gate is not listed')
     const emptyGate = makeBot({ block: gateBlock, blockStates: [[doorPos, gateBlock]] })
     emptyGate.entities = { 1: emptyGate.entity }

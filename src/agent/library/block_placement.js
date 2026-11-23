@@ -131,6 +131,16 @@ function cancelled(bot) {
     return bot.interrupt_code || owner?.closed || owner?.signal.aborted || bot.getActionCancellationContext?.()?.signal?.aborted;
 }
 
+// Entities whose bounding boxes overlap a block cell (items and orbs do not block placement).
+export function entitiesInCell(bot, cell) {
+    return Object.values(bot.entities ?? {}).filter(entity => entity !== bot.entity && entity?.position
+        && entity.name !== 'item' && entity.name !== 'experience_orb'
+        && Math.abs(entity.position.x - (cell.x + 0.5)) < 0.5 + (entity.width ?? 0.6) / 2
+        && Math.abs(entity.position.z - (cell.z + 0.5)) < 0.5 + (entity.width ?? 0.6) / 2
+        && entity.position.y < cell.y + 1 && entity.position.y + (entity.height ?? 1.8) > cell.y)
+        .map(entity => `${entity.name ?? entity.type} at x:${entity.position.x.toFixed(1)}, y:${entity.position.y.toFixed(1)}, z:${entity.position.z.toFixed(1)}`);
+}
+
 function assertEmpty(bot, targets) {
     for (const target of targets) {
         const block = bot.blockAt(target.position);
@@ -403,7 +413,12 @@ export async function placeBlockOriented(bot, blockType, position, options, dont
             log(`Placed ${request.name} at ${request.position}; requested state confirmed: ${JSON.stringify(request.properties)}.`);
             return true;
         }
-        return fail(cancelled(bot) ? 'Placement confirmation cancelled.' : placementError?.message ?? 'Requested block state was not confirmed before the deadline.');
+        if (cancelled(bot)) return fail('Placement confirmation cancelled.');
+        const reason = placementError?.message ?? 'Requested block state was not confirmed before the deadline.';
+        // The server refuses a collidable block in a cell a mob stands in (mindcraft-qa sheep-pen:
+        // a sheep at z=-309.25 in the gate cell at z=-310), and its error does not say so.
+        const occupants = targets.flatMap(target => entitiesInCell(bot, target.position));
+        return fail(occupants.length ? `${reason.replace(/\.?$/, '.')} Entities overlap the target cell: ${occupants.join('; ')}.` : reason);
     } catch (error) {
         return fail(error.message);
     } finally {

@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import settings from "../../../settings.js";
 import craftingSync from "./crafting_sync.js";
-import { placeBlockOriented } from './block_placement.js';
+import { entitiesInCell, placeBlockOriented } from './block_placement.js';
 import { resolveBlockInteraction, makeBlockInteractionGoal, interactionFaceVector, interactionEye } from './block_interaction.js';
 import { trackSkill, reportSkillOutcome, skillFailure, recordConfirmation, recordUncertainty, recordOwnedWait, beginOwnedWait, markOwnedWaitProgress, finishOwnedWait, operationContext, operationCallContext, withSkillPhase, registerOwnedPromise, withNativeNavigationEditScope, nativeNavigationEditScopeActive } from './operation_context.js';
 import { awaitNavigationPlacementSettled, isNavigationScaffoldUnconfirmed, navigationEditSnapshot, navigationPolicy, navigationScaffoldPlacementPending, navigationScaffoldsPlaced, NAVIGATION_SCAFFOLD_CLEARANCE_HEIGHT, recordNavigationArrival, registerNavigationScaffoldSettledCallback, runWithNavigationPolicy, trackNavigationSegment, withEmergencyNavigation } from './navigation_policy.js';
@@ -4887,12 +4887,7 @@ export async function activateNearestBlock(bot, type, position=null) {
     if (/_door$|_fence_gate$/.test(type)) {
         // A gate can close on a mob standing in its own cell; the mob is then neither inside nor
         // outside the pen (mindcraft-qa sheep-pen: a sheep at z=-309.6 in the gate at z=-310).
-        const cell = block.position;
-        const occupants = Object.values(bot.entities ?? {}).filter(entity => entity !== bot.entity && entity?.position
-            && Math.abs(entity.position.x - (cell.x + 0.5)) < 0.5 + (entity.width ?? 0.6) / 2
-            && Math.abs(entity.position.z - (cell.z + 0.5)) < 0.5 + (entity.width ?? 0.6) / 2
-            && entity.position.y < cell.y + 1 && entity.position.y + (entity.height ?? 1.8) > cell.y)
-            .map(entity => `${entity.name ?? entity.type} at x:${entity.position.x.toFixed(1)}, z:${entity.position.z.toFixed(1)}`);
+        const occupants = entitiesInCell(bot, block.position);
         if (occupants.length) log(bot, `Entities overlapping the ${type} cell: ${occupants.join('; ')}. They are in the gateway, not on either side.`);
     }
     return true;

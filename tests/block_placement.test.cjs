@@ -126,6 +126,7 @@ function makeBot({ initial = null, result = { name: 'furnace', properties: { fac
     if (state.update === 'immediate' || state.update === 'throwAfterUpdate' || state.update === 'unknown') publishResult()
     if (state.update === 'delayed') setTimeout(publishResult, 15)
     if (state.update === 'throwAfterUpdate') throw new Error('plugin rejected after authoritative state update')
+    if (state.update === 'refuse') throw new Error(`Server refused to place ${reference.name}: the block is still air`)
   }
   bot.placeBlock = async (reference, face) => bot._placeBlockWithOptions(reference, face, {})
   bot.chat = command => {
@@ -160,6 +161,14 @@ async function main() {
     assert.deepEqual(await nativeSdk.skills.placeBlock({ blockType: 'stone', position: { x: 0, y: 65, z: 0 } }), { ok: true, status: 'complete' },
       'native placement verifies ordinary blocks without requiring orientation options')
     assert.equal(ordinaryBot.state.packets.filter(([packet]) => packet === 'block_place').length, 1)
+
+    // A mob standing in the target cell makes the server refuse the block; the reason must name it.
+    const occupiedBot = makeBot({ item: 'stone', result: null, update: 'refuse' })
+    occupiedBot.entities = { 7: { name: 'sheep', type: 'animal', width: 0.9, height: 1.3, position: new Vec3(0.5, 65, 1.25) },
+      8: { name: 'item', type: 'object', width: 0.25, height: 0.25, position: new Vec3(0.5, 65, 0.5) } }
+    assert.equal(await skills.placeBlock(occupiedBot, 'stone', 0, 65, 0, {}, true), false)
+    assert.match(occupiedBot.output, /Server refused[^\n]*still air\. Entities overlap the target cell: sheep at x:0\.5, y:65\.0, z:1\.3\./, occupiedBot.output)
+    assert.doesNotMatch(occupiedBot.output, /item at/, 'dropped items do not block placement')
     const owned = async (bot, fn) => {
       const controller = new AbortController()
       const op = createOperationContext({ id: 'placement-fixture', controller }, { bot }, { intentEpoch: 1 })
