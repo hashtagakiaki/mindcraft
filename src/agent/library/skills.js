@@ -4610,6 +4610,13 @@ export async function useDoor(bot, door_pos=null, options={}) {
                 if (!confirmed || bot.interrupt_code) {
                     return failSkill(bot, 'unconfirmed', `Could not confirm ${options.open ? 'opening' : 'closing'} the door or gate at ${door_pos}.`);
                 }
+                // A gate closes onto a mob standing in its cell; that mob is in the gateway, not on either side.
+                const occupants = options.open ? [] : entitiesInCell(bot, door_pos);
+                if (occupants.length) {
+                    const reason = `Closed at ${door_pos}, but these entities overlap its cell and are not on either side: ${occupants.join('; ')}.`;
+                    log(bot, reason);
+                    reportSkillOutcome({ ok: true, status: 'complete', reason, occupants });
+                }
                 return true;
             } finally { changed.cleanup(); }
         }

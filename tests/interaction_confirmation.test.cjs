@@ -236,6 +236,15 @@ async function main() {
     assert.equal(gate.blockAt(doorPos).getProperties().open, false)
     assert.equal(gate.listenerCount('blockUpdate'), 0)
   }
+  {
+    let state = makeBlock('oak_fence_gate', doorPos, { open: true })
+    const penGate = makeBot({ block: state, blockStates: [[doorPos, state]],
+      onActivateBlock(_block, bot) { state = makeBlock('oak_fence_gate', doorPos, { open: false }); emitBlock(bot, doorPos, state) } })
+    penGate.entities = { 1: penGate.entity,
+      2: { name: 'sheep', position: { x: doorPos.x + 0.5, y: doorPos.y, z: doorPos.z + 0.58 }, width: 0.9, height: 1.3 } }
+    assert.equal(await skills.useDoor(penGate, doorPos, { open: false }), true, 'closing onto a mob still closes the gate')
+    assert.match(penGate.output, /overlap its cell and are not on either side: sheep at/, penGate.output)
+  }
   const unresponsiveGateBlock = makeBlock('oak_fence_gate', doorPos)
   const unresponsiveGate = makeBot({ block: unresponsiveGateBlock, blockStates: [[doorPos, unresponsiveGateBlock]] })
   assert.equal(await withAcceleratedClock(() => skills.useDoor(unresponsiveGate, doorPos, { open: true })), false, 'gate changes require a server block update')
