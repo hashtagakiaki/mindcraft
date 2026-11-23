@@ -35,7 +35,7 @@ Runnerはdisposable fixtureを使いMinecraft serverを起動しない。fixture
 - sourceはこのrepo。`../mindcraft-eval/` はbenchmarkとread-only第三者入力、`../mindcraft-tools/` はplay運用code/tests、`../play/` は稼働設定・保存dataのowner。
 - OAuth credentials、keys、`.env` は読取・コピーしない。`mindcraft-eval/runtime/upstream/codex-oauth.json` も開かない。既存profiles、bot logs/conversations/memory、worlds、server jars、runtime modules、生成resultsは必要ならread-onlyで調査できるが、Gitへ追加・stageしない。
 - `runtime/upstream/` のdependency/jar/EULAとuser world template/saveはread-only。fixture/live smokeでtemplateを生成・変更しない。
-- 通常確認では稼働play server `40973`、UI `8098`、tmux、4 bots、Ollamaを操作せず、play起動scriptをtestで実行しない。isolated Minecraft確認はCaseServerのloopback `25569`/`25570`のみ。`25566`は禁止。production/system serviceも変更しない。
+- 通常確認では稼働play server `40973`、UI `8098`、tmux、4 bots、Ollamaを操作せず、play起動scriptをtestで実行しない。isolated Minecraft確認はCaseServerのloopback `25569`〜`25572`のみ。`25566`は禁止。production/system serviceも変更しない。
 - PlaceStore scopeはroot `settings.js` の `place_state_dir` と `place_world_id` に限る。絶対pathとUUIDを両方設定するか両方null。Protected MindServerのsessionはprivate 0700 dir/0600 file、tokenを保存・複製せず、crash後のfileは再利用しない。PlaceStore lockはwriter不在を確認せず削除しない。
 - sourceの公開・再検証に必要な詳細（SDK、navigation、placement、session、Goals等）はREADMEの該当節とリンク先docsを参照し、ここでは重複させない。
 - ドア・ゲート操作は `tests/interaction_confirmation.test.cjs`、native引数は `tests/native_sdk.test.cjs`、チェスト接近失敗の原因保持は `tests/targeted_sdk.test.cjs` で確認する。危険状態の脱出は通常navigationのno-edit方針より生存を優先し、設置/破壊は既存のserver-confirmation境界を通す。有限な局所探索の`search_limit`と探索完了後の`route_not_found`を区別し、移動失敗理由を呼び出し元で失わない。探索上限と着地条件は[READMEの危険復旧契約](README.md#hazard-recovery-evidence-and-remaining-boundary)を参照する。
@@ -43,7 +43,7 @@ Runnerはdisposable fixtureを使いMinecraft serverを起動しない。fixture
 ## 完了条件
 
 - 該当する既存fixtureと必須offline suiteを実行し、full diffとsecret/runtime dataの不在を確認する。
-- Botの実挙動の不具合修正は、offline fixtureだけで済ませず隔離serverで再現と修正後を確認する。`../mindcraft-eval/` の `CaseServer`（loopback 25569/25570、稼働play serverは使わない）とMineflayer clientで、修正前後の同じ操作を比べる。イベント順や遅延など実serverで変わる条件は、その順序を再現して両方確認する。使い捨てharnessはscratchに置き、repoへ追加しない。
+- Botの実挙動の不具合修正は、offline fixtureだけで済ませず隔離serverで再現と修正後を確認する。`../mindcraft-eval/` の `CaseServer`（loopback 25569〜25572、稼働play serverは使わない）とMineflayer clientで、修正前後の同じ操作を比べる。イベント順や遅延など実serverで変わる条件は、その順序を再現して両方確認する。使い捨てharnessはscratchに置き、repoへ追加しない。
 - task差分だけをstageし、`autonomy`からown `origin`へcommit/pushする。upstreamへpushしない。
 - evalのsource manifestはpush済みfull SHAだけをpinし、eval側でread-only dependenciesを使って再検証する。手動play pinは別管理。通常の機能追加だけでは自動反映しない。ただし親 `minecraft-autonomy/AGENTS.md` の継続指示が有効な横断作業では、そこに定めた検証後bot-only applyを行い、個別承認条件は適用しない。
 - bot指示snapshot、SDK一覧、tool境界、Codex home/session保存、action cancellation、Goalsの契約はbot instruction正本とREADMEに従う。変更時は関連する既存fixtureと隔離確認を更新する。
