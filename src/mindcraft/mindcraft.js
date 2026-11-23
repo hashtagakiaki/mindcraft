@@ -358,7 +358,8 @@ export async function stopAllAgents(reason = 'shutdown', { closing = false } = {
         error.outcomes = outcomes;
         throw error;
     }
-    if (closing && rootSettings.diagnostics) {
+    // maintenance_cli null means the host (eval) prunes itself, as at startup.
+    if (closing && rootSettings.diagnostics && rootSettings.diagnostics.maintenance_cli !== null) {
         if (diagnosticsMaintenanceTimer) clearInterval(diagnosticsMaintenanceTimer);
         await runDiagnosticsMaintenance();
     }
