@@ -836,7 +836,7 @@ Agent.prototype.start = async function() {
       const timer = setTimeout(() => {
         lifecycleChild.kill('SIGKILL')
         reject(new Error('uncooperative action shutdown fixture did not exit'))
-      }, 3000)
+      }, 15000)  // a hang guard only; 3s was exceeded by a passing child under load 9.5 (apply during qa runs)
       lifecycleChild.once('error', error => { clearTimeout(timer); reject(error) })
       lifecycleChild.once('close', (code, signal) => {
         clearTimeout(timer)
