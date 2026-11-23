@@ -40,7 +40,11 @@ function processStartTicks(pid) {
     } catch { return null; }
 }
 
-function lock(root, timeoutMs = 500) {
+// Holders do bounded work: a writer rotating a segment (~70ms) or a retention prune by the eval runner
+// (~0.27s over the qa results; several parallel runs queue theirs at start). 5s covers that queue.
+const LOCK_TIMEOUT_MS = 5000;
+
+function lock(root, timeoutMs = LOCK_TIMEOUT_MS) {
     const file = path.join(root, '.quota.lock');
     const fd = openSync(file, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
     if (!fstatSync(fd).isFile()) {
@@ -59,7 +63,7 @@ function lock(root, timeoutMs = 500) {
     return () => closeSync(fd);
 }
 
-export function withDiagnosticQuotaLock(root, callback, timeoutMs = 500) {
+export function withDiagnosticQuotaLock(root, callback, timeoutMs = LOCK_TIMEOUT_MS) {
     if (typeof callback !== 'function') throw new TypeError('diagnostics lock callback is required');
     const release = lock(path.resolve(root), timeoutMs);
     try { return callback(); }
@@ -417,7 +421,10 @@ export class DiagnosticWriter {
         // before the shared lock: under the lock its ~430ms walk of the qa results tree made a parallel
         // run's writer exceed the 500ms lock timeout and fail its task (mindcraft-qa, 2026-11-24).
         if (rotate) refreshDiagnosticsRoots(this.ownerRoot);
-        const release = lock(this.ownerRoot);
+        // Only rotation changes what other processes account or delete: an open segment reserves its full
+        // size, and its file and atomically replaced manifest belong to this writer. Appending without the
+        // shared lock keeps a busy lock (parallel runs' prunes) from failing ordinary trace writes.
+        const release = rotate ? lock(this.ownerRoot) : () => {};
         try {
             // The open segment already reserves its full size, so an append that stays in it cannot
             // change the projected usage. The owner-wide scan reads every segment manifest under the

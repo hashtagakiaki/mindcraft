@@ -938,6 +938,15 @@ Agent.prototype.start = async function() {
     assert.equal(blockedResult.goal.status, 'complete')
     assert.deepEqual(blockedSets, ['active', 'active'], 'the goal is set active at start and again after the early block')
     assert.equal(blockedEvents.filter(event => event.type === 'goal_block_rejected').length, 1)
+    // A failed critical trace write for a response rejects the request instead of leaving it unresolved.
+    const traceFailing = new CodexSession({ model: 'fixture', record: type => {
+      if (type === 'codex_response_received') throw new Error('diagnostics quota lock is busy') } })
+    traceFailing.send = () => {}
+    const unanswered = traceFailing.request('thread/read', {})
+    const [requestId] = traceFailing.pending.keys()
+    await assert.rejects(traceFailing.receive({ id: requestId, result: {} }), /quota lock is busy/)
+    const unresolved = new Promise((_, reject) => setTimeout(() => reject(new Error('request left unresolved')), 1000))
+    await assert.rejects(Promise.race([unanswered, unresolved]), /quota lock is busy/, 'the awaiting caller sees the trace failure')
     await blockedGoal.close()
     // Completing a verified goal before the final message needs no automatic turn.
     const sameTurnEvents = []

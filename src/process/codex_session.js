@@ -148,11 +148,15 @@ export class CodexSession {
             const pending = this.pending.get(message.id);
             if (pending) {
                 clearTimeout(pending.timer); this.pending.delete(message.id);
-                this.record('codex_response_received', { callId: pending.callId, requestId: this.requestId,
-                    method: pending.method, status: message.error ? 'error' : 'received',
-                    elapsedMs: Date.now() - pending.startedAt,
-                    errorCode: message.error && (typeof message.error.code === 'string' || Number.isInteger(message.error.code))
-                        ? message.error.code : undefined });
+                // The request is already off `pending`, so fail() cannot reject it: a failed critical trace
+                // write must reject it here or its caller waits forever (regress-door-room, 600s idle).
+                try {
+                    this.record('codex_response_received', { callId: pending.callId, requestId: this.requestId,
+                        method: pending.method, status: message.error ? 'error' : 'received',
+                        elapsedMs: Date.now() - pending.startedAt,
+                        errorCode: message.error && (typeof message.error.code === 'string' || Number.isInteger(message.error.code))
+                            ? message.error.code : undefined });
+                } catch (error) { pending.reject(error); throw error; }
                 message.error ? pending.reject(new Error(JSON.stringify(message.error))) : pending.resolve(message.result);
             }
             return;
