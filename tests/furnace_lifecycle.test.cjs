@@ -268,6 +268,10 @@ async function main() {
     ok: false, status: 'blocked', requestedQuantity: 1, confirmedQuantity: 0, remainingQuantity: 1, itemName: 'raw_iron'
   }, 'an early internal false result is projected to the structured native completion contract')
   cases.exactMissingTarget = { status: missingFurnaceResult.status, requestedQuantity: missingFurnaceResult.requestedQuantity }
+  const ownedMissing = createOperationContext({ id: 'missing-furnace', controller: new AbortController() }, { bot: exactTargetMissing }, { intentEpoch: 1 })
+  const ownedMissingResult = await runOwnedOperation(ownedMissing, () => nativeSmelt.skills.smeltItem({ itemName: 'raw_iron', quantity: 1, furnacePosition: { x: 1, y: 64, z: 0 } }))
+  assert.equal(ownedMissingResult.code, 'target_not_found', 'inside an action the native result keeps the cause the skill reported')
+  assert.deepEqual([ownedMissingResult.ok, ownedMissingResult.requestedQuantity, ownedMissingResult.confirmedQuantity], [false, 1, 0])
 
   const delayedOutput = makeBot({ ore: 1, coal: 1, smeltDelayMs: 350 })
   const waitOperation = createOperationContext({ id: 'delayed-smelt', controller: new AbortController() }, { bot: delayedOutput }, { intentEpoch: 1 }, 'smelt-task')

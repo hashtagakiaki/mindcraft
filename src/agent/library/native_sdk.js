@@ -500,7 +500,7 @@ function projectDomainResult(definition, value, context, factStart, uncertaintyS
         const confirmed = recipe?.resultCount && facts.filter(f => f.unit === 'recipe').length
             ? facts.filter(f => f.unit === 'recipe').length * recipe.resultCount : itemFact?.quantity ?? 0;
         const requested = input.quantity;
-        // A failure reported at the decision point (missing station or ingredients, unreachable table) keeps its cause.
+        // A failure reported where the skill stopped (missing station or ingredients, unreachable table) keeps its cause.
         const failure = value === false && outcome?.ok === false ? outcome : null;
         return { ...(failure ?? {}), ok: value?.ok === true, status: failure?.status ?? value?.status ?? (value?.ok ? (confirmed >= requested ? 'complete' : 'partial') : 'blocked'),
             itemName: input.itemName, requestedQuantity: requested, confirmedQuantity: confirmed, remainingQuantity: Math.max(0, requested - confirmed),
@@ -509,7 +509,8 @@ function projectDomainResult(definition, value, context, factStart, uncertaintyS
     if (definition.completion === 'complete' && method === 'skills.smeltItem') {
         const result = value && typeof value === 'object' ? value : null;
         if (result) return result;
-        return { ok: value === true, status: value === true ? 'complete' : uncertain.length ? 'unknown' : 'blocked',
+        const failure = value === false && outcome?.ok === false ? outcome : null;
+        return { ...(failure ?? {}), ok: value === true, status: value === true ? 'complete' : failure?.status ?? (uncertain.length ? 'unknown' : 'blocked'),
             requestedQuantity: input.quantity, confirmedQuantity: facts.find(f => f.unit === 'item')?.quantity ?? (value === true ? input.quantity : uncertain[0]?.confirmedQuantity ?? 0),
             remainingQuantity: Math.max(0, input.quantity - (facts.find(f => f.unit === 'item')?.quantity ?? (value === true ? input.quantity : 0))), itemName: input.itemName };
     }
