@@ -131,6 +131,11 @@ function discoverDiagnosticsRoots(ownerRoot) {
 const ROOT_DISCOVERY_TTL_MS = 10_000;
 const discoveredRoots = new Map();
 
+function refreshDiagnosticsRoots(ownerRoot) {
+    const key = path.resolve(ownerRoot);
+    discoveredRoots.set(key, { at: Date.now(), roots: discoverDiagnosticsRoots(key) });
+}
+
 function ownerSegmentFiles(ownerRoot, pool, ownRoot = null) {
     const key = path.resolve(ownerRoot);
     const now = Date.now();
@@ -405,11 +410,15 @@ export class DiagnosticWriter {
         });
         const lines = prepared.map(item => item.line).join('');
         const bytes = Buffer.byteLength(lines);
+        const rotate = !this.current || this.current.meta.versionId !== (this.identity.versionId ?? null)
+            || this.current.meta.bytes + bytes > this.segmentBytes
+            || now - Date.parse(this.current.meta.openedAt) >= this.segmentMs;
+        // Root discovery only lists directories and its result is already reused for 10s, so it runs
+        // before the shared lock: under the lock its ~430ms walk of the qa results tree made a parallel
+        // run's writer exceed the 500ms lock timeout and fail its task (mindcraft-qa, 2026-11-24).
+        if (rotate) refreshDiagnosticsRoots(this.ownerRoot);
         const release = lock(this.ownerRoot);
         try {
-            const rotate = !this.current || this.current.meta.versionId !== (this.identity.versionId ?? null)
-                || this.current.meta.bytes + bytes > this.segmentBytes
-                || now - Date.parse(this.current.meta.openedAt) >= this.segmentMs;
             // The open segment already reserves its full size, so an append that stays in it cannot
             // change the projected usage. The owner-wide scan reads every segment manifest under the
             // owner root and ran on every event: with 391 qa segments it blocked the bot's event loop
