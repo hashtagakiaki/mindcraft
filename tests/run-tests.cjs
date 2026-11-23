@@ -147,7 +147,7 @@ export default function Vec3(x, y, z) {
   await write(root, 'src/vendor/mineflayer-pathfinder/index.js', `export default {
     goals: { GoalNear: class { constructor(x,y,z,range) { Object.assign(this,{x,y,z,range}) }
       heuristic(p) { return Math.max(Math.abs(p.x-this.x),Math.abs(p.y-this.y),Math.abs(p.z-this.z))-this.range }
-    }, GoalFollow: class { constructor(entity, range) { (globalThis.farmScenario.followRanges ??= []).push(range); Object.assign(this,{entity,rangeSq:range*range}); if (globalThis.farmScenario.scaffolds) this.heuristic = p => Math.max(Math.abs(p.x-entity.position.x),Math.abs(p.y-entity.position.y),Math.abs(p.z-entity.position.z)) } }, GoalLookAtBlock: class { constructor(position, world) { Object.assign(this,{position,world}) }
+    }, GoalFollow: class { constructor(entity, range) { (globalThis.farmScenario.followRanges ??= []).push(range); (globalThis.farmScenario.followYs ??= []).push(entity.position.y); Object.assign(this,{entity,rangeSq:range*range}); if (globalThis.farmScenario.scaffolds || globalThis.farmScenario.routableFollow) this.heuristic = p => Math.max(Math.abs(p.x-entity.position.x),Math.abs(p.y-entity.position.y),Math.abs(p.z-entity.position.z)) } }, GoalLookAtBlock: class { constructor(position, world) { Object.assign(this,{position,world}) }
       heuristic(p) { return Math.max(Math.abs(p.x-this.position.x),Math.abs(p.y-this.position.y),Math.abs(p.z-this.position.z)) }
     } }, Movements: class { constructor() { this.blocksCantBreak=new Set(); this.maxDropDown=4; if (globalThis.farmScenario?.scaffolds) this.scafoldingBlocks=[...globalThis.farmScenario.scaffolds] }
       static isWaterFilled(block) { return block?.name === 'water' }

@@ -407,6 +407,29 @@ async function main() {
     await pickupNearbyItems(bot).catch(() => {})
     assert.deepEqual(scenario.followRanges, [range], `item cell boundingBox ${boundingBox}`)
   }
+  // A drop reported in the broken log's cell high above the floor is routed to where it lands
+  // (mindcraft-qa regress-tall-tree: routes to its air cell timed out once per log).
+  {
+    const scenario = scenarioFor(ore(), async () => {})
+    const bot = createBot(scenario)
+    bot.nearestEntity = () => ({ name: 'item', position: { x: 1.5, y: 5.2, z: 0.5 } })
+    bot.blockAt = position => ({ name: position.y < 0 ? 'stone' : 'air', type: 0, position, boundingBox: position.y < 0 ? 'block' : 'empty' })
+    await pickupNearbyItems(bot).catch(() => {})
+    assert.deepEqual(scenario.followYs, [0], 'the pickup route targets the cell the drop lands in')
+  }
+  // Arriving there before the drop does, the pickup waits for it to fall in.
+  {
+    const scenario = scenarioFor(ore(), async () => {})
+    scenario.routableFollow = true
+    const bot = createBot(scenario)
+    const item = { name: 'item', position: { x: 1.5, y: 5.2, z: 0.5 } }
+    let landed = false
+    bot.nearestEntity = () => landed ? null : item
+    bot.blockAt = position => ({ name: position.y < 0 ? 'stone' : 'air', type: 0, position, boundingBox: position.y < 0 ? 'block' : 'empty' })
+    bot.pathfinder.goto = async () => { setTimeout(() => { landed = true }, 1200) }
+    assert.equal(await pickupNearbyItems(bot), true)
+    assert.match(bot.output, /Picked up 1 items/, 'a drop still falling onto the bot is picked up')
+  }
   // The block is re-read after the approach, so a state change does not reach dig as a stale target.
   {
     const scenario = scenarioFor(ore(), async block => {

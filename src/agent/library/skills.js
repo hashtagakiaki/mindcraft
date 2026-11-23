@@ -187,6 +187,9 @@ const NAVIGATION_LANDING_WAIT_MS = 5_000;
 const COLLECT_MAX_LINE_CLEARS = 8;
 const COLLECT_DROP_WAIT_MS = 1_000;
 const ITEM_PICKUP_WAIT_MS = 750;
+const DROP_LANDING_SCAN_BLOCKS = 16;
+// A drop popped from a log six blocks up reaches the floor within about two seconds.
+const DROP_FALL_WAIT_MS = 2500;
 const SURFACE_SEARCH_RADIUS = 16;
 const SURFACE_WATER_PREVIEW_MS = 3000;
 const SURFACE_ARRIVAL_Y_TOLERANCE = 0.25;
@@ -1572,6 +1575,21 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
     return finish(collected > 0);
 }
 
+// Where a drop comes to rest: the client receives a falling item's position only now and then,
+// so its reported cell can still be the broken log's cell high above the floor. Routing there
+// searched for an unreachable air cell until the 5 s path timeout, once per log of a tall trunk
+// (mindcraft-qa regress-tall-tree, 2026-11-22).
+function dropLandingPosition(bot, item) {
+    const { x, z } = item.position;
+    let y = Math.floor(item.position.y);
+    for (let depth = 0; depth < DROP_LANDING_SCAN_BLOCKS; depth++) {
+        const below = bot.blockAt(new Vec3(Math.floor(x), y - 1, Math.floor(z)));
+        if (!below || below.boundingBox === 'block') break;
+        y--;
+    }
+    return new Vec3(x, Math.min(item.position.y, y), z);
+}
+
 export async function pickupNearbyItems(bot, movements = null) {
     /**
      * Pick up all nearby items.
@@ -1589,16 +1607,20 @@ export async function pickupNearbyItems(bot, movements = null) {
         // an item at its bottom, so enter the item's own cell. An item resting on
         // a partial block (farmland, slab) shares that block's cell; standing on
         // top is within range 1, while range 0 would dig the block out.
-        const itemCellBlocked = bot.blockAt(nearestItem.position)?.boundingBox === 'block';
+        const landing = dropLandingPosition(bot, nearestItem);
+        const itemCellBlocked = bot.blockAt(landing)?.boundingBox === 'block';
         // collectBlock passes its movements so pickups do not scaffold with the collected item either.
-        await goToGoal(bot, new pf.goals.GoalFollow(nearestItem, itemCellBlocked ? 1 : 0), movements);
+        await goToGoal(bot, new pf.goals.GoalFollow({ position: landing }, itemCellBlocked ? 1 : 0), movements);
         let prev = nearestItem;
-        // A fresh drop cannot be picked up for its first 10 ticks.
+        // A fresh drop cannot be picked up for its first 10 ticks, and the route to its landing
+        // cell can finish while it is still falling there.
         const pickupDeadline = Date.now() + ITEM_PICKUP_WAIT_MS;
+        const fallDeadline = Date.now() + DROP_FALL_WAIT_MS;
         do {
             await new Promise(resolve => setTimeout(resolve, 50));
             nearestItem = getNearestItem(bot);
-        } while (nearestItem === prev && !bot.interrupt_code && Date.now() < pickupDeadline);
+        } while (nearestItem === prev && !bot.interrupt_code && (Date.now() < pickupDeadline
+            || (prev.position.y > landing.y + 0.5 && Date.now() < fallDeadline)));
         if (prev === nearestItem) {
             break;
         }
