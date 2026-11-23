@@ -616,11 +616,20 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
         }
     }
     if (!recipes || recipes.length === 0) {
-        log(bot, `You do not have the resources to craft a ${itemName}. It requires: ${Object.entries(mc.getItemCraftingRecipes(itemName)[0][0]).map(([key, value]) => `${key}: ${value}`).join(', ')}.`);
         if (placedTable) {
             await withSkillPhase('cleanup', () => collectBlock(bot, 'crafting_table', 1));
         }
-        return false;
+        const requiredItems = mc.getItemCraftingRecipes(itemName)[0][0];
+        const held = world.getInventoryCounts(bot);
+        const missingItems = Object.fromEntries(Object.entries(requiredItems)
+            .filter(([name, count]) => (held[name] ?? 0) < count)
+            .map(([name, count]) => [name, count - (held[name] ?? 0)]));
+        const reason = `You do not have the resources to craft a ${itemName}. It requires: ${Object.entries(requiredItems).map(([key, value]) => `${key}: ${value}`).join(', ')}.`;
+        if (!nativeOptions?.details) return failSkill(bot, 'missing_ingredients', reason, { itemName, requiredItems, missingItems });
+        log(bot, reason);
+        return { ok: false, status: 'blocked', code: 'missing_ingredients', reason, itemName,
+            requestedQuantity: nativeOptions.quantity, confirmedQuantity: 0, remainingQuantity: nativeOptions.quantity,
+            requiredItems, missingItems };
     }
     
     if (craftingTable) {
