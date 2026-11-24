@@ -468,7 +468,8 @@ async function testNavigation(root) {
   bot.pathfinder.goto = goal => { bot.pathfinder.goal = goal; return new Promise((resolve, reject) => { rejectDig = reject }) }
   bot.pathfinder.setGoal = goal => { bot.pathfinder.goal = goal; stopCalls++; rejectDig(new Error('stalled after dig')) }
   const digStartedAt = Date.now()
-  await assert.rejects(skills.goToGoal(bot, { heuristic: () => 10 }), error => error.name === 'NavigationStallTimeoutError' && error.navigation.code === 'no_progress')
+  await assert.rejects(skills.goToGoal(bot, { heuristic: () => 10 }), error => error.name === 'NavigationStallTimeoutError' && error.navigation.code === 'no_progress'
+    && Object.keys(error.navigation.surroundings).length === 27 && '0,-1,0' in error.navigation.surroundings)
   assert.ok(Date.now() - digStartedAt >= 75, 'a slow normal dig is not cut by the movement stall clock')
   assert.equal(stopCalls, 1)
   // Edits that keep one block pending most of the time only pause the clock (qa obstacle-recovery,

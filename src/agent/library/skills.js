@@ -679,6 +679,16 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
     });
 }
 
+// Blocks in the 3x3x3 around a stalled bot, keyed "dx,dy,dz" from its feet cell. A placement that
+// stalled at a route endpoint (terrain-leveling) could not be reproduced without what stood around it.
+function stallSurroundings(bot) {
+    const { x, y, z } = bot.entity.position;
+    const cells = {};
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++)
+        cells[`${dx},${dy},${dz}`] = bot.blockAt(new Vec3(Math.floor(x) + dx, Math.floor(y) + dy, Math.floor(z) + dz))?.name ?? null;
+    return cells;
+}
+
 export async function craftItem(bot, itemName, quantity=1) {
     if (!Number.isSafeInteger(quantity) || quantity < 1) throw new TypeError('craftItem quantity must be a positive safe integer');
     return craftRecipe(bot, itemName, 1, { details: true, quantity });
@@ -3289,6 +3299,7 @@ async function runNavigationSegment(bot, goal, final_movements, { explicit = tru
                     code: 'no_progress', phase: 'movement', lastPathUpdate,
                     position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
                     stallTimeoutMs: navigationStallTimeoutMs, visitedRouteSegments: seenRouteSegments.size, earlyReplans,
+                    surroundings: stallSurroundings(bot),
                     observedAt: new Date().toISOString(),
                 };
                 stopOwnedNavigation();
