@@ -205,6 +205,11 @@ async function main() {
     assert.equal(falseDefault.sdkFailure.result.code, 'target_not_found', 'the observed cause reaches sdkFailure without log parsing')
     assert.match(falseDefault.sdkFailure.error, /target_not_found/)
     assert.equal(falseDefault.skillResults.find(call => call.skill === 'skills.goToPlayer').result.code, 'target_not_found')
+    const { sdkFailureMessage } = await load('src/agent/coder.js')
+    assert.equal(sdkFailureMessage('skills.takeFromChest', { ok: false, status: 'blocked', reason: 'chest_unavailable' }),
+      'skills.takeFromChest failed: blocked (chest_unavailable)', 'a result with only a reason names it in the error')
+    assert.equal(sdkFailureMessage('skills.craftItem', { ok: false, status: 'failed', code: 'missing_station', reason: 'needs a table' }),
+      'skills.craftItem failed: failed (missing_station: needs a table)')
     settings.generated_code_fail_on_false = ['goToPlayer']
     const { goToPlayer } = await load('src/agent/library/skills.js')
     assert.equal(await goToPlayer(agent.bot, 'missing'), false, 'direct SDK/skill callers retain the standard boolean API')

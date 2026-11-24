@@ -8,6 +8,14 @@ import { createWiki } from './library/wiki.js';
 import {ESLint} from "eslint";
 import { trackSkill, operationContext, operationCallContext, registerOwnedPromise, NATIVE_EXECUTION_WINDOW_MS } from './library/operation_context.js';
 
+// The cause goes into the message whether the result carries a code with its reason or only a reason
+// (chest transfers report reason alone; without it the model saw a bare "failed: blocked").
+export function sdkFailureMessage(method, result) {
+    const cause = result?.code ? ` (${result.code}${result.reason ? `: ${result.reason}` : ''})`
+        : result?.reason ? ` (${result.reason})` : '';
+    return `${method} failed: ${result === false ? 'returned false' : result?.status ?? 'ok:false'}${cause}`;
+}
+
 export class Coder {
     constructor(agent) {
         this.agent = agent;
@@ -403,7 +411,7 @@ function nativeExecutionSafety(windowMs, metadata) {
                 || method === 'skills.approachBlock' && workResult?.status !== 'ready'
                 || method === 'skills.fellTree' && workResult?.status !== 'complete'
                 || method === 'skills.goToPosition' && (result?.status !== 'reached' || result?.ok !== true);
-            if (failed) throw fail(method, new Error(`${method} failed: ${result === false ? "returned false" : result?.status ?? "ok:false"}${result?.code ? ` (${result.code}${result.reason ? `: ${result.reason}` : ''})` : ''}`), result);
+            if (failed) throw fail(method, new Error(sdkFailureMessage(method, result)), result);
             return result;
         },
         fail,
