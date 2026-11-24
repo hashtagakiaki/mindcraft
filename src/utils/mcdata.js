@@ -140,13 +140,15 @@ export function initBot(username) {
         bot.acceptResourcePack();
     });
 
-    bot.once('login', () => {
-        mc_version = bot.version;
-        mcdata = minecraftData(mc_version);
-        Item = prismarine_items(mc_version);
-    });
+    bot.once('login', () => loadMinecraftData(bot.version));
 
     return bot;
+}
+
+export function loadMinecraftData(version) {
+    mc_version = version;
+    mcdata = minecraftData(mc_version);
+    Item = prismarine_items(mc_version);
 }
 
 export function isHuntable(mob) {
@@ -282,9 +284,13 @@ export function getItemCraftingRecipes(itemName) {
                 recipe[ingredientName] = 0;
             recipe[ingredientName]++;
         }
+        // A 3x3 pattern, or more shapeless ingredients than the 2x2 inventory grid holds, needs a crafting table.
+        const requiresTable = r.inShape
+            ? r.inShape.length > 2 || r.inShape.some(row => row.length > 2)
+            : ingredients.length > 4;
         recipes.push([
             recipe,
-            {craftedCount : r.result.count}
+            {craftedCount : r.result.count, requiresTable}
         ]);
     }
     // sort recipes by if their ingredients include common items
@@ -557,6 +563,112 @@ function craftItem(item, count, inventory, leftovers, crafted = { required: {}, 
     crafted.steps.push(`Craft ${stepIngredients} -> ${totalProduced} ${item}`);
 
     return crafted;
+}
+
+const PLAN_MAX_DEPTH = 4;
+const PLAN_MAX_EXPANSIONS = 20000;
+
+/**
+ * Plans the crafts that turn the current inventory into at least `quantity` new `targetItem`.
+ * The search is a backtracking over the demands not yet met: each item tries every recipe of
+ * getItemCraftingRecipes, and a dead end in a later demand returns to an earlier recipe choice.
+ * A 3x3 recipe without a crafting table at hand adds one crafting_table to the same demands.
+ * Looping items and items without a recipe are base materials.
+ *
+ * @param {string} targetItem
+ * @param {number} quantity - the minimum new output wanted; surplus recipe output is not counted.
+ * @param {Object<string, number>} inventory
+ * @param {{tableAvailable: boolean}} options
+ * @returns {{steps: {itemName: string, quantity: number, ingredients: Object<string, number>}[], missingItems: Object<string, number>}}
+ *   steps run in dependency order with the target last; ingredients are one execution of the chosen recipe
+ *   and quantity is the new output that step must make. When no combination of recipes can be filled
+ *   (or the search limit is reached), steps is empty and missingItems holds the base materials the
+ *   combination nearest to the inventory lacks.
+ */
+export function planCraftingSteps(targetItem, quantity, inventory, { tableAvailable }) {
+    if (!Number.isSafeInteger(quantity) || quantity < 1) throw new TypeError('planCraftingSteps quantity must be a positive safe integer');
+    initializeLoopingItems();
+    const recipeCache = new Map();
+    const recipesOf = item => {
+        if (!recipeCache.has(item)) recipeCache.set(item, getItemCraftingRecipes(item) ?? []);
+        return recipeCache.get(item);
+    };
+    const shortfall = missing => Object.values(missing).reduce((sum, count) => sum + count, 0);
+    let expansions = 0;
+    let exhausted = false;
+    let nearest = null;
+
+    const solve = state => {
+        if (exhausted) return null;
+        if (nearest && shortfall(state.missing) >= nearest.shortfall) return null;
+        if (state.demands.length === 0) {
+            const total = shortfall(state.missing);
+            if (total > 0) nearest = { missing: state.missing, shortfall: total };
+            return total === 0 ? state : null;
+        }
+        const [{ item, count: demanded, depth, fresh }, ...later] = state.demands;
+        const next = { ...state, demands: later, inventory: { ...state.inventory }, missing: { ...state.missing } };
+        let count = demanded;
+        if (!fresh) {
+            const taken = Math.min(next.inventory[item] ?? 0, count);
+            next.inventory[item] = (next.inventory[item] ?? 0) - taken;
+            count -= taken;
+        }
+        if (count === 0) return solve(next);
+        const recipes = depth > PLAN_MAX_DEPTH || (!fresh && loopingItems.has(item)) ? [] : recipesOf(item);
+        if (recipes.length === 0) {
+            next.missing[item] = (next.missing[item] ?? 0) + count;
+            return solve(next);
+        }
+        for (const [ingredients, { craftedCount, requiresTable }] of recipes) {
+            if (++expansions > PLAN_MAX_EXPANSIONS) {
+                exhausted = true;
+                return null;
+            }
+            const trial = structuredClone(next);
+            const key = JSON.stringify([item, ingredients]);
+            let step = trial.steps.find(entry => entry.key === key);
+            if (!step) trial.steps.push(step = { key, itemName: item, ingredients, quantity: 0, needs: [] });
+            if (fresh) trial.targetKey = key;
+            const batchesBefore = Math.ceil(step.quantity / craftedCount);
+            step.quantity += count;
+            const newBatches = Math.ceil(step.quantity / craftedCount) - batchesBefore;
+            const wanted = [];
+            if (requiresTable && !tableAvailable) {
+                step.needs.push('crafting_table');
+                if (!trial.tableDemanded) {
+                    trial.tableDemanded = true;
+                    wanted.push({ item: 'crafting_table', count: 1, depth: depth + 1 });
+                }
+            }
+            for (const [name, perBatch] of Object.entries(ingredients)) {
+                step.needs.push(name);
+                if (newBatches > 0) wanted.push({ item: name, count: perBatch * newBatches, depth: depth + 1 });
+            }
+            trial.demands = [...wanted, ...later];
+            const solved = solve(trial);
+            if (solved || exhausted) return solved;
+        }
+        return null;
+    };
+
+    const solved = solve({ demands: [{ item: targetItem, count: quantity, depth: 0, fresh: true }], inventory: { ...inventory },
+        missing: {}, steps: [], targetKey: null, tableDemanded: false });
+    if (!solved) {
+        if (!nearest) throw new Error(`planCraftingSteps found no recipe combination for ${targetItem} within ${PLAN_MAX_EXPANSIONS} expansions`);
+        return { steps: [], missingItems: nearest.missing };
+    }
+
+    const ordered = [];
+    const visited = new Set();
+    const visit = step => {
+        if (visited.has(step.key)) return;
+        visited.add(step.key);
+        for (const name of step.needs) for (const dependency of solved.steps.filter(entry => entry.itemName === name)) visit(dependency);
+        ordered.push({ itemName: step.itemName, quantity: step.quantity, ingredients: step.ingredients });
+    };
+    visit(solved.steps.find(step => step.key === solved.targetKey));
+    return { steps: ordered, missingItems: {} };
 }
 
 function formatPlan(targetItem, { required, steps, leftovers }) {

@@ -560,6 +560,28 @@ async function equipHighestAttack(bot) {
         await bot.equip(weapon, 'hand');
 }
 
+const CRAFTING_TABLE_RANGE = 16;
+
+// The recipes bot.recipesFor offers, narrowed to the one-execution ingredients a craft plan chose.
+// Shapeless recipes report their ingredients as negative counts, so the counts are compared by magnitude.
+function recipesWithIngredients(recipes, ingredients) {
+    if (!ingredients || !recipes) return recipes;
+    return recipes.filter(recipe => {
+        const used = Object.entries(mc.ingredientsFromPrismarineRecipe(recipe)).map(([name, count]) => [name, Math.abs(count)]);
+        return used.length === Object.keys(ingredients).length && used.every(([name, count]) => ingredients[name] === count);
+    });
+}
+
+// The recipe whose ingredients the inventory lacks least, in getItemCraftingRecipes order on ties.
+function nearestRecipeShortfall(itemName, held, ingredients = null) {
+    const candidates = ingredients ? [ingredients] : mc.getItemCraftingRecipes(itemName).map(([required]) => required);
+    const shortfalls = candidates.map(requiredItems => ({ requiredItems, missingItems: Object.fromEntries(Object.entries(requiredItems)
+        .filter(([name, count]) => (held[name] ?? 0) < count)
+        .map(([name, count]) => [name, count - (held[name] ?? 0)])) }));
+    const total = entry => Object.values(entry.missingItems).reduce((sum, count) => sum + count, 0);
+    return shortfalls.reduce((best, entry) => total(entry) < total(best) ? entry : best);
+}
+
 export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
     /**
      * Attempt to craft the given item name from a recipe. May craft many items.
@@ -583,15 +605,15 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
 
     return craftingSync.run(bot, async (craft) => {
     // get recipes that don't require a crafting table
-    let recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, null); 
+    const recipesFor = grid => recipesWithIngredients(bot.recipesFor(mc.getItemId(itemName), null, 1, grid), nativeOptions?.ingredients);
+    let recipes = recipesFor(null);
     let craftingTable = null;
-    const craftingTableRange = 16;
     placeTable: if (!recipes || recipes.length === 0) {
-        recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, true);
+        recipes = recipesFor(true);
         if(!recipes || recipes.length === 0) break placeTable; //Don't bother going to the table if we don't have the required resources.
 
         // Look for crafting table
-        craftingTable = world.getNearestBlock(bot, 'crafting_table', craftingTableRange);
+        craftingTable = world.getNearestBlock(bot, 'crafting_table', CRAFTING_TABLE_RANGE);
         if (craftingTable === null){
 
             // Try to place crafting table
@@ -599,9 +621,9 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
             if (hasTable) {
                 let pos = world.getNearestFreeSpace(bot, 1, 6);
                 await withSkillPhase('preparation', () => placeBlock(bot, 'crafting_table', pos.x, pos.y, pos.z));
-                craftingTable = world.getNearestBlock(bot, 'crafting_table', craftingTableRange);
+                craftingTable = world.getNearestBlock(bot, 'crafting_table', CRAFTING_TABLE_RANGE);
                 if (craftingTable) {
-                    recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, craftingTable);
+                    recipes = recipesFor(craftingTable);
                     placedTable = true;
                 } else {
                     return failSkill(bot, 'confirmation_failed', `Could not confirm a crafting table after placement; refusing to use the inventory grid for ${itemName}.`);
@@ -612,18 +634,14 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
             }
         }
         else {
-            recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, craftingTable);
+            recipes = recipesFor(craftingTable);
         }
     }
     if (!recipes || recipes.length === 0) {
         if (placedTable) {
             await withSkillPhase('cleanup', () => collectBlock(bot, 'crafting_table', 1));
         }
-        const requiredItems = mc.getItemCraftingRecipes(itemName)[0][0];
-        const held = world.getInventoryCounts(bot);
-        const missingItems = Object.fromEntries(Object.entries(requiredItems)
-            .filter(([name, count]) => (held[name] ?? 0) < count)
-            .map(([name, count]) => [name, count - (held[name] ?? 0)]));
+        const { requiredItems, missingItems } = nearestRecipeShortfall(itemName, world.getInventoryCounts(bot), nativeOptions?.ingredients);
         return failSkill(bot, 'missing_ingredients',
             `You do not have the resources to craft a ${itemName}. It requires: ${Object.entries(requiredItems).map(([key, value]) => `${key}: ${value}`).join(', ')}.`,
             { requiredItems, missingItems });
@@ -689,9 +707,53 @@ function stallSurroundings(bot) {
     return cells;
 }
 
+// The failure the latest SDK call made under the running skill reported where it stopped.
+function lastChildFailure() {
+    const call = operationCallContext();
+    return operationContext()?.calls.findLast(entry => entry.parentCallId === call?.id)?.result ?? null;
+}
+
 export async function craftItem(bot, itemName, quantity=1) {
     if (!Number.isSafeInteger(quantity) || quantity < 1) throw new TypeError('craftItem quantity must be a positive safe integer');
-    return craftRecipe(bot, itemName, 1, { details: true, quantity });
+    const start = world.getInventoryCounts(bot);
+    const direct = await craftRecipe(bot, itemName, 1, { details: true, quantity });
+    const stopped = direct === false ? lastChildFailure() : null;
+    if (stopped?.code !== 'missing_ingredients' && stopped?.code !== 'missing_station') return direct;
+
+    // Ingredients or the table are missing: craft the intermediates the inventory can still make, then the target.
+    const tableAvailable = (start.crafting_table ?? 0) > 0 || world.getNearestBlock(bot, 'crafting_table', CRAFTING_TABLE_RANGE) !== null;
+    const { steps, missingItems } = mc.planCraftingSteps(itemName, quantity, start, { tableAvailable });
+    const craftedIntermediates = [];
+    // Net drop of what the bot held when craftItem began; a crafted intermediate it did not use up is no drop.
+    const finish = outcome => {
+        const end = world.getInventoryCounts(bot);
+        const consumedItems = Object.fromEntries(Object.entries(start)
+            .filter(([name, count]) => name !== itemName && (end[name] ?? 0) < count)
+            .map(([name, count]) => [name, count - (end[name] ?? 0)]));
+        const result = { itemName, requestedQuantity: quantity, confirmedQuantity: 0, remainingQuantity: quantity,
+            ...outcome, craftedIntermediates, consumedItems };
+        if (!result.ok) reportSkillOutcome(result);
+        return result;
+    };
+
+    if (steps.length === 0) {
+        const base = Object.entries(missingItems).map(([name, count]) => `${name}: ${count}`).join(', ');
+        const reason = `${stopped.reason} Still missing base materials: ${base}`;
+        log(bot, reason);
+        return finish({ ...stopped, ok: false, status: 'failed', code: 'missing_ingredients', reason, missingItems });
+    }
+
+    for (const [index, step] of steps.entries()) {
+        const isTarget = index === steps.length - 1;
+        const result = await craftRecipe(bot, step.itemName, 1, { details: true, quantity: step.quantity, ingredients: step.ingredients });
+        if (result === false) return finish({ ...lastChildFailure(), ok: false, status: 'failed' });
+        if (isTarget) return finish(result);
+        if (result.confirmedQuantity > 0) craftedIntermediates.push({ itemName: step.itemName, confirmedQuantity: result.confirmedQuantity });
+        if (result.status !== 'complete') {
+            return finish({ ok: false, status: result.status, code: 'intermediate_incomplete',
+                reason: `Could not craft ${step.itemName} for ${itemName}: ${result.reason ?? result.status}` });
+        }
+    }
 }
 
 export async function wait(bot, milliseconds) {

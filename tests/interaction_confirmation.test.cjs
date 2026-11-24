@@ -530,6 +530,7 @@ async function main() {
     craftCalls.push({ recipe, count, table })
     const after = { ..._bot.navigation.inventory }  // world.getInventoryCounts returns a fresh object per call
     for (const [name, used] of Object.entries(recipe.requiredItems)) after[name] -= used
+    for (const [name, made] of Object.entries(recipe.produces ?? {})) after[name] = (after[name] ?? 0) + made
     _bot.navigation.inventory = after
     return 1
   })
@@ -538,15 +539,36 @@ async function main() {
     inShape: [[{ id: 35 }, { id: 35 }, { id: 35 }], [null, { id: 848 }, null], [null, { id: 848 }, null]],
     delta: [{ id: 35, count: -3 }, { id: 848, count: -2 }, { id: 825, count: 1 }],
     requiredItems: { cobblestone: 3, stick: 2 },
+    produces: { stone_pickaxe: 1 },
     requiresTable: true
   }
   const inventoryRecipe = {
     result: { id: 36, count: 4 },
     inShape: [[{ id: 1 }]],
     delta: [{ id: 1, count: -1 }, { id: 36, count: 4 }],
-    requiredItems: { oak_log: 1 }
+    requiredItems: { oak_log: 1 },
+    produces: { oak_planks: 4 }
   }
-  const craftBot = ({ table = null, includeTableItem = false, interaction = null, disappearOnBlockRead = 0 } = {}) => {
+  const stickRecipe = {
+    result: { id: 848, count: 4 },
+    inShape: [[{ id: 36 }], [{ id: 36 }]],
+    delta: [{ id: 36, count: -2 }, { id: 848, count: 4 }],
+    requiredItems: { oak_planks: 2 },
+    produces: { stick: 4 }
+  }
+  const tableItemRecipe = wood => ({
+    result: { id: 300, count: 1 },
+    inShape: [[{ id: 36 }, { id: 36 }], [{ id: 36 }, { id: 36 }]],
+    delta: [{ id: 36, count: -4 }, { id: 300, count: 1 }],
+    requiredItems: { [`${wood}_planks`]: 4 },
+    produces: { crafting_table: 1 }
+  })
+  const oakTableRecipe = tableItemRecipe('oak')
+  const birchTableRecipe = tableItemRecipe('birch')
+  globalThis.craftRecipesFixture = {
+    crafting_table: [[{ oak_planks: 4 }, { craftedCount: 1 }], [{ birch_planks: 4 }, { craftedCount: 1 }]]
+  }
+  const craftBot = ({ table = null, includeTableItem = false, interaction = null, disappearOnBlockRead = 0, held = null } = {}) => {
     const items = [
       { name: 'cobblestone', type: 35, count: 3 },
       { name: 'stick', type: 848, count: 2 },
@@ -559,14 +581,18 @@ async function main() {
     }
     const bot = {
       output: '',
-      navigation: { block: table, interaction, inventory: { cobblestone: 3, stick: 2, oak_log: 1, crafting_table: includeTableItem ? 1 : 0 } },
+      navigation: { block: table, interaction, inventory: held ?? { cobblestone: 3, stick: 2, oak_log: 1, crafting_table: includeTableItem ? 1 : 0 } },
       inventory,
       game: { gameMode: 'survival' },
       entity: { position: makePosition(0, 0, 0) },
       modes: { isOn: () => false },
+      // A recipe is offered only while the inventory holds its ingredients, as the server's recipe book does.
       recipesFor(itemId, _metadata, _count, grid) {
-        if (itemId === 825) return grid ? [tableRecipe] : []
-        if (itemId === 36) return [inventoryRecipe]
+        const affordable = recipes => recipes.filter(recipe => Object.entries(recipe.requiredItems).every(([name, count]) => (bot.navigation.inventory[name] ?? 0) >= count))
+        if (itemId === 825) return grid ? affordable([tableRecipe]) : []
+        if (itemId === 36) return affordable([inventoryRecipe])
+        if (itemId === 848) return affordable([stickRecipe])
+        if (itemId === 300) return affordable([oakTableRecipe, birchTableRecipe])
         return []
       },
       blockAt(position) {
@@ -617,9 +643,17 @@ async function main() {
     const craftCallsBeforeRejectedTable = craftCalls.length
     const stationless = craftBot()
     const owner = ownership.createOperationContext({ id: 'craft-missing-station', controller: new AbortController() }, { bot: stationless }, { intentEpoch: 0 })
+    const planRequests = []
+    globalThis.craftPlanFixture = (...request) => { planRequests.push(request); return { steps: [], missingItems: { oak_log: 2 } } }
     const nativeCraft = await ownership.runOwnedOperation(owner, () => createNativeSdk({ bot: stationless, skills }).skills.craftItem({ itemName: 'stone_pickaxe' }))
-    assert.equal(nativeCraft.code, 'missing_station', 'the native craftItem result keeps the cause reported where crafting stopped')
+    assert.equal(nativeCraft.code, 'missing_ingredients', 'an unfillable plan reports missing ingredients, not the table it could not place')
     assert.deepEqual([nativeCraft.ok, nativeCraft.requestedQuantity, nativeCraft.confirmedQuantity], [false, 1, 0])
+    assert.deepEqual(nativeCraft.missingItems, { oak_log: 2 }, 'missingItems names the base materials the plan lacks')
+    assert.match(nativeCraft.reason, /Still missing base materials: oak_log: 2/)
+    assert.deepEqual(planRequests, [['stone_pickaxe', 1, { cobblestone: 3, stick: 2, oak_log: 1, crafting_table: 0 }, { tableAvailable: false }]],
+      'the plan starts from the inventory at hand and knows no table is near')
+    assert.equal(craftCalls.length, craftCallsBeforeRejectedTable, 'an unfillable plan crafts no intermediate')
+    assert.deepEqual([nativeCraft.craftedIntermediates, nativeCraft.consumedItems], [[], {}])
 
     const blockedTable = craftBot({ table: tableBlock, interaction: { status: 'blocked', reason: 'no reachable surface aim point' } })
     assert.equal(await skills.craftRecipe(blockedTable, 'stone_pickaxe'), false,
@@ -645,6 +679,72 @@ async function main() {
     await assert.rejects(skills.craftRecipe(cancelledTable, 'stone_pickaxe'), /Action cancelled before target interaction/)
     assert.equal(craftCalls.length, craftCallsBeforeRejectedTable,
       'cancellation does not invoke the craft callback')
+
+    // A plan's ingredients pick the recipe; without them the first affordable recipe is used.
+    const bothWoods = () => craftBot({ held: { oak_planks: 4, birch_planks: 4 } })
+    await skills.craftRecipe(bothWoods(), 'crafting_table')
+    assert.deepEqual(craftCalls.at(-1).recipe.requiredItems, { oak_planks: 4 })
+    const pinned = await skills.craftRecipe(bothWoods(), 'crafting_table', 1, { details: true, quantity: 1, ingredients: { birch_planks: 4 } })
+    assert.deepEqual(craftCalls.at(-1).recipe.requiredItems, { birch_planks: 4 }, 'only the recipe matching the planned ingredients is crafted')
+    assert.deepEqual(pinned.consumedItems, { birch_planks: 4 })
+    const unmatched = craftBot({ held: { oak_planks: 4 } })
+    assert.equal(await skills.craftRecipe(unmatched, 'crafting_table', 1, { details: true, quantity: 1, ingredients: { birch_planks: 4 } }), false,
+      'an affordable recipe that is not the planned one is not substituted')
+    assert.equal(unmatched.navigation.inventory.oak_planks, 4)
+
+    // The shortage names the recipe nearest to the inventory, not the first one.
+    const birchOnly = craftBot({ held: { birch_planks: 2 } })
+    const birchOwner = ownership.createOperationContext({ id: 'craft-birch-short', controller: new AbortController() }, { bot: birchOnly }, { intentEpoch: 0 })
+    const birchShort = await ownership.runOwnedOperation(birchOwner, async () => {
+      assert.equal(await ownership.trackSkill('skills.craftRecipe', skills.craftRecipe)(birchOnly, 'crafting_table'), false)
+      return ownership.operationResult(birchOwner).skillResults.at(-1).result
+    })
+    assert.equal(birchShort.code, 'missing_ingredients')
+    assert.deepEqual([birchShort.requiredItems, birchShort.missingItems], [{ birch_planks: 4 }, { birch_planks: 2 }])
+    const oakPinned = craftBot({ held: { birch_planks: 2 } })
+    const oakOwner = ownership.createOperationContext({ id: 'craft-oak-pinned', controller: new AbortController() }, { bot: oakPinned }, { intentEpoch: 0 })
+    const oakShort = await ownership.runOwnedOperation(oakOwner, async () => {
+      await ownership.trackSkill('skills.craftRecipe', skills.craftRecipe)(oakPinned, 'crafting_table', 1, { details: true, quantity: 1, ingredients: { oak_planks: 4 } })
+      return ownership.operationResult(oakOwner).skillResults.at(-1).result
+    })
+    assert.deepEqual([oakShort.requiredItems, oakShort.missingItems], [{ oak_planks: 4 }, { oak_planks: 4 }], 'a planned recipe is reported as planned')
+
+    // Ingredients missing but makeable from the inventory: the intermediates are crafted first, then the target.
+    const runCraftItem = (bot, id) => ownership.runOwnedOperation(
+      ownership.createOperationContext({ id, controller: new AbortController() }, { bot }, { intentEpoch: 0 }),
+      () => createNativeSdk({ bot, skills }).skills.craftItem({ itemName: 'stone_pickaxe' }))
+    const stickStep = { itemName: 'stick', quantity: 2, ingredients: { oak_planks: 2 } }
+    const pickaxeStep = { itemName: 'stone_pickaxe', quantity: 1, ingredients: { cobblestone: 3, stick: 2 } }
+    const tableForPlan = makeBlock('crafting_table', makePosition(1, 0, 0))
+    const needsSticks = craftBot({ table: tableForPlan, held: { cobblestone: 3, oak_planks: 2 } })
+    globalThis.craftPlanFixture = (...request) => { planRequests.push(request); return { steps: [stickStep, pickaxeStep], missingItems: {} } }
+    const craftsBeforePlan = craftCalls.length
+    const planned = await runCraftItem(needsSticks, 'craft-intermediate')
+    assert.equal(planned.status, 'complete')
+    assert.deepEqual(craftCalls.slice(craftsBeforePlan).map(call => call.recipe.result.id), [848, 825], 'the stick is crafted before the pickaxe')
+    assert.deepEqual(planned.craftedIntermediates, [{ itemName: 'stick', confirmedQuantity: 4 }])
+    assert.equal(planned.confirmedQuantity, 1)
+    assert.deepEqual(planned.consumedItems, { cobblestone: 3, oak_planks: 2 }, 'consumedItems is the net drop of what was held; the unused sticks are no drop')
+    assert.deepEqual(planRequests.at(-1)[3], { tableAvailable: true })
+
+    // A step that fails, or does not complete, ends the craft; what the earlier steps used still counts as consumed.
+    const failing = craftBot({ table: tableForPlan, held: { cobblestone: 3, oak_planks: 2 } })
+    globalThis.craftPlanFixture = () => ({ steps: [stickStep, stickStep, pickaxeStep], missingItems: {} })
+    const craftsBeforeFailure = craftCalls.length
+    const failed = await runCraftItem(failing, 'craft-intermediate-failed')
+    assert.deepEqual([failed.ok, failed.code], [false, 'missing_ingredients'])
+    assert.deepEqual([failed.requestedQuantity, failed.confirmedQuantity], [1, 0], 'the quantities are the target\'s, not the failed step\'s')
+    assert.deepEqual(craftCalls.slice(craftsBeforeFailure).map(call => call.recipe.result.id), [848], 'the target is not crafted after a failed intermediate')
+    assert.deepEqual(failed.craftedIntermediates, [{ itemName: 'stick', confirmedQuantity: 4 }])
+    assert.deepEqual(failed.consumedItems, { oak_planks: 2 })
+
+    const partial = craftBot({ table: tableForPlan, held: { cobblestone: 3, oak_planks: 4 } })
+    globalThis.craftPlanFixture = () => ({ steps: [stickStep, { ...stickStep, quantity: 99 }, pickaxeStep], missingItems: {} })
+    const stopped = await runCraftItem(partial, 'craft-intermediate-partial')
+    assert.deepEqual([stopped.ok, stopped.status, stopped.code], [false, 'partial', 'intermediate_incomplete'])
+    assert.deepEqual(stopped.craftedIntermediates, [{ itemName: 'stick', confirmedQuantity: 4 }, { itemName: 'stick', confirmedQuantity: 4 }])
+    assert.deepEqual(stopped.consumedItems, { oak_planks: 4 })
+    assert.equal(stopped.confirmedQuantity, 0)
   } finally {
     craftingSync.run = originalCraftRun
   }
