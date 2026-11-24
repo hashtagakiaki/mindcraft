@@ -876,6 +876,37 @@ async function main() {
       assert.equal(await skills.goToGoal(emptyPathAlreadyThere, new pathfinder.goals.GoalBlock(0, 64, 0)), true,
         'empty route can resolve successfully only when the current position already satisfies its goal')
 
+      // A failed goToGoal search names missing scaffolds after its original message and leaves it alone otherwise.
+      const failScaffoldSearch = async ({ scaffoldInventory, status = 'timeout', adjust = () => {} }) => {
+        const searchBot = makeBot({ scaffoldInventory })
+        searchBot.pathfinder.goto = async goal => {
+          searchBot.pathfinder.goal = goal
+          searchBot.emit('path_update', { status, path: [] })
+          throw Object.assign(new Error(status === 'timeout' ? 'Timeout: Path search timed out' : 'noPath: No path'),
+            { name: status === 'timeout' ? 'Timeout' : 'NoPath' })
+        }
+        const movements = new pathfinder.Movements(searchBot)
+        adjust(movements)
+        let caught
+        await skills.goToGoal(searchBot, new pathfinder.goals.GoalBlock(6, 64, 0), movements).catch(error => { caught = error })
+        assert.ok(caught, 'the search failure is thrown')
+        return caught
+      }
+      const noScaffold = await failScaffoldSearch({ scaffoldInventory: {} })
+      assert.match(noScaffold.message, /^Timeout: Path search timed out/)
+      assert.match(noScaffold.message, /No scaffold blocks \(dirt\/cobblestone\)/)
+      assert.equal(noScaffold.navigation.code, 'search_limit')
+      assert.deepEqual(noScaffold.navigation.scaffold, { allowed: ['dirt', 'cobblestone'], inInventory: 0 })
+      const noScaffoldNoPath = await failScaffoldSearch({ scaffoldInventory: {}, status: 'noPath' })
+      assert.equal(noScaffoldNoPath.navigation.code, 'route_not_found')
+      assert.match(noScaffoldNoPath.message, /No scaffold blocks/)
+      const carriedScaffold = await failScaffoldSearch({ scaffoldInventory: { dirt: 3 } })
+      assert.doesNotMatch(carriedScaffold.message, /No scaffold blocks/)
+      assert.equal(carriedScaffold.navigation.scaffold, undefined)
+      const noPlacement = await failScaffoldSearch({ scaffoldInventory: {}, adjust: movements => { movements.canPlaceOn = false } })
+      assert.doesNotMatch(noPlacement.message, /No scaffold blocks/)
+      assert.equal(noPlacement.navigation.scaffold, undefined)
+
       const restrictions = makeBot()
       const supplied = new pathfinder.Movements(restrictions)
       supplied.dontCreateFlow = false

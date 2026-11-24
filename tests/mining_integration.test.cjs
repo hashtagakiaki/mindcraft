@@ -504,6 +504,18 @@ async function main() {
     assert.equal(approaches, 1)
     assert.match(bot.output, /Failed to collect wheat/)
   }
+  // A route search that fails for lack of allowed scaffolds reaches the collectBlock reason.
+  {
+    const scenario = scenarioFor(ore({ name: 'wheat', drops: [31] }), async () => { throw new Error('must not dig') })
+    scenario.scaffolds = [99]
+    scenario.items = []
+    const bot = createBot(scenario)
+    bot.registry.items[99] = { name: 'dirt' }
+    bot.registry.itemsByName.dirt = { id: 99 }
+    bot.pathfinder.goto = async () => { throw Object.assign(new Error('Timeout: Path search timed out'), { name: 'Timeout' }) }
+    assert.equal(await collectBlock(bot, 'wheat'), false)
+    assert.match(bot.output, /Failed to collect wheat: .*Timeout: Path search timed out.*No scaffold blocks \(dirt\)/s)
+  }
   // Short ore names include both real ore variants.
   for (const [short, name] of [['lapis_lazuli', 'lapis_ore'], ['lapis_lazuli', 'deepslate_lapis_ore'], ['iron', 'deepslate_iron_ore']]) {
     const scenario = scenarioFor(ore({ name }), async (_block, bot) => {
