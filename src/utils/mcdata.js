@@ -140,13 +140,15 @@ export function initBot(username) {
         bot.acceptResourcePack();
     });
 
-    bot.once('login', () => {
-        mc_version = bot.version;
-        mcdata = minecraftData(mc_version);
-        Item = prismarine_items(mc_version);
-    });
+    bot.once('login', () => loadMinecraftData(bot.version));
 
     return bot;
+}
+
+export function loadMinecraftData(version) {
+    mc_version = version;
+    mcdata = minecraftData(mc_version);
+    Item = prismarine_items(mc_version);
 }
 
 export function isHuntable(mob) {
@@ -282,9 +284,13 @@ export function getItemCraftingRecipes(itemName) {
                 recipe[ingredientName] = 0;
             recipe[ingredientName]++;
         }
+        // A 3x3 pattern, or more shapeless ingredients than the 2x2 inventory grid holds, needs a crafting table.
+        const requiresTable = r.inShape
+            ? r.inShape.length > 2 || r.inShape.some(row => row.length > 2)
+            : ingredients.length > 4;
         recipes.push([
             recipe,
-            {craftedCount : r.result.count}
+            {craftedCount : r.result.count, requiresTable}
         ]);
     }
     // sort recipes by if their ingredients include common items
@@ -557,6 +563,93 @@ function craftItem(item, count, inventory, leftovers, crafted = { required: {}, 
     crafted.steps.push(`Craft ${stepIngredients} -> ${totalProduced} ${item}`);
 
     return crafted;
+}
+
+const PLAN_MAX_DEPTH = 4;
+
+/**
+ * Plans the intermediate crafts that turn the current inventory into at least `quantity` new `targetItem`.
+ * Each item uses the first recipe of getItemCraftingRecipes whose subtree the inventory and earlier planned
+ * output can fill, which covers wood types other than oak. A 3x3 recipe without a crafting table nearby
+ * or held adds one crafting_table to the plan.
+ *
+ * @param {string} targetItem
+ * @param {number} quantity - the minimum new output wanted; surplus recipe output is not counted.
+ * @param {Object<string, number>} inventory
+ * @param {{tableAvailable: boolean}} options
+ * @returns {{steps: {itemName: string, quantity: number}[], missingItems: Object<string, number>}}
+ *   steps run ingredients first and the target last, each with the quantity its craft call asks for.
+ *   When no recipe can be filled, steps is empty and missingItems holds the base materials the first recipe lacks.
+ */
+export function planCraftingSteps(targetItem, quantity, inventory, { tableAvailable }) {
+    if (!Number.isSafeInteger(quantity) || quantity < 1) throw new TypeError('planCraftingSteps quantity must be a positive safe integer');
+    initializeLoopingItems();
+    const state = { inventory: { ...inventory }, leftovers: {}, quantities: {}, ingredients: {}, missing: {}, tableAdded: false };
+    planNeed(state, targetItem, quantity, 0, tableAvailable, true);
+    if (Object.keys(state.missing).length > 0) return { steps: [], missingItems: state.missing };
+
+    const steps = [];
+    const visited = new Set();
+    const visit = item => {
+        if (visited.has(item) || !state.quantities[item]) return;
+        visited.add(item);
+        for (const ingredient of state.ingredients[item] ?? []) visit(ingredient);
+        steps.push({ itemName: item, quantity: state.quantities[item] });
+    };
+    visit(targetItem);
+    return { steps, missingItems: {} };
+}
+
+function planShortfall(state) {
+    return Object.values(state.missing).reduce((sum, count) => sum + count, 0);
+}
+
+// Takes `count` of `item` from the inventory, then from earlier surplus, then plans the crafts for the rest.
+// A fresh item (the target) is always crafted, whatever the inventory holds.
+function planNeed(state, item, count, depth, tableAvailable, fresh = false) {
+    let rest = count;
+    if (!fresh) {
+        const fromInventory = Math.min(state.inventory[item] ?? 0, rest);
+        state.inventory[item] = (state.inventory[item] ?? 0) - fromInventory;
+        rest -= fromInventory;
+        if (rest === 0) return;
+    }
+    const recipes = isBaseItem(item) || depth > PLAN_MAX_DEPTH ? null : getItemCraftingRecipes(item);
+    if (!recipes?.length) {
+        state.missing[item] = (state.missing[item] ?? 0) + rest;
+        return;
+    }
+    // One craft call per item makes its whole output, so surplus from an earlier need is part of this step.
+    state.quantities[item] = (state.quantities[item] ?? 0) + rest;
+    const fromSurplus = Math.min(state.leftovers[item] ?? 0, rest);
+    if (fromSurplus > 0) state.leftovers[item] -= fromSurplus;
+    if (rest === fromSurplus) return;
+
+    for (const recipe of recipes) {
+        const trial = structuredClone(state);
+        planRecipe(trial, item, rest - fromSurplus, recipe, depth, tableAvailable);
+        if (planShortfall(trial) === planShortfall(state)) {
+            Object.assign(state, trial);
+            return;
+        }
+    }
+    planRecipe(state, item, rest - fromSurplus, recipes[0], depth, tableAvailable);
+}
+
+function planRecipe(state, item, stillNeeded, [ingredients, { craftedCount, requiresTable }], depth, tableAvailable) {
+    const batches = Math.ceil(stillNeeded / craftedCount);
+    state.leftovers[item] = (state.leftovers[item] ?? 0) + batches * craftedCount - stillNeeded;
+    // A nested need can replace the state's fields, so the list is looked up again for each push.
+    const need = name => (state.ingredients[item] ??= []).push(name);
+    if (requiresTable && !tableAvailable && !state.tableAdded) {
+        state.tableAdded = true;
+        planNeed(state, 'crafting_table', 1, depth + 1, tableAvailable);
+        need('crafting_table');
+    }
+    for (const [name, perBatch] of Object.entries(ingredients)) {
+        planNeed(state, name, perBatch * batches, depth + 1, tableAvailable);
+        need(name);
+    }
 }
 
 function formatPlan(targetItem, { required, steps, leftovers }) {
