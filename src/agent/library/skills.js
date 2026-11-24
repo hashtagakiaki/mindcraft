@@ -228,6 +228,30 @@ function isActionCancelled(bot, context) {
     return !!bot.interrupt_code || !!context?.signal?.aborted;
 }
 
+// An allowed scaffold with none in inventory is a cause the caller can fix by gathering.
+export function navigationScaffoldShortage(bot, allowedNames) {
+    const allowed = [...allowedNames];
+    const inInventory = bot.inventory.items().filter(item => allowed.includes(item.name))
+        .reduce((total, item) => total + item.count, 0);
+    const hint = allowed.length > 0 && inInventory === 0
+        ? ` No scaffold blocks (${allowed.join('/')}) are in inventory, so the search could not pillar or bridge; collect some first, for example with collectBlock({blockType:"dirt"}).` : '';
+    return { allowed, inInventory, hint };
+}
+
+// Names the search may place; movements lists the allowed ids, not only the carried ones.
+function movementScaffoldNames(bot, movements) {
+    if (movements?.canPlaceOn === false) return [];
+    return (movements?.scafoldingBlocks ?? []).map(id => bot.registry?.items?.[id]?.name).filter(Boolean);
+}
+
+// A failed search that could not pillar or bridge for lack of scaffolds says so after the original message.
+function addNavigationScaffoldShortage(bot, err, movements) {
+    const { allowed, inInventory, hint } = navigationScaffoldShortage(bot, movementScaffoldNames(bot, movements));
+    if (!hint) return;
+    err.message += hint;
+    err.navigation.scaffold = { allowed, inInventory };
+}
+
 function routeMovements(bot, movementOverride = null, positionPolicy = null) {
     const supplied = movementOverride && typeof movementOverride === 'object' ? movementOverride : null;
     const movements = supplied ?? new pf.Movements(bot);
@@ -3008,18 +3032,14 @@ async function runStaticNavigation(bot, goal, movementOverride, positionRoute) {
                         const targetBlocker = reachPositionTargetBlocker(bot, positionRoute.target, movements.canDig);
                         const code = hasUnconfirmedNavigationCell(bot, unconfirmed) ? 'no_progress' : targetBlocker?.code ??
                             (['partial', 'timeout'].includes(path.status) ? 'search_limit' : 'route_not_found');
-                        // An allowed scaffold with none in inventory is a cause the caller can fix by gathering.
                         // movements lists only carried scaffolds, so read the allowed names from the policy.
                         const editPolicy = navigationPolicy();
                         const scaffoldNames = editPolicy ? (editPolicy.scaffold === 'forbid' ? [] : [...(editPolicy.scaffoldBlocks ?? [])])
                             : positionRoute.policy?.allowScaffold ? [...(positionRoute.policy.scaffoldBlocks ?? [])] : [];
-                        const scaffoldCount = bot.inventory.items().filter(item => scaffoldNames.includes(item.name))
-                            .reduce((total, item) => total + item.count, 0);
-                        const noScaffold = scaffoldNames.length > 0 && scaffoldCount === 0;
-                        throw navigationFailure(code, `Path search ended ${path.status} without a safe next segment.`
-                            + (noScaffold ? ` No scaffold blocks (${scaffoldNames.join('/')}) are in inventory, so the search could not pillar or bridge; collect some first, for example with collectBlock({blockType:"dirt"}).` : ''),
+                        const { allowed, inInventory, hint } = navigationScaffoldShortage(bot, scaffoldNames);
+                        throw navigationFailure(code, `Path search ended ${path.status} without a safe next segment.${hint}`,
                             { ...search, phase: targetBlocker ? 'target' : 'search', targetBlocker,
-                                scaffold: { allowed: scaffoldNames, inInventory: scaffoldCount } });
+                                scaffold: { allowed, inInventory } });
                     }
                     const node = typeof end.hash === 'string' ? end.hash.split(',').map(Number) : [];
                     if (node.length !== 3 || !node.every(Number.isSafeInteger)) {
@@ -3360,6 +3380,7 @@ async function runNavigationSegment(bot, goal, final_movements, { explicit = tru
                     position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
                     observedAt: new Date().toISOString(),
                 };
+                if (navigationCode === 'search_limit' || navigationCode === 'route_not_found') addNavigationScaffoldShortage(bot, err, final_movements);
                 throw err;
             }
         }
@@ -3379,6 +3400,7 @@ async function runNavigationSegment(bot, goal, final_movements, { explicit = tru
                 position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
                 observedAt: new Date().toISOString(),
             };
+            if (navigationCode === 'search_limit' || navigationCode === 'route_not_found') addNavigationScaffoldShortage(bot, error, final_movements);
             throw error;
         }
         recordNavigationArrival(bot);
