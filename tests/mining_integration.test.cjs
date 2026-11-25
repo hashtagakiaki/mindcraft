@@ -544,6 +544,40 @@ async function main() {
     if (!collects) assert.match(bot.output, /stands on it over a drop/)
   }
 
+  // A match whose drop falls past the route drop height or into liquid is collected only after the others
+  // (mindcraft-qa regress-tall-tree: a bridge tip over the sea dropped its dirt into the water).
+  // The bot stands on a scaffold at y=8; the first candidate has only water (or only air) below it.
+  for (const [label, below, other, dug] of [
+    ['water below, solid-backed grass further away', 'water', 'grass_block', 'grass_block'],
+    ['air below, nothing else', 'air', null, 'dirt']
+  ]) {
+    const at = (x, y, z) => ({ x, y, z, offset(dx, dy, dz) { return at(x + dx, y + dy, z + dz) } })
+    const target = name => ({ name, drops: [10], position: at(name === 'dirt' ? 1 : 3, 8, 0), canHarvest: () => true })
+    const candidates = [target('dirt'), ...(other ? [target(other)] : [])]
+    const dugNames = []
+    const scenario = { collectBlocks: [...candidates], currentAir: false, async collect() {},
+      async dig(block, bot) {
+        dugNames.push(block.name)
+        scenario.collectBlocks = scenario.collectBlocks.filter(candidate => candidate.name !== block.name)
+        scenario.currentAir = true
+        const drop = droppedItem(10, block.position.x + 0.5)
+        drop.position.y = 8.5
+        spawnAndPickup(bot, drop)
+      } }
+    const bot = createBot(scenario)
+    bot.entity.position = { x: 0, y: 9, z: 0, floored() { return this }, offset() { return this }, clone() { return this } }
+    bot.blockAt = position => {
+      const found = candidates.find(candidate => candidate.position.x === position.x && candidate.position.y === position.y && candidate.position.z === position.z)
+      if (found) return scenario.currentAir ? { name: 'air', type: 0, position, boundingBox: 'empty' } : { ...found, type: 15, position }
+      if (position.y === 8 && position.x === 0) return { name: 'stone', type: 1, position, boundingBox: 'block' }
+      if (position.x === 3 && position.y === 7) return { name: 'stone', type: 1, position, boundingBox: 'block' }
+      if (position.x === 1 && position.y <= 4 && below === 'water') return { name: 'water', type: 26, position, boundingBox: 'empty' }
+      return { name: 'air', type: 0, position, boundingBox: 'empty' }
+    }
+    assert.equal(await collectBlock(bot, 'dirt'), true, `${label}\n${bot.output}`)
+    assert.deepEqual(dugNames, [dug], label)
+  }
+
   // Neither the approach nor the drop pickup may scaffold with the collected item
   // (mindcraft-qa tool-break-recovery: three confirmed pickups left +2 in inventory).
   {

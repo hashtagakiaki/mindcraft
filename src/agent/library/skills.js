@@ -1425,15 +1425,23 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
 
     // Targets that disappeared during the approach; they do not use up the count.
     const skipped = [...(exclude ?? [])];
-    // The nearest match can be the block under the feet. Digging it is ordinary unless nothing
-    // below is within the route drop height: collecting dirt on a one-block bridge fell 32 blocks.
-    const isFootingOverDrop = ({ x, y, z }) => {
-        const feet = bot.entity.position;
-        if (x !== Math.floor(feet.x) || y !== Math.floor(feet.y) - 1 || z !== Math.floor(feet.z)) return false;
+    // A drop that falls past the route drop height or into liquid cannot be picked up again by
+    // the usual route: a bridge tip over the sea dropped its dirt into the water and the pickup
+    // followed it down (mindcraft-qa regress-tall-tree).
+    const dropFallsAway = ({ x, y, z }) => {
         for (let depth = 1; depth <= movements.maxDropDown; depth++) {
-            if (bot.blockAt(new Vec3(x, y - depth, z))?.boundingBox === 'block') return false;
+            const below = bot.blockAt(new Vec3(x, y - depth, z));
+            if (below?.boundingBox === 'block') return false;
+            if (below?.name === 'water' || below?.name === 'lava') return true;
         }
         return true;
+    };
+    // The nearest match can be the block under the feet. Digging it is ordinary unless nothing
+    // below is within the route drop height: collecting dirt on a one-block bridge fell 32 blocks.
+    const isFootingOverDrop = position => {
+        const feet = bot.entity.position;
+        return position.x === Math.floor(feet.x) && position.y === Math.floor(feet.y) - 1 && position.z === Math.floor(feet.z)
+            && dropFallsAway(position);
     };
     let footing = null;
     const isCancelled = () => !!bot.interrupt_code || operationContext()?.signal?.aborted === true;
@@ -1442,7 +1450,9 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
             stop = { code: 'cancelled', reason: 'Collection was interrupted.' };
             break;
         }
-        let blocks = world.getNearestBlocksWhere(bot, block => {
+        // Matches whose drop falls away are collected only after the others.
+        let deferred = false;
+        const nearest = allowFalling => world.getNearestBlocksWhere(bot, block => {
             if (!blocktypes.includes(block.name)) {
                 return false;
             }
@@ -1462,8 +1472,15 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                 footing = block.position;
                 return false;
             }
-            return movements.safeToBreak(block) || unsafeBlocks.includes(block.name);
+            if (!(movements.safeToBreak(block) || unsafeBlocks.includes(block.name))) return false;
+            if (!allowFalling && dropFallsAway(block.position)) {
+                deferred = true;
+                return false;
+            }
+            return true;
         }, 64, 1);
+        let blocks = nearest(false);
+        if (blocks.length === 0 && deferred) blocks = nearest(true);
 
         if (blocks.length === 0) {
             stop = { code: 'not_found', reason: `No ${collected === 0 ? '' : 'more '}${blockType} nearby to collect.`
