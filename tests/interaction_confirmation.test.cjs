@@ -199,22 +199,34 @@ async function main() {
   assert.equal(await skills.useDoor(unreachableDoor, doorPos), false, 'door navigation failure prevents crossing')
   assert.equal(unreachableDoor.controlStates, undefined)
 
-  // A gate closed on a mob standing in its cell names that mob (qa sheep-pen, 2026-11-21).
+  // A gate closed on a mob standing in its cell stays closed and fails with the occupants (qa sheep-pen, 2026-11-21).
+  const closingGate = (name, entities) => {
+    let state = makeBlock(name, doorPos, { open: true })
+    const bot = makeBot({ block: state, blockStates: [[doorPos, state]],
+      onActivateBlock(_block, target) { state = makeBlock(name, doorPos, { open: false }); emitBlock(target, doorPos, state) } })
+    bot.entities = { 1: bot.entity, ...entities }
+    return bot
+  }
+  const sheepInGate = { 2: { name: 'sheep', position: { x: 2.5, y: 0, z: -0.1 }, width: 0.9, height: 1.3 },
+    3: { name: 'cow', position: { x: 6.5, y: 0, z: 0.5 }, width: 0.9, height: 1.4 } }
   {
-    const gateBlock = makeBlock('oak_fence_gate', doorPos, { open: true })
-    const gateBot = makeBot({ block: gateBlock, blockStates: [[doorPos, gateBlock]] })
-    gateBot.entities = {
-      1: gateBot.entity,
-      2: { name: 'sheep', position: { x: 2.5, y: 0, z: -0.1 }, width: 0.9, height: 1.3 },
-      3: { name: 'cow', position: { x: 6.5, y: 0, z: 0.5 }, width: 0.9, height: 1.4 },
-    }
-    assert.equal(await skills.activateNearestBlock(gateBot, 'oak_fence_gate', doorPos), true)
-    assert.match(gateBot.output, /Entities overlapping the oak_fence_gate cell: sheep at x:2\.5, y:[-0-9.]+, z:-0\.1/, gateBot.output)
+    const gateBot = closingGate('oak_fence_gate', sheepInGate)
+    assert.equal(await skills.activateNearestBlock(gateBot, 'oak_fence_gate', doorPos), false)
+    assert.match(gateBot.output, /Closed at .* overlap its cell and are not on either side: sheep at x:2\.5, y:[-0-9.]+, z:-0\.1/, gateBot.output)
     assert.doesNotMatch(gateBot.output, /cow/, 'an entity away from the gate is not listed')
-    const emptyGate = makeBot({ block: gateBlock, blockStates: [[doorPos, gateBlock]] })
-    emptyGate.entities = { 1: emptyGate.entity }
+    assert.equal(gateBot.blockAt(doorPos).getProperties().open, false, 'the gate stays closed')
+    assert.equal(gateBot.listenerCount('blockUpdate'), 0)
+    const emptyGate = closingGate('oak_fence_gate', {})
     assert.equal(await skills.activateNearestBlock(emptyGate, 'oak_fence_gate', doorPos), true)
-    assert.doesNotMatch(emptyGate.output, /Entities overlapping/, 'an empty gateway reports nothing')
+    assert.doesNotMatch(emptyGate.output, /overlap its cell/, 'an empty gateway reports nothing')
+    const itemGate = closingGate('oak_fence_gate', { 2: { name: 'item', position: { x: 2.5, y: 0, z: 0.5 } } })
+    assert.equal(await skills.activateNearestBlock(itemGate, 'oak_fence_gate', doorPos), true, 'a dropped item does not block the gateway')
+    // Opening a closed gate never fails on an occupant.
+    let closedState = makeBlock('oak_fence_gate', doorPos, { open: false })
+    const opening = makeBot({ block: closedState, blockStates: [[doorPos, closedState]],
+      onActivateBlock(_block, target) { closedState = makeBlock('oak_fence_gate', doorPos, { open: true }); emitBlock(target, doorPos, closedState) } })
+    opening.entities = { 1: opening.entity, ...sheepInGate }
+    assert.equal(await skills.activateNearestBlock(opening, 'oak_fence_gate', doorPos), true, 'opening onto a mob succeeds')
   }
 
   for (const name of ['oak_door', 'oak_fence_gate', 'bamboo_fence_gate', 'warped_fence_gate']) {
@@ -237,13 +249,20 @@ async function main() {
     assert.equal(gate.listenerCount('blockUpdate'), 0)
   }
   {
-    let state = makeBlock('oak_fence_gate', doorPos, { open: true })
-    const penGate = makeBot({ block: state, blockStates: [[doorPos, state]],
-      onActivateBlock(_block, bot) { state = makeBlock('oak_fence_gate', doorPos, { open: false }); emitBlock(bot, doorPos, state) } })
-    penGate.entities = { 1: penGate.entity,
-      2: { name: 'sheep', position: { x: doorPos.x + 0.5, y: doorPos.y, z: doorPos.z + 0.58 }, width: 0.9, height: 1.3 } }
-    assert.equal(await skills.useDoor(penGate, doorPos, { open: false }), true, 'closing onto a mob still closes the gate')
+    const penGate = closingGate('oak_fence_gate', { 2: { name: 'sheep', position: { x: doorPos.x + 0.5, y: doorPos.y, z: doorPos.z + 0.58 }, width: 0.9, height: 1.3 } })
+    assert.equal(await skills.useDoor(penGate, doorPos, { open: false }), false, 'closing onto a mob is a gateway_occupied failure')
     assert.match(penGate.output, /overlap its cell and are not on either side: sheep at/, penGate.output)
+    assert.equal(penGate.blockAt(doorPos).getProperties().open, false, 'the gate stays closed and is not reopened')
+    const emptyPen = closingGate('oak_fence_gate', {})
+    assert.equal(await skills.useDoor(emptyPen, doorPos, { open: false }), true, 'closing an empty gateway succeeds')
+    // The legacy open, walk through, close path ends with the same check.
+    const legacyBlock = makeBlock('oak_door', doorPos, { open: false })
+    let legacyState = legacyBlock
+    const legacy = makeBot({ block: legacyBlock, blockStates: [[doorPos, legacyBlock]],
+      onActivateBlock(_block, target) { legacyState = makeBlock('oak_door', doorPos, { open: !legacyState.getProperties().open }); emitBlock(target, doorPos, legacyState) } })
+    legacy.entities = { 1: legacy.entity, 2: { name: 'sheep', position: { x: 2.5, y: 0, z: 0.5 }, width: 0.9, height: 1.3 } }
+    assert.equal(await skills.useDoor(legacy, doorPos), false, 'legacy close onto a mob is a gateway_occupied failure')
+    assert.match(legacy.output, /overlap its cell/, legacy.output)
   }
   const unresponsiveGateBlock = makeBlock('oak_fence_gate', doorPos)
   const unresponsiveGate = makeBot({ block: unresponsiveGateBlock, blockStates: [[doorPos, unresponsiveGateBlock]] })

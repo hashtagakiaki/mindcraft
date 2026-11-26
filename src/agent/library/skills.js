@@ -4681,6 +4681,15 @@ export async function stay(bot, seconds=30) {
     return true;
 }
 
+// A door or gate closes onto a mob standing in its cell; that mob is in the gateway, on neither side.
+function failGatewayOccupied(bot, position, closed) {
+    const occupants = entitiesInCell(bot, position);
+    if (!occupants.length) return null;
+    return failSkill(bot, 'gateway_occupied',
+        `${closed} at ${position}, but these entities overlap its cell and are not on either side: ${occupants.join('; ')}. The door or gate stays closed; they are in the gateway, on neither side of it.`,
+        { occupants });
+}
+
 export async function useDoor(bot, door_pos=null, options={}) {
     /**
      * Use a wooden door or fence gate, optionally setting its open state without crossing.
@@ -4731,12 +4740,9 @@ export async function useDoor(bot, door_pos=null, options={}) {
                 if (!confirmed || bot.interrupt_code) {
                     return failSkill(bot, 'unconfirmed', `Could not confirm ${options.open ? 'opening' : 'closing'} the door or gate at ${door_pos}.`);
                 }
-                // A gate closes onto a mob standing in its cell; that mob is in the gateway, not on either side.
-                const occupants = options.open ? [] : entitiesInCell(bot, door_pos);
-                if (occupants.length) {
-                    const reason = `Closed at ${door_pos}, but these entities overlap its cell and are not on either side: ${occupants.join('; ')}.`;
-                    log(bot, reason);
-                    reportSkillOutcome({ ok: true, status: 'complete', reason, occupants });
+                if (!options.open) {
+                    const occupied = failGatewayOccupied(bot, door_pos, 'Closed');
+                    if (occupied !== null) return occupied;
                 }
                 return true;
             } finally { changed.cleanup(); }
@@ -4764,7 +4770,18 @@ export async function useDoor(bot, door_pos=null, options={}) {
         bot.setControlState('forward', false);
         forwardEnabled = false;
         doorBlock = bot.blockAt(door_pos);
-        if (isOpen(doorBlock)) await bot.activateBlock(doorBlock);
+        if (isOpen(doorBlock)) {
+            const closing = waitForBlockUpdate(bot, door_pos, block => block?.name === doorBlock.name && !isOpen(block), INTERACTION_CONFIRM_TIMEOUT_MS);
+            try {
+                await bot.activateBlock(doorBlock);
+                if (await closing.promise) {
+                    const occupied = failGatewayOccupied(bot, door_pos, 'Closed');
+                    if (occupied !== null) return occupied;
+                }
+            } finally {
+                closing.cleanup();
+            }
+        }
 
         log(bot, `Used door at ${door_pos}.`);
         return true;
@@ -5021,13 +5038,21 @@ export async function activateNearestBlock(bot, type, position=null) {
             await goToGoal(bot, new pf.goals.GoalNear(pos.x, pos.y, pos.z, 4));
         }
     }
-    await bot.activateBlock(block);
-    log(bot, `Activated ${type} at x:${block.position.x.toFixed(1)}, y:${block.position.y.toFixed(1)}, z:${block.position.z.toFixed(1)}.`);
-    if (/_door$|_fence_gate$/.test(type)) {
-        // A gate can close on a mob standing in its own cell; the mob is then neither inside nor
-        // outside the pen (mindcraft-qa sheep-pen: a sheep at z=-309.6 in the gate at z=-310).
-        const occupants = entitiesInCell(bot, block.position);
-        if (occupants.length) log(bot, `Entities overlapping the ${type} cell: ${occupants.join('; ')}. They are in the gateway, not on either side.`);
+    // Only an open door or gate can end up closed on a mob, so only that case waits for the new state.
+    const isDoorLike = /_door$|_fence_gate$/.test(type);
+    const wasOpen = isDoorLike && block.getProperties?.().open === true;
+    const closing = wasOpen
+        ? waitForBlockUpdate(bot, block.position, updated => updated?.name === block.name && updated.getProperties?.().open === false, INTERACTION_CONFIRM_TIMEOUT_MS)
+        : null;
+    try {
+        await bot.activateBlock(block);
+        log(bot, `Activated ${type} at x:${block.position.x.toFixed(1)}, y:${block.position.y.toFixed(1)}, z:${block.position.z.toFixed(1)}.`);
+        if (closing && await closing.promise) {
+            const occupied = failGatewayOccupied(bot, block.position, 'Closed');
+            if (occupied !== null) return occupied;
+        }
+    } finally {
+        closing?.cleanup();
     }
     return true;
 }

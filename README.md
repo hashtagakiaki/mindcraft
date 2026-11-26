@@ -124,7 +124,7 @@ Native decision instructions require comparing the entire request with observed 
 
 資材探索では必要量の所在が分かったら回収へ移り、不足分だけ追加探索します。操作失敗後は、原因を変えられる別手段を次の実行で試し、その結果または試せない具体的な根拠を確かめてから未達を報告します。共通指示による行動方針であり、モデルが必ず従う保証ではありません。
 
-`skills.useDoor({position?, open?})` は木製ドアと柵のゲートに対応します。`open:true` は開けたまま、`open:false` は閉じた状態にし、サーバーのblock更新を確認します。状態指定時は自動で通過しないため、動物の誘導中も開けておけます。省略時は従来の「開ける→通過→閉じる」を保ちます。legacyは `skills.useDoor(bot, position, {open:true})`。既に要求状態なら再クリックせず成功し、状態が不明・未確認なら失敗します。
+`skills.useDoor({position?, open?})` は木製ドアと柵のゲートに対応します。`open:true` は開けたまま、`open:false` は閉じた状態にし、サーバーのblock更新を確認します。状態指定時は自動で通過しないため、動物の誘導中も開けておけます。省略時は従来の「開ける→通過→閉じる」を保ちます。閉じたマスにitemとexperience_orb以外のentityが重なると、門・扉は閉じたまま `code: gateway_occupied` と `occupants` で失敗します（そのentityは柵のどちら側にもいません）。`activateNearestBlock` でドア・ゲートを閉じた場合も同じです。legacyは `skills.useDoor(bot, position, {open:true})`。既に要求状態なら再クリックせず成功し、状態が不明・未確認なら失敗します。
 
 The Node20 `tests/targeted_sdk.test.cjs`, `tests/vision_sdk_validation.test.cjs` and `tests/codex_session.test.cjs` fixtures exercise the real Coder/SES/ActionManager boundary. They cover distinct targets, validation before side effects, unknown/occluded/unreachable targets, cancellation and close, compatibility, and diagnosis in a new task after a saved TypeError.
 
