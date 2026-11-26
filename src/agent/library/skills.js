@@ -650,12 +650,12 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
         if (placedTable) {
             await withSkillPhase('cleanup', () => collectBlock(bot, 'crafting_table', 1));
         }
-        const [{ requiredItems }] = rankCraftingRecipes(bot, itemName,
+        const [{ requiredItems, missingItems, executions }] = rankCraftingRecipes(bot, itemName,
             craftedCount => nativeOptions?.quantity == null ? num : Math.ceil(nativeOptions.quantity / craftedCount), craftingTableUsable(bot));
-        const missingItems = recipeShortfall(requiredItems, world.getInventoryCounts(bot));
+        const totalItems = Object.entries(requiredItems).map(([key, value]) => `${key}: ${value * executions}`).join(', ');
         return failSkill(bot, 'missing_ingredients',
-            `You do not have the resources to craft a ${itemName}. It requires: ${Object.entries(requiredItems).map(([key, value]) => `${key}: ${value}`).join(', ')}.`,
-            { requiredItems, missingItems });
+            `You do not have the resources to craft ${itemName}${executions > 1 ? ` ${executions} times` : ''}. It requires: ${totalItems}.`,
+            { requiredItems, missingItems, executions });
     }
     
     if (craftingTable) {
