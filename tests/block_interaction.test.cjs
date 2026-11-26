@@ -89,8 +89,12 @@ function scene({ feet = new Vec3(-2.9, 64, -2.1), name = 'spruce_log', obstructi
     bestHarvestTool:()=>null, getPathTo:()=>({status:'success'}),
     async goto(goal) {
       bot.moves.push(goal)
-      assert.equal(this.movements.canDig,false); assert.equal(this.movements.canPlaceOn,false)
-      assert.equal(this.movements.allow1by1towers,false)
+      assert.equal(this.movements.canDig,true); assert.equal(this.movements.canPlaceOn,true)
+      assert.equal(this.movements.allow1by1towers,true)
+      assert.deepEqual(this.movements.scafoldingBlocks,['dirt','cobblestone'].map(name=>registry.itemsByName[name].id))
+      const breaks=this.movements.exclusionAreasBreak.map(rule=>rule(bot.blockAt(target)))
+      assert.ok(breaks.includes(Infinity),'the approached block is never broken')
+      assert.equal(this.movements.exclusionAreasBreak.some(rule=>rule(bot.blockAt(target.offset(1,0,0)))===Infinity),false)
       if(bot.onGoto) await bot.onGoto(goal)
       else bot.entity.position=new Vec3(.5,64,-2.5)
     }, stop(){} }
@@ -281,7 +285,7 @@ async function main() {
     for(const outcome of ['ready','unchanged','unloaded','changed']) {
       const bot=scene({feet:new Vec3(-8.5,64,.5),obstruction:false})
       bot.onGoto=()=>{
-        assert.equal(bot.pathfinder.movements.infiniteLiquidDropdownDistance,false,'an approach without edits takes no long drop into water')
+        assert.equal(bot.pathfinder.movements.infiniteLiquidDropdownDistance,false,'an approach takes no long drop into water')
         if(outcome==='unchanged') return
         bot.entity.position=new Vec3(.5,64,-2.5)
         if(outcome==='unloaded') bot.missing.add(key(target))
@@ -293,6 +297,21 @@ async function main() {
       assert.equal(bot.moves.length,1)
       if(outcome==='ready') assert.equal(bot.moves[0].isEnd(bot.entity.position.floored()),true)
       assert.equal(starts(bot).length,0)
+    }
+    // A target out of reach from the ground (a chest on a pillar): the route may dig and pillar, and when
+    // it still fails the reason names a missing scaffold only if none is carried.
+    const navigation=await load('navigation_policy')
+    for(const carried of [3,0]) {
+      const bot=scene({feet:new Vec3(-8.5,64,.5),obstruction:false})
+      bot.inventory.items=()=>carried?[{name:'dirt',count:carried}]:[]
+      let policy
+      bot.onGoto=()=>{ policy=navigation.navigationPolicy() }
+      const result=await skills.approachBlock(bot,target.x,target.y,target.z)
+      assert.equal(result.status,'blocked')
+      assert.equal(policy.allowDig,true); assert.equal(policy.scaffold,'leave')
+      assert.deepEqual(policy.scaffoldBlocks,['dirt','cobblestone'])
+      assert.deepEqual(result.scaffold,{allowed:['dirt','cobblestone'],inInventory:carried})
+      assert.equal(/No scaffold blocks \(dirt\/cobblestone\) are in inventory/.test(result.reason),carried===0,result.reason)
     }
     await sleep(0)
     console.log('block interaction: seven terrain distance failures, geometric center/face/edge, real shapes/native digging, fresh guards, unknown/range/stop and actual-goal checks passed')

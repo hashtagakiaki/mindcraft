@@ -215,7 +215,7 @@ class GoalCompositeAll {
   heuristic(node) { return Math.max(...this.goals.map(goal => goal.heuristic(node))); }
 }
 class GoalLookAtBlock { constructor(position, world, options) { this.position = position; this.world = world; this.options = options; } heuristic(node) { return Math.hypot(this.position.x - node.x, this.position.z - node.z) + Math.abs(this.position.y - node.y); } }
-export default { goals: { GoalNear, GoalNearXZ, GoalFollow, GoalInvert, GoalCompositeAll, GoalLookAtBlock }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } static isWaterFilled(block) { return block?.name === 'water'; } } };
+export default { goals: { GoalNear, GoalNearXZ, GoalFollow, GoalInvert, GoalCompositeAll, GoalLookAtBlock }, Movements: class { constructor() { this.blocksCantBreak = new Set(); this.blocksToAvoid = new Set(); this.interactableBlocks = new Set(); this.exclusionAreasBreak = []; } getBlock() { return {}; } getLandingBlock() { return null; } static isWaterFilled(block) { return block?.name === 'water'; } } };
 `)
 }
 
