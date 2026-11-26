@@ -430,6 +430,50 @@ async function main() {
     assert.equal(await pickupNearbyItems(bot), true)
     assert.match(bot.output, /Picked up 1 items/, 'a drop still falling onto the bot is picked up')
   }
+  // A drop that rolls to the next cell lower while the bot walks is routed to again at its new landing cell.
+  {
+    const scenario = scenarioFor(ore(), async () => {})
+    scenario.routableFollow = true
+    const bot = createBot(scenario)
+    const item = { id: 90, name: 'item', position: { x: 1.5, y: 0.5, z: 0.5 } }
+    let floorY = 0
+    let gone = false
+    const goals = []
+    bot.nearestEntity = () => gone ? null : item
+    bot.blockAt = position => ({ name: position.y < floorY ? 'stone' : 'air', type: 0, position, boundingBox: position.y < floorY ? 'block' : 'empty' })
+    bot.pathfinder.goto = async goal => {
+      goals.push(goal.entity.position)
+      if (goals.length === 1) {
+        floorY = -1
+        item.position = { x: 2.5, y: -0.5, z: 0.5 }
+      } else {
+        gone = true
+      }
+    }
+    assert.equal(await pickupNearbyItems(bot), true)
+    assert.deepEqual(goals.map(position => [position.x, position.y]), [[1.5, 0], [2.5, -1]], 'the second route targets the new landing cell')
+    assert.match(bot.output, /Picked up 1 items/)
+  }
+  // An item that stays put after its route is skipped once, and the next item is still picked up.
+  {
+    const scenario = scenarioFor(ore(), async () => {})
+    scenario.routableFollow = true
+    const bot = createBot(scenario)
+    bot.entity.position.distanceTo = () => 1
+    const stuck = { id: 91, name: 'item', position: { x: 1.5, y: 0.5, z: 0.5 } }
+    const other = { id: 92, name: 'item', position: { x: 3.5, y: 0.5, z: 0.5 } }
+    const picked = new Set()
+    const goals = []
+    bot.nearestEntity = predicate => [stuck, other].find(item => !picked.has(item) && predicate(item))
+    bot.blockAt = position => ({ name: position.y < 0 ? 'stone' : 'air', type: 0, position, boundingBox: position.y < 0 ? 'block' : 'empty' })
+    bot.pathfinder.goto = async goal => {
+      goals.push(goal.entity.position.x)
+      if (goal.entity.position.x === other.position.x) picked.add(other)
+    }
+    assert.equal(await pickupNearbyItems(bot), true)
+    assert.deepEqual(goals, [1.5, 3.5], 'the stuck item is routed to once, then the next item')
+    assert.match(bot.output, /Picked up 1 items\. Skipped 1 unreachable items/)
+  }
   // The block is re-read after the approach, so a state change does not reach dig as a stale target.
   {
     const scenario = scenarioFor(ore(), async block => {
