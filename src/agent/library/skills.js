@@ -169,6 +169,16 @@ const DEFAULT_NAVIGATION_CHECK_INTERVAL_MS = 250;
 const REACH_POSITION_MAX_DISTANCE = 512;
 const REACH_POSITION_MAX_SEGMENTS = 32;
 const REACH_POSITION_MAX_DURATION_MS = 180_000;
+const APPROACH_SCAFFOLD_BLOCKS = ['dirt', 'cobblestone'];
+
+// An allowed scaffold with none in inventory is a cause the caller can fix by gathering.
+function scaffoldShortage(bot, scaffoldNames) {
+    const inInventory = bot.inventory.items().filter(item => scaffoldNames.includes(item.name))
+        .reduce((total, item) => total + item.count, 0);
+    const note = scaffoldNames.length > 0 && inInventory === 0
+        ? ` No scaffold blocks (${scaffoldNames.join('/')}) are in inventory, so the search could not pillar or bridge; collect some first, for example with collectBlock({blockType:"dirt"}).` : '';
+    return { inInventory, note };
+}
 const REACH_POSITION_SEARCH_RADIUS = 64;
 const REACH_POSITION_SEARCH_TIMEOUT_MS = 1_200;
 const REACH_POSITION_SEARCH_TICK_MS = 60;
@@ -2392,7 +2402,7 @@ export async function takeFromChest(bot, itemName, num=-1, options={}) {
 
 export async function approachBlock(bot, x, y, z) {
     /**
-     * Move to a standing position with a reachable surface aim point for one absolute block, without digging or placing. Center visibility is not required.
+     * Move to a standing position with a reachable surface aim point for one absolute block. Like reachPosition, digs and places dirt/cobblestone scaffolds when needed and leaves them; never breaks the target or interactable blocks, and says in reason when no scaffold blocks are carried. Center visibility is not required.
      * @param {MinecraftBot} bot - Pass bot first.
      * @param {number} x - Absolute block x.
      * @param {number} y - Absolute block y.
@@ -2410,18 +2420,19 @@ export async function approachBlock(bot, x, y, z) {
     if (target.interaction.status === 'unknown') return { status: 'unknown', target, reason: target.interaction.reason };
     const previousMovements = bot.pathfinder.movements;
     const movements = new pf.Movements(bot);
-    movements.canDig = false;
-    movements.canPlaceOn = false;
-    movements.allow1by1towers = false;
-    movements.allowFreeMotion = false;
-    movements.scafoldingBlocks = [];
-    // Without digging or placing, a long drop into water has no way back up.
-    movements.infiniteLiquidDropdownDistance = false;
-    const block = bot.blockAt(new Vec3(x, y, z).floored());
+    configurePositionRoute(bot, movements, { allowDig: true, allowScaffold: true, scaffoldBlocks: APPROACH_SCAFFOLD_BLOCKS, safeWater: false });
+    movements.canDig = true;
+    movements.canPlaceOn = true;
+    // The route may dig around the target, but never the block being approached.
+    const targetBlock = new Vec3(x, y, z).floored();
+    movements.exclusionAreasBreak.push(block => block.position.equals(targetBlock) ? Infinity : 0);
+    const block = bot.blockAt(targetBlock);
     const goal = makeBlockInteractionGoal(bot, block.position);
     let navigationError = null;
+    const go = () => goToGoal(bot, goal, movements);
     try {
-        await goToGoal(bot, goal, movements);
+        await (navigationPolicy() ? go() : runWithNavigationPolicy(bot,
+            { allowDig: true, scaffold: 'leave', scaffoldBlocks: APPROACH_SCAFFOLD_BLOCKS }, go));
     } catch (error) {
         requireActiveTarget(bot);
         navigationError = String(error);
@@ -2432,8 +2443,10 @@ export async function approachBlock(bot, x, y, z) {
     target = world.inspectBlockAt(bot, x, y, z);
     if (!target.loaded) return { status: 'unknown', target, reason: 'Target unloaded during navigation.' };
     if (ready(target)) return { status: 'ready', target };
+    const shortage = scaffoldShortage(bot, APPROACH_SCAFFOLD_BLOCKS);
     return { status: target.interaction.status === 'unknown' ? 'unknown' : 'blocked', target,
-        reason: navigationError || target.interaction.reason };
+        reason: (navigationError || target.interaction.reason).replace(/[.\s]*$/, '.') + shortage.note,
+        scaffold: { allowed: APPROACH_SCAFFOLD_BLOCKS, inInventory: shortage.inInventory } };
 }
 
 export async function inspectChestAt(bot, x, y, z) {
@@ -3008,18 +3021,14 @@ async function runStaticNavigation(bot, goal, movementOverride, positionRoute) {
                         const targetBlocker = reachPositionTargetBlocker(bot, positionRoute.target, movements.canDig);
                         const code = hasUnconfirmedNavigationCell(bot, unconfirmed) ? 'no_progress' : targetBlocker?.code ??
                             (['partial', 'timeout'].includes(path.status) ? 'search_limit' : 'route_not_found');
-                        // An allowed scaffold with none in inventory is a cause the caller can fix by gathering.
                         // movements lists only carried scaffolds, so read the allowed names from the policy.
                         const editPolicy = navigationPolicy();
                         const scaffoldNames = editPolicy ? (editPolicy.scaffold === 'forbid' ? [] : [...(editPolicy.scaffoldBlocks ?? [])])
                             : positionRoute.policy?.allowScaffold ? [...(positionRoute.policy.scaffoldBlocks ?? [])] : [];
-                        const scaffoldCount = bot.inventory.items().filter(item => scaffoldNames.includes(item.name))
-                            .reduce((total, item) => total + item.count, 0);
-                        const noScaffold = scaffoldNames.length > 0 && scaffoldCount === 0;
-                        throw navigationFailure(code, `Path search ended ${path.status} without a safe next segment.`
-                            + (noScaffold ? ` No scaffold blocks (${scaffoldNames.join('/')}) are in inventory, so the search could not pillar or bridge; collect some first, for example with collectBlock({blockType:"dirt"}).` : ''),
+                        const shortage = scaffoldShortage(bot, scaffoldNames);
+                        throw navigationFailure(code, `Path search ended ${path.status} without a safe next segment.${shortage.note}`,
                             { ...search, phase: targetBlocker ? 'target' : 'search', targetBlocker,
-                                scaffold: { allowed: scaffoldNames, inInventory: scaffoldCount } });
+                                scaffold: { allowed: scaffoldNames, inInventory: shortage.inInventory } });
                     }
                     const node = typeof end.hash === 'string' ? end.hash.split(',').map(Number) : [];
                     if (node.length !== 3 || !node.every(Number.isSafeInteger)) {

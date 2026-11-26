@@ -562,6 +562,7 @@ async function main() {
       navigation: { block: table, interaction, inventory: { cobblestone: 3, stick: 2, oak_log: 1, crafting_table: includeTableItem ? 1 : 0 } },
       inventory,
       game: { gameMode: 'survival' },
+      registry: { itemsByName: { dirt: { id: 3 }, cobblestone: { id: 35 } }, blocksByName: {}, blocksArray: [] },
       entity: { position: makePosition(0, 0, 0) },
       modes: { isOn: () => false },
       recipesFor(itemId, _metadata, _count, grid) {
