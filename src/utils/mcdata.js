@@ -140,13 +140,15 @@ export function initBot(username) {
         bot.acceptResourcePack();
     });
 
-    bot.once('login', () => {
-        mc_version = bot.version;
-        mcdata = minecraftData(mc_version);
-        Item = prismarine_items(mc_version);
-    });
+    bot.once('login', () => loadMinecraftData(bot.version));
 
     return bot;
+}
+
+export function loadMinecraftData(version) {
+    mc_version = version;
+    mcdata = minecraftData(mc_version);
+    Item = prismarine_items(mc_version);
 }
 
 export function isHuntable(mob) {
@@ -282,9 +284,13 @@ export function getItemCraftingRecipes(itemName) {
                 recipe[ingredientName] = 0;
             recipe[ingredientName]++;
         }
+        // A 3x3 pattern, or more shapeless ingredients than the 2x2 inventory grid holds, needs a crafting table.
+        const requiresTable = r.inShape
+            ? r.inShape.length > 2 || r.inShape.some(row => row.length > 2)
+            : ingredients.length > 4;
         recipes.push([
             recipe,
-            {craftedCount : r.result.count}
+            {craftedCount : r.result.count, requiresTable}
         ]);
     }
     // sort recipes by if their ingredients include common items
@@ -432,6 +438,11 @@ export function calculateLimitingResource(availableItems, requiredItems, discret
 }
 
 let loopingItems = new Set();
+
+export function isLoopingItem(item) {
+    if (loopingItems.size === 0) initializeLoopingItems();
+    return loopingItems.has(item);
+}
 
 export function initializeLoopingItems() {
 
