@@ -36,7 +36,7 @@ async function setup(root) {
   await writeFile(path.join(root, 'src/utils/mcdata.js'), 'export const getBlockId=()=>1; export const getItemId=()=>1;')
 }
 
-function scene({ feet = new Vec3(-2.9, 64, -2.1), name = 'spruce_log', obstruction = true } = {}) {
+function scene({ feet = new Vec3(-2.9, 64, -2.1), name = 'spruce_log', obstruction = true, at = target } = {}) {
   const bot = new EventEmitter()
   bot.registry = registry; bot.version = '1.21.1'; bot.output = ''; bot.interrupt_code = false
   bot.entity = { id: 1, position: feet.clone(), eyeHeight: 1.62, onGround: true, effects: {}, isInWater: false, yaw: 0, pitch: 0 }
@@ -49,7 +49,7 @@ function scene({ feet = new Vec3(-2.9, 64, -2.1), name = 'spruce_log', obstructi
     const block = Block.fromStateId(stateId, 0); block.position = p.floored()
     bot.blocks.set(key(p), block); return block
   }
-  bot.put(target, name)
+  bot.put(at, name); bot.approached = at
   if(obstruction) bot.put(new Vec3(-2, 65, -1), 'stone')
   bot.blockAt = p => {
     const pos = p.floored()
@@ -92,9 +92,9 @@ function scene({ feet = new Vec3(-2.9, 64, -2.1), name = 'spruce_log', obstructi
       assert.equal(this.movements.canDig,true); assert.equal(this.movements.canPlaceOn,true)
       assert.equal(this.movements.allow1by1towers,true)
       assert.deepEqual(this.movements.scafoldingBlocks,['dirt','cobblestone'].map(name=>registry.itemsByName[name].id))
-      const breaks=this.movements.exclusionAreasBreak.map(rule=>rule(bot.blockAt(target)))
+      const breaks=this.movements.exclusionAreasBreak.map(rule=>rule(bot.blockAt(bot.approached)))
       assert.ok(breaks.includes(Infinity),'the approached block is never broken')
-      assert.equal(this.movements.exclusionAreasBreak.some(rule=>rule(bot.blockAt(target.offset(1,0,0)))===Infinity),false)
+      assert.equal(this.movements.exclusionAreasBreak.some(rule=>rule(bot.blockAt(bot.approached.offset(0,-1,0)))===Infinity),false)
       if(bot.onGoto) await bot.onGoto(goal)
       else bot.entity.position=new Vec3(.5,64,-2.5)
     }, stop(){} }
@@ -312,6 +312,32 @@ async function main() {
       assert.deepEqual(policy.scaffoldBlocks,['dirt','cobblestone'])
       assert.deepEqual(result.scaffold,{allowed:['dirt','cobblestone'],inInventory:carried})
       assert.equal(/No scaffold blocks \(dirt\/cobblestone\) are in inventory/.test(result.reason),carried===0,result.reason)
+    }
+    // A chest on top of a stone pillar, out of reach and ray from the base (side faces need scaffolds):
+    // the pathfinder gets digging and dirt/cobblestone pillars, never breaks the chest, and a missing
+    // scaffold supply is named in the blocked result and in the unloaded-during-navigation result.
+    const chestAt=new Vec3(0,71,0), dirtId=registry.itemsByName.dirt.id
+    for(const [carried,outcome] of [[3,'blocked'],[0,'blocked'],[0,'unloaded']]) {
+      const bot=scene({feet:new Vec3(-.5,64,.5),name:'chest',obstruction:false,at:chestAt})
+      for(let y=64;y<71;y++) bot.put(new Vec3(0,y,0),'stone')
+      bot.inventory.items=()=>carried?[{name:'dirt',count:carried}]:[]
+      let movements
+      bot.onGoto=()=>{
+        movements=bot.pathfinder.movements
+        if(outcome==='unloaded') bot.missing.add(key(chestAt))
+      }
+      const before=starts(bot).length
+      const result=await skills.approachBlock(bot,chestAt.x,chestAt.y,chestAt.z)
+      assert.equal(bot.moves.length,1,'one route search to the pillar top')
+      assert.equal(movements.canDig,true); assert.equal(movements.canPlaceOn,true)
+      assert.equal(movements.allow1by1towers,true)
+      assert.ok(movements.scafoldingBlocks.includes(dirtId))
+      assert.equal(movements.exclusionAreasBreak.some(rule=>rule({position:chestAt})===Infinity),true)
+      assert.equal(result.status,outcome==='unloaded'?'unknown':'blocked',JSON.stringify(result))
+      assert.equal(result.scaffold.inInventory,carried)
+      assert.deepEqual(result.scaffold.allowed,['dirt','cobblestone'])
+      assert.equal(/No scaffold blocks \(dirt\/cobblestone\) are in inventory/.test(result.reason),carried===0,result.reason)
+      assert.equal(starts(bot).length,before)
     }
     await sleep(0)
     console.log('block interaction: seven terrain distance failures, geometric center/face/edge, real shapes/native digging, fresh guards, unknown/range/stop and actual-goal checks passed')

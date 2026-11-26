@@ -2441,12 +2441,13 @@ export async function approachBlock(bot, x, y, z) {
     }
     requireActiveTarget(bot);
     target = world.inspectBlockAt(bot, x, y, z);
-    if (!target.loaded) return { status: 'unknown', target, reason: 'Target unloaded during navigation.' };
-    if (ready(target)) return { status: 'ready', target };
+    if (target.loaded && ready(target)) return { status: 'ready', target };
     const shortage = scaffoldShortage(bot, APPROACH_SCAFFOLD_BLOCKS);
+    const scaffold = { allowed: APPROACH_SCAFFOLD_BLOCKS, inInventory: shortage.inInventory };
+    const withShortage = reason => reason.replace(/[.\s]*$/, '.') + shortage.note;
+    if (!target.loaded) return { status: 'unknown', target, reason: withShortage('Target unloaded during navigation.'), scaffold };
     return { status: target.interaction.status === 'unknown' ? 'unknown' : 'blocked', target,
-        reason: (navigationError || target.interaction.reason).replace(/[.\s]*$/, '.') + shortage.note,
-        scaffold: { allowed: APPROACH_SCAFFOLD_BLOCKS, inInventory: shortage.inInventory } };
+        reason: withShortage(navigationError || target.interaction.reason), scaffold };
 }
 
 export async function inspectChestAt(bot, x, y, z) {
