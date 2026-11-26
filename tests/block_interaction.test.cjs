@@ -339,6 +339,36 @@ async function main() {
       assert.equal(/No scaffold blocks \(dirt\/cobblestone\) are in inventory/.test(result.reason),carried===0,result.reason)
       assert.equal(starts(bot).length,before)
     }
+    // inspectChest without a position: the nearest chest within 4.5 blocks is approached with approachBlock
+    // (digging, scaffolds, shortage reason), not with a bare goToPosition.
+    {
+      const chestAt=new Vec3(0,65,0)
+      const bot=scene({feet:new Vec3(-2.9,64,-2.1),name:'chest',obstruction:false,at:chestAt})
+      for(let x=-1;x<=1;x++) for(let z=-1;z<=1;z++) if(x||z) bot.put(new Vec3(x,65,z),'stone')
+      bot.findBlocks=()=>[chestAt]
+      bot.inventory.items=()=>[]
+      assert.notEqual(helper.resolveBlockInteraction(bot,bot.blockAt(chestAt)).status,'ready','the ring of stone hides every chest face')
+      assert.ok(bot.entity.position.distanceTo(chestAt)<=4.5)
+      let movements
+      bot.onGoto=()=>{ movements=bot.pathfinder.movements }
+      const result=await skills.inspectChest(bot)
+      assert.equal(bot.moves.length,1,'one approach route search, no separate goToPosition')
+      assert.equal(movements.canDig,true); assert.equal(movements.canPlaceOn,true)
+      assert.equal(result.status,'blocked',JSON.stringify(result))
+      assert.deepEqual(result.scaffold,{allowed:['dirt','cobblestone'],inInventory:0})
+      assert.match(result.reason,/No scaffold blocks \(dirt\/cobblestone\) are in inventory/)
+    }
+
+    // The approach route keeps the host's protected areas: nothing inside one is dug or placed on.
+    {
+      const bot=scene({feet:new Vec3(-8.5,64,.5),obstruction:false}), inside=new Vec3(-4,64,0), outside=new Vec3(-5,64,0)
+      bot.put(inside,'cobblestone'); bot.put(outside,'cobblestone')
+      bot.navigationProtection={contains:p=>Math.floor(p.x)===inside.x}
+      let digs
+      bot.onGoto=()=>{ const m=bot.pathfinder.movements; digs={inside:m.safeToBreak(bot.blockAt(inside)),outside:m.safeToBreak(bot.blockAt(outside)),placeInside:m.editProtected(inside)} }
+      await skills.approachBlock(bot,target.x,target.y,target.z)
+      assert.deepEqual(digs,{inside:false,outside:true,placeInside:true})
+    }
     await sleep(0)
     console.log('block interaction: seven terrain distance failures, geometric center/face/edge, real shapes/native digging, fresh guards, unknown/range/stop and actual-goal checks passed')
   } finally { await rm(root,{recursive:true,force:true}) }
