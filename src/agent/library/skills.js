@@ -2490,7 +2490,7 @@ export async function approachBlock(bot, x, y, z) {
      * @param {number} x - Absolute block x.
      * @param {number} y - Absolute block y.
      * @param {number} z - Absolute block z.
-     * @returns {Promise<object>} status ready/unknown/blocked and fresh target with interaction aim/face/distance; movement is not interaction success. A blocked reason names a missing scaffold supply. No sampled aim is not proof that every surface point is occluded.
+     * @returns {Promise<object>} status ready/unknown/blocked and fresh target with interaction aim/face/distance; movement is not interaction success. A blocked reason names a missing scaffold supply when a scaffold-allowed search ran out of next segments. No sampled aim is not proof that every surface point is occluded.
      * @example
      * log(bot, JSON.stringify(await skills.approachBlock(bot, 10, 64, -3)));
      **/
@@ -3075,7 +3075,8 @@ async function runStaticNavigation(bot, goal, movementOverride, positionRoute) {
         else await escapeHazard(bot, movements, goal);
         active();
         if (positionRoute && kind === 'water') {
-            if (isWaterFilled(bot.blockAt(positionRoute.target.floored()))) {
+            // An interaction target is reached from beside it, so its own water does not decide the egress.
+            if (!positionRoute.interaction && isWaterFilled(bot.blockAt(positionRoute.target.floored()))) {
                 throw navigationFailure('unsafe_state', 'Hazard egress reached air; the requested feet block is still under water.',
                     { hazard: before, currentHazard: hazardEvidence(bot, kind) });
             }
