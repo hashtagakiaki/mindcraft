@@ -1751,13 +1751,14 @@ export async function pickupNearbyItems(bot, movements = null) {
             // cell can finish while it is still falling there.
             const pickupDeadline = Date.now() + ITEM_PICKUP_WAIT_MS;
             const fallDeadline = Date.now() + DROP_FALL_WAIT_MS;
+            // Another item becoming the nearer one says nothing about this one, so wait for it to vanish.
             do {
                 await new Promise(resolve => setTimeout(resolve, 50));
-                nearestItem = getNearestItem(bot);
-            } while (nearestItem === item && !bot.interrupt_code && (Date.now() < pickupDeadline
+            } while (bot.entities[item.id] && !bot.interrupt_code && (Date.now() < pickupDeadline
                 || (item.position.y > landing.y + 0.5 && Date.now() < fallDeadline)));
-            if (nearestItem !== item) {
+            if (!bot.entities[item.id]) {
                 pickedUp++;
+                nearestItem = getNearestItem(bot);
                 break;
             }
             if (bot.interrupt_code) break pickup;
