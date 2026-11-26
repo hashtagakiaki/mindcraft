@@ -558,9 +558,11 @@ async function main() {
         wooden_pickaxe: [{ [`${wood}_planks`]: 3, stick: 2 }, 1, true],
       })) (book[name] ??= []).push([entry[0], { craftedCount: entry[1], requiresTable: entry[2] }])
     }
+    // The bamboo stick recipe is listed first, as in the game data, so a one-execution pick would choose it over the planks.
+    book.stick.unshift([{ bamboo: 2 }, { craftedCount: 1, requiresTable: false }])
     return book
   })()
-  const woodItemIds = { oak_log: 1, oak_planks: 36, crafting_table: 300, wooden_pickaxe: 820, stone_pickaxe: 825, stick: 848, cobblestone: 35, spruce_log: 2001, spruce_planks: 2002 }
+  const woodItemIds = { bamboo: 3001, oak_log: 1, oak_planks: 36, crafting_table: 300, wooden_pickaxe: 820, stone_pickaxe: 825, stick: 848, cobblestone: 35, spruce_log: 2001, spruce_planks: 2002 }
   const woodRecipesFor = (bot, itemId, grid, minResultCount = 1) => {
     const name = Object.entries(woodItemIds).find(([, id]) => id === itemId)?.[0]
     return (woodBook[name] ?? [])
@@ -747,6 +749,15 @@ async function main() {
     assert.deepEqual(stickedPickaxes.result.craftedIntermediates, [{ itemName: 'stick', confirmedQuantity: 4 }])
     assert.deepEqual([stickedPickaxes.held.stone_pickaxe, stickedPickaxes.held.cobblestone, stickedPickaxes.held.stick, stickedPickaxes.held.oak_planks], [2, 0, 2, 0])
     assert.equal(stickedPickaxes.failedCrafts.length, 0)
+    // The recipe that makes the whole quantity is the one crafted: 8 sticks from 4 planks, not 1 from 2 bamboo.
+    const bambooSticks = await runCraftItem('stick', { bamboo: 2, oak_planks: 4 }, {}, 8)
+    assert.deepEqual([bambooSticks.result.ok, bambooSticks.result.status, bambooSticks.result.confirmedQuantity, bambooSticks.result.remainingQuantity],
+      [true, 'complete', 8, 0])
+    assert.deepEqual([bambooSticks.held.stick, bambooSticks.held.oak_planks, bambooSticks.held.bamboo], [8, 0, 2], 'the planks are used and the bamboo stays')
+    // With only the bamboo, the recipe it can run is still crafted as far as it goes.
+    const onlyBamboo = await runCraftItem('stick', { bamboo: 2 }, {}, 8)
+    assert.deepEqual([onlyBamboo.result.ok, onlyBamboo.result.status, onlyBamboo.result.confirmedQuantity, onlyBamboo.result.remainingQuantity],
+      [false, 'partial', 1, 7])
     const noStoneCraft = await runCraftItem('stone_pickaxe', { oak_log: 3 })
     assert.equal(noStoneCraft.result.code, 'missing_ingredients')
     assert.equal(noStoneCraft.result.missingItems.cobblestone, 3)

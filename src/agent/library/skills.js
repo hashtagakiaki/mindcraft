@@ -615,11 +615,15 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
     }
 
     return craftingSync.run(bot, async (craft) => {
+    // Pick among recipes that make the whole requested quantity from the inventory when one does, so a recipe the
+    // inventory can only run once is not chosen over one that finishes; otherwise the nearest recipe runs as many times as it can.
+    const itemId = mc.getItemId(itemName);
+    const resultCount = [nativeOptions?.quantity ?? 1, 1].find(count => bot.recipesFor(itemId, null, count, null)?.length > 0 || bot.recipesFor(itemId, null, count, true)?.length > 0) ?? 1;
     // get recipes that don't require a crafting table
-    let recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, null); 
+    let recipes = bot.recipesFor(itemId, null, resultCount, null);
     let craftingTable = null;
     placeTable: if (!recipes || recipes.length === 0) {
-        recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, true);
+        recipes = bot.recipesFor(itemId, null, resultCount, true);
         if(!recipes || recipes.length === 0) break placeTable; //Don't bother going to the table if we don't have the required resources.
 
         // Look for crafting table
@@ -633,7 +637,7 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
                 await withSkillPhase('preparation', () => placeBlock(bot, 'crafting_table', pos.x, pos.y, pos.z));
                 craftingTable = world.getNearestBlock(bot, 'crafting_table', CRAFTING_TABLE_RANGE);
                 if (craftingTable) {
-                    recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, craftingTable);
+                    recipes = bot.recipesFor(itemId, null, resultCount, craftingTable);
                     placedTable = true;
                 } else {
                     return failSkill(bot, 'confirmation_failed', `Could not confirm a crafting table after placement; refusing to use the inventory grid for ${itemName}.`);
@@ -644,7 +648,7 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
             }
         }
         else {
-            recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, craftingTable);
+            recipes = bot.recipesFor(itemId, null, resultCount, craftingTable);
         }
     }
     if (!recipes || recipes.length === 0) {
