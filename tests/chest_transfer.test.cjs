@@ -91,7 +91,11 @@ function makeBot({ inventoryCounts = [4], chestCounts = [3] } = {}) {
   bot.canDigBlock=()=>true
   bot.lookAt=async point=>{state.lastAim=point}
   bot.pathfinder = { movements: { original: true }, setMovements(m) { this.movements = m },
-    getPathTo: () => ({ status: 'success' }), async goto(goal) {
+    getPathTo: () => ({ status: 'success' }),
+    getPathFromTo(_movements, start) {
+      const result = { status: 'success', path: [{ x: Math.floor(start.x), y: Math.floor(start.y), z: Math.floor(start.z) }, { x: 7, y: 64, z: 0, hash: '7,64,0' }] }
+      return (function* () { yield { result } })()
+    }, async goto(goal) {
       state.approached.push(key(goal.blockPosition || goal.position || chestPositions[1]))
       bot.entity.position = new Vec3(7.5, 64, 0.5)
       state.invisible = false

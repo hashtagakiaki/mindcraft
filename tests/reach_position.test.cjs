@@ -1337,6 +1337,24 @@ async function main() {
       assert.equal(sideExit.testState.edits.length, 0,
         'an open exit beside a lidded column is taken instead of a bare-hand ceiling dig that drowns the bot')
 
+      {
+        // An interaction route targets a block beside which the bot stands, so a target that is itself
+        // under water (a waterlogged chest) does not decide the egress: the route resumes after it.
+        const submergedTarget = makeBot({ hazards: [...waterColumn, { x: 3, y: 64, z: 0, name: 'seagrass' }], solidBlocks: [roof] })
+        submergedTarget.entity.onGround = false
+        const targetCell = new Vec3(3, 64, 0)
+        const route = interaction => ({ target: targetCell, interaction, onSearch: () => {}, arrived: () => submergedTarget.entity.position.x >= 2,
+          policy: { allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt'], safeWater: true, surfaceSwimming: false } })
+        assert.equal(await skills.goToGoal(submergedTarget, new pathfinder.goals.GoalNear(3, 64, 0, 1), null,
+          { positionRoute: route(true) }), true)
+        assert.ok(submergedTarget.entity.position.x >= 2, 'the interaction route resumed and reached the target after the egress')
+        const standingTarget = makeBot({ hazards: [...waterColumn, { x: 3, y: 64, z: 0, name: 'seagrass' }], solidBlocks: [roof] })
+        standingTarget.entity.onGround = false
+        await assert.rejects(() => skills.goToGoal(standingTarget, new pathfinder.goals.GoalNear(3, 64, 0, 1), null,
+          { positionRoute: { ...route(false), arrived: () => standingTarget.entity.position.x >= 2 } }),
+          error => error.navigation?.code === 'unsafe_state', 'a submerged standing cell still ends as unsafe_state')
+      }
+
       const enclosure = [-1, 0, 1].flatMap(x => [-1, 0, 1].flatMap(z => x || z ?
         [64, 65, 66].map(y => ({ x, y, z, name: 'bedrock' })) : []))
       const submerged = makeBot({ hazards: waterColumn, solidBlocks: [roof], wall: enclosure })
