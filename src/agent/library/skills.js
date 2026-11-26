@@ -2485,7 +2485,7 @@ export async function takeFromChest(bot, itemName, num=-1, options={}) {
 
 export async function approachBlock(bot, x, y, z) {
     /**
-     * Move to a standing position with a reachable surface aim point for one absolute block, without digging or placing. Center visibility is not required.
+     * Move to a standing position with a reachable surface aim point for one absolute block, using the shared navigation policy (digging and dirt/cobblestone scaffolds); the target block itself is not dug. Center visibility is not required.
      * @param {MinecraftBot} bot - Pass bot first.
      * @param {number} x - Absolute block x.
      * @param {number} y - Absolute block y.
@@ -2503,18 +2503,17 @@ export async function approachBlock(bot, x, y, z) {
     if (target.interaction.status === 'unknown') return { status: 'unknown', target, reason: target.interaction.reason };
     const previousMovements = bot.pathfinder.movements;
     const movements = new pf.Movements(bot);
-    movements.canDig = false;
-    movements.canPlaceOn = false;
-    movements.allow1by1towers = false;
     movements.allowFreeMotion = false;
-    movements.scafoldingBlocks = [];
-    // Without digging or placing, a long drop into water has no way back up.
+    // A long drop into water can leave no way back up; the shared route policy decides digging and scaffolds.
     movements.infiniteLiquidDropdownDistance = false;
     const block = bot.blockAt(new Vec3(x, y, z).floored());
+    // The target itself is approached, never dug.
+    movements.exclusionAreasBreak.push(candidate => candidate.position.equals(block.position) ? Infinity : 0);
     const goal = makeBlockInteractionGoal(bot, block.position);
+    const go = () => goToGoal(bot, goal, movements);
     let navigationError = null;
     try {
-        await goToGoal(bot, goal, movements);
+        await (navigationPolicy() ? go() : runWithNavigationPolicy(bot, { allowDig: true, scaffold: 'leave', scaffoldBlocks: ['dirt', 'cobblestone'] }, go));
     } catch (error) {
         requireActiveTarget(bot);
         navigationError = String(error);

@@ -89,8 +89,9 @@ function scene({ feet = new Vec3(-2.9, 64, -2.1), name = 'spruce_log', obstructi
     bestHarvestTool:()=>null, getPathTo:()=>({status:'success'}),
     async goto(goal) {
       bot.moves.push(goal)
-      assert.equal(this.movements.canDig,false); assert.equal(this.movements.canPlaceOn,false)
-      assert.equal(this.movements.allow1by1towers,false)
+      assert.equal(this.movements.canDig,true,'the shared route policy digs'); assert.equal(this.movements.allowFreeMotion,false)
+      assert.equal(this.movements.exclusionBreak({position:target}),Infinity,'the target itself is never dug')
+      assert.equal(this.movements.exclusionBreak({position:target.offset(1,0,0)}),0)
       if(bot.onGoto) await bot.onGoto(goal)
       else bot.entity.position=new Vec3(.5,64,-2.5)
     }, stop(){} }
@@ -281,7 +282,7 @@ async function main() {
     for(const outcome of ['ready','unchanged','unloaded','changed']) {
       const bot=scene({feet:new Vec3(-8.5,64,.5),obstruction:false})
       bot.onGoto=()=>{
-        assert.equal(bot.pathfinder.movements.infiniteLiquidDropdownDistance,false,'an approach without edits takes no long drop into water')
+        assert.equal(bot.pathfinder.movements.infiniteLiquidDropdownDistance,false,'an approach takes no long drop into water')
         if(outcome==='unchanged') return
         bot.entity.position=new Vec3(.5,64,-2.5)
         if(outcome==='unloaded') bot.missing.add(key(target))

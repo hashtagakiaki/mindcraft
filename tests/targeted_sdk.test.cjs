@@ -228,14 +228,22 @@ async function main() {
     assert.equal(unknown.target.name,null)
     bot.state.unknown = false; bot.state.visible = false
     const original = bot.pathfinder.movements
+    bot.inventory.items = () => [{ name:'dirt', type:registry.itemsByName.dirt.id, count:8 }]
     const recovered = await skills.approachBlock(bot,0,64,0)
     assert.equal(recovered.status,'ready')
     assert.equal(bot.pathfinder.movements,original)
     const movement = bot.state.moves.at(-1)
     assert.equal(movement.goal.constructor.name,'GoalLookAtBlock')
-    assert.equal(movement.movements.canDig,false)
-    assert.equal(movement.movements.canPlaceOn,false)
-    assert.equal(movement.movements.allow1by1towers,false)
+    // A target the ground cannot reach (a chest atop a pillar): the route digs and scaffolds with the carried dirt, except through the target.
+    const dirtId = registry.itemsByName.dirt.id
+    assert.equal(movement.movements.canDig,true)
+    assert.equal(movement.movements.canPlaceOn,true)
+    assert.equal(movement.movements.allow1by1towers,true)
+    assert.equal(movement.movements.allowFreeMotion,false)
+    assert.equal(movement.movements.infiniteLiquidDropdownDistance,false)
+    assert.ok(movement.movements.scafoldingBlocks.includes(dirtId),'dirt is a scaffold block')
+    assert.equal(movement.movements.exclusionBreak({ position:new Vec3(0,64,0) }),Infinity,'the target is excluded from route breaks')
+    assert.equal(movement.movements.exclusionBreak({ position:new Vec3(1,64,0) }),0)
     bot.state.visible = false; bot.state.route = 'occluded'
     const partial = await skills.approachBlock(bot,0,64,0)
     assert.equal(partial.status,'blocked'); assert.equal(partial.target.visible,false)
