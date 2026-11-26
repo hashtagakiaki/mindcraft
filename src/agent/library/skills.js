@@ -1640,9 +1640,14 @@ export async function collectBlock(bot, blockType, num=1, exclude=null) {
                 // without a deadline or cancellation; a missed entityGone hung
                 // the action until the stop watchdog restarted the bot.
                 await trackNavigationSegment(bot, async () => {
-                    await goToGoal(bot, block.name.endsWith('_ore') || mc.mustCollectManually(blockType)
-                        ? new pf.goals.GoalNear(block.position.x, block.position.y, block.position.z, 2)
-                        : new pf.goals.GoalLookAtBlock(block.position, bot.world), movements);
+                    if (block.name.endsWith('_ore') || mc.mustCollectManually(blockType)) {
+                        await goToGoal(bot, new pf.goals.GoalNear(block.position.x, block.position.y, block.position.z, 2), movements);
+                    } else {
+                        // The segmented route reports a missing scaffold supply instead of a bare path timeout.
+                        const { x, y, z } = block.position;
+                        const reached = world.inspectBlockAt(bot, x, y, z);
+                        if (!(reached.loaded && reached.interaction.status === 'ready')) await approachInteractionTarget(bot, block.position);
+                    }
                     await clearLineToBlock(bot, block);
                     // The target's state or the block itself may have changed during the approach.
                     const current = bot.blockAt(block.position);
@@ -2483,6 +2488,29 @@ export async function takeFromChest(bot, itemName, num=-1, options={}) {
     return chestTransferResult(options, { itemName, requestedQuantity, confirmedQuantity: confirmed, chest });
 }
 
+// Segmented route to a standing position from which `position` can be interacted with. Like other
+// native movement it may dig and place; the target block itself is never dug. Throws goToGoal's error.
+async function approachInteractionTarget(bot, position) {
+    const { x, y, z } = position;
+    const goal = makeBlockInteractionGoal(bot, position);
+    const editPolicy = navigationPolicy();
+    const policy = editPolicy
+        ? { allowDig: editPolicy.allowDig === true, allowScaffold: editPolicy.scaffold !== 'forbid',
+            scaffoldBlocks: [...(editPolicy.scaffoldBlocks ?? [])] }
+        : { allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'] };
+    const startsInWater = isWaterFilled(bot.blockAt(bot.entity.position));
+    const surfaceSwimming = startsInWater && isWaterFilled(bot.blockAt(bot.entity.position.floored().offset(0, -1, 0)));
+    const positionRoute = { target: position.clone(), onSearch: () => {}, interaction: true,
+        policy: { ...policy, safeWater: true, surfaceSwimming },
+        arrived: () => {
+            const t = world.inspectBlockAt(bot, x, y, z);
+            return t.loaded && t.interaction.status === 'ready';
+        } };
+    const run = () => goToGoal(bot, goal, null, { positionRoute });
+    await (editPolicy ? run() : runWithNavigationPolicy(bot, { allowDig: true, scaffold: 'leave',
+        scaffoldBlocks: ['dirt', 'cobblestone'] }, run));
+}
+
 export async function approachBlock(bot, x, y, z) {
     /**
      * Move to a standing position with a reachable surface aim point for one absolute block. Like other native movement, the route may dig and place and leave dirt/cobblestone scaffolds; the target block itself is never dug. Center visibility is not required.
@@ -2501,23 +2529,9 @@ export async function approachBlock(bot, x, y, z) {
     if (!target.loaded) return { status: 'unknown', target, reason: 'Target is not loaded; no navigation started.' };
     if (ready(target)) return { status: 'ready', target };
     if (target.interaction.status === 'unknown') return { status: 'unknown', target, reason: target.interaction.reason };
-    const block = bot.blockAt(new Vec3(x, y, z).floored());
-    const goal = makeBlockInteractionGoal(bot, block.position);
-    const editPolicy = navigationPolicy();
-    const policy = editPolicy
-        ? { allowDig: editPolicy.allowDig === true, allowScaffold: editPolicy.scaffold !== 'forbid',
-            scaffoldBlocks: [...(editPolicy.scaffoldBlocks ?? [])] }
-        : { allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'] };
-    const startsInWater = isWaterFilled(bot.blockAt(bot.entity.position));
-    const surfaceSwimming = startsInWater && isWaterFilled(bot.blockAt(bot.entity.position.floored().offset(0, -1, 0)));
-    const positionRoute = { target: block.position.clone(), onSearch: () => {}, interaction: true,
-        policy: { ...policy, safeWater: true, surfaceSwimming },
-        arrived: () => ready(world.inspectBlockAt(bot, x, y, z)) };
     let navigationError = null;
     try {
-        const run = () => goToGoal(bot, goal, null, { positionRoute });
-        await (editPolicy ? run() : runWithNavigationPolicy(bot, { allowDig: true, scaffold: 'leave',
-            scaffoldBlocks: ['dirt', 'cobblestone'] }, run));
+        await approachInteractionTarget(bot, new Vec3(x, y, z).floored());
     } catch (error) {
         requireActiveTarget(bot);
         navigationError = String(error);

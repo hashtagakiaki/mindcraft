@@ -134,6 +134,8 @@ export function getNearestBlock(bot, type, distance) {
 }
 export function getInventoryCounts() { return {}; }
 export function getNearestFreeSpace() { return { x: 0, y: 0, z: 0 }; }
+// Plain-block collection approaches only a target that is not yet interactable.
+export function inspectBlockAt() { return { loaded: true, interaction: { status: 'ready' } }; }
 export function getPosition(bot) { return bot.entity.position; }
 export function shouldPlaceTorch() { return false; }
 `)

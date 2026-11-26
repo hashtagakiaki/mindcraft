@@ -302,6 +302,76 @@ async function main() {
         bot.entity.position = original.position
       }
     }
+    {
+      // collectBlock approaches a plain block (not an ore) on the approachBlock route, so a log six
+      // blocks above the ground without a scaffold reports the missing scaffold, not a bare timeout.
+      const original = { blockAt: bot.blockAt, findBlocks: bot.findBlocks, getPathFromTo: bot.pathfinder.getPathFromTo,
+        goto: bot.pathfinder.goto, items: bot.inventory.items, position: bot.entity.position, onMove: bot.state.onMove,
+        movements: bot.pathfinder.movements }
+      const targetAt = new Vec3(0, 70, 0)
+      let targetName = 'oak_log'
+      let pillar = true
+      bot.blockAt = position => {
+        const p = position.floored()
+        const solid = pillar && p.x >= 0 && p.x <= 1 && p.z === 0 && p.y >= 64 && p.y < 70
+        const name = p.equals(targetAt) ? targetName : solid ? 'stone' : p.y < 64 ? 'grass_block' : 'air'
+        const block = Block.fromStateId(registry.blocksByName[name].defaultState, 0); block.position = p
+        return block
+      }
+      bot.findBlocks = () => [targetAt]
+      bot.tool = { async equipForBlock() { bot.heldItem = { type: registry.itemsByName.stone_pickaxe.id, enchants: [] } } }
+      bot.inventory.emptySlotCount = () => 9
+      bot.nearestEntity = () => null
+      const collect = async () => {
+        const result = await run('await skills.collectBlock(bot, "oak_log", 1);')
+        return result.skillResults.find(call => call.skill === 'skills.collectBlock').result
+      }
+      const searches = []
+      bot.pathfinder.getPathFromTo = function () {
+        searches.push(true)
+        return (function* () { yield { result: { status: 'timeout', path: [] } } })()
+      }
+      const moves = []
+      bot.pathfinder.goto = async function (goal) { moves.push(goal) }
+      bot.state.onMove = null
+      try {
+        bot.entity.position = new Vec3(4.5, 64, 0.5)
+        bot.state.digs.length = 0
+        const dry = await collect()
+        assert.equal(dry.ok, false)
+        assert.equal(dry.code, 'search_limit')
+        assert.equal(dry.failedPhase, 'approach')
+        assert.match(dry.reason, /No scaffold blocks \(dirt\/cobblestone\)/)
+        assert.deepEqual(dry.navigation.scaffold, { allowed: ['dirt', 'cobblestone'], inInventory: 0 })
+        assert.ok(searches.length > 0, 'the approach used the segmented route search')
+        assert.equal(moves.length, 0)
+        assert.deepEqual(bot.state.digs, [], 'nothing is dug when the approach fails')
+
+        // A target within reach is dug at once, without any movement.
+        pillar = false
+        searches.length = 0
+        bot.entity.position = new Vec3(0.5, 66, 0.5)
+        bot.state.digs.length = 0
+        await collect()
+        assert.deepEqual(bot.state.digs, ['0,70,0'])
+        assert.equal(searches.length + moves.length, 0, 'a ready target needs no approach')
+
+        // An ore keeps the GoalNear approach.
+        targetName = 'iron_ore'
+        bot.entity.position = new Vec3(4.5, 64, 0.5)
+        bot.state.digs.length = 0
+        await run('await skills.collectBlock(bot, "iron_ore", 1);')
+        assert.equal(moves[0].constructor.name, 'GoalNear')
+        assert.equal(searches.length, 0, 'ore approach does not use the segmented route search')
+      } finally {
+        Object.assign(bot, { blockAt: original.blockAt, findBlocks: original.findBlocks }); bot.inventory.items = original.items
+        delete bot.tool; delete bot.heldItem
+        Object.assign(bot.pathfinder, { getPathFromTo: original.getPathFromTo, goto: original.goto })
+        bot.pathfinder.movements = original.movements
+        bot.entity.position = original.position; bot.state.onMove = original.onMove
+        bot.interrupt_code = false
+      }
+    }
     const opens = bot.state.opened.length
     bot.state.route = 'ready'; bot.state.visible = true
     let stopping
