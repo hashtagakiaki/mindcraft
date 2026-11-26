@@ -529,10 +529,10 @@ async function main() {
   craftingSync.run = async (_bot, callback) => callback(async (recipe, count, table) => {
     craftCalls.push({ recipe, count, table })
     const after = { ..._bot.navigation.inventory }  // world.getInventoryCounts returns a fresh object per call
-    for (const [name, used] of Object.entries(recipe.requiredItems)) after[name] -= used
-    for (const [name, made] of Object.entries(recipe.produces ?? {})) after[name] = (after[name] ?? 0) + made
+    for (const [name, used] of Object.entries(recipe.requiredItems)) after[name] -= used * count
+    for (const [name, made] of Object.entries(recipe.produces ?? {})) after[name] = (after[name] ?? 0) + made * count
     _bot.navigation.inventory = after
-    return 1
+    return count
   })
   const tableRecipe = {
     result: { id: 825, count: 1 },
@@ -561,10 +561,10 @@ async function main() {
     return book
   })()
   const woodItemIds = { oak_log: 1, oak_planks: 36, crafting_table: 300, wooden_pickaxe: 820, stone_pickaxe: 825, stick: 848, cobblestone: 35, spruce_log: 2001, spruce_planks: 2002 }
-  const woodRecipesFor = (bot, itemId, grid) => {
+  const woodRecipesFor = (bot, itemId, grid, minResultCount = 1) => {
     const name = Object.entries(woodItemIds).find(([, id]) => id === itemId)?.[0]
     return (woodBook[name] ?? [])
-      .filter(([required, { requiresTable }]) => (grid || !requiresTable) && Object.entries(required).every(([item, count]) => (bot.navigation.inventory[item] ?? 0) >= count))
+      .filter(([required, { craftedCount, requiresTable }]) => (grid || !requiresTable) && Object.entries(required).every(([item, count]) => (bot.navigation.inventory[item] ?? 0) >= count * Math.ceil(minResultCount / craftedCount)))
       .map(([required, { craftedCount, requiresTable }]) => ({ result: { id: itemId, count: craftedCount }, requiredItems: required, produces: { [name]: craftedCount }, requiresTable }))
   }
   // placeable: the bot stands on stone and the server places a crafting_table item on request and removes it on dig,
@@ -589,8 +589,8 @@ async function main() {
       game: { gameMode: 'survival' },
       entity: { position: makePosition(0, 0, 0) },
       modes: { isOn: () => false },
-      recipesFor(itemId, _metadata, _count, grid) {
-        if (wood) return woodRecipesFor(bot, itemId, grid)
+      recipesFor(itemId, _metadata, count, grid) {
+        if (wood) return woodRecipesFor(bot, itemId, grid, count)
         if (itemId === 825) return grid ? [tableRecipe] : []
         if (itemId === 36) return [inventoryRecipe]
         return []
@@ -740,6 +740,13 @@ async function main() {
     assert.equal(twoPickaxes.result.executions, 2)
     assert.deepEqual(twoPickaxes.result.missingItems, { cobblestone: 5, stick: 2 })
     assert.match(twoPickaxes.failedCrafts[0].result.reason, /cobblestone: 6, stick: 4/, 'the message gives the totals')
+    // Sticks the planks can make are crafted so that both pickaxes are made, not one.
+    const stickedPickaxes = await runCraftItem('stone_pickaxe', { cobblestone: 6, stick: 2, oak_planks: 2 }, { table: tableBlock }, 2)
+    assert.deepEqual([stickedPickaxes.result.ok, stickedPickaxes.result.status, stickedPickaxes.result.confirmedQuantity, stickedPickaxes.result.remainingQuantity],
+      [true, 'complete', 2, 0])
+    assert.deepEqual(stickedPickaxes.result.craftedIntermediates, [{ itemName: 'stick', confirmedQuantity: 4 }])
+    assert.deepEqual([stickedPickaxes.held.stone_pickaxe, stickedPickaxes.held.cobblestone, stickedPickaxes.held.stick, stickedPickaxes.held.oak_planks], [2, 0, 2, 0])
+    assert.equal(stickedPickaxes.failedCrafts.length, 0)
     const noStoneCraft = await runCraftItem('stone_pickaxe', { oak_log: 3 })
     assert.equal(noStoneCraft.result.code, 'missing_ingredients')
     assert.equal(noStoneCraft.result.missingItems.cobblestone, 3)

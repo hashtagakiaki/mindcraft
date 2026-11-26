@@ -574,9 +574,10 @@ function recipeShortfall(requiredItems, held, executions = 1) {
         .map(([name, count]) => [name, count * executions - (held[name] ?? 0)]));
 }
 
-function canCraftNow(bot, itemName, tableOK) {
+// Whether the inventory alone can make at least `count` new items of itemName.
+function canCraftNow(bot, itemName, tableOK, count = 1) {
     const id = mc.getItemId(itemName);
-    return (bot.recipesFor(id, null, 1, null)?.length ?? 0) > 0 || (tableOK && (bot.recipesFor(id, null, 1, true)?.length ?? 0) > 0);
+    return (bot.recipesFor(id, null, count, null)?.length ?? 0) > 0 || (tableOK && (bot.recipesFor(id, null, count, true)?.length ?? 0) > 0);
 }
 
 // The recipes of itemName, nearest to the inventory first: the smallest total shortfall for the executions
@@ -743,14 +744,16 @@ export async function craftItem(bot, itemName, quantity=1) {
     };
 
     // Greedy: crafts the table and the missing materials of the nearest recipe one level at a time and retries,
-    // without searching for a complete plan. Only the target (stack empty) calls craftRecipe for a failure result,
+    // without searching for a complete plan. The recipe runs at once only when the inventory makes the whole `count`;
+    // otherwise the shortfall for the whole count is made first, and only when that makes no progress is what the
+    // inventory can make crafted. Only the target (stack empty) calls craftRecipe for a failure result,
     // so the retries of an intermediate do not record the same missing_ingredients again.
     const autoCraft = async (name, count, stack) => {
         const target = stack.length === 0;
         const chain = [...stack, name];
         for (let round = 0; round < CRAFT_ITEM_MAX_ROUNDS; round++) {
             const tableOK = craftingTableUsable(bot);
-            if (canCraftNow(bot, name, tableOK)) return craftRecipeOnce(name, count, !target);
+            if (canCraftNow(bot, name, tableOK, count)) return craftRecipeOnce(name, count, !target);
             if (stack.length >= CRAFT_ITEM_MAX_DEPTH) break;
             const [recipe] = rankCraftingRecipes(bot, name, craftedCount => Math.ceil(count / craftedCount), tableOK);
             if (!recipe) break;
@@ -763,7 +766,8 @@ export async function craftItem(bot, itemName, quantity=1) {
             }
             if (madeItems === madeBefore) break;
         }
-        return target ? craftRecipeOnce(name, count, false) : null;
+        if (target) return craftRecipeOnce(name, count, false);
+        return canCraftNow(bot, name, craftingTableUsable(bot)) ? craftRecipeOnce(name, count, true) : null;
     };
 
     const result = await autoCraft(itemName, quantity, []);
