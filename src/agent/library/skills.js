@@ -2402,7 +2402,7 @@ export async function takeFromChest(bot, itemName, num=-1, options={}) {
 
 export async function approachBlock(bot, x, y, z) {
     /**
-     * Move to a standing position with a reachable surface aim point for one absolute block. Like reachPosition, digs and places dirt/cobblestone scaffolds when needed and leaves them; never breaks the target or interactable blocks, and says in reason when no scaffold blocks are carried. Center visibility is not required.
+     * Move to a standing position with a reachable surface aim point for one absolute block. Like reachPosition, digs and places dirt/cobblestone scaffolds when needed and leaves them; never breaks the target, chests, glass, gravity blocks or other blocks reachPosition protects (other functional blocks on the route can be dug), and says in reason when no scaffold blocks are carried. Center visibility is not required.
      * @param {MinecraftBot} bot - Pass bot first.
      * @param {number} x - Absolute block x.
      * @param {number} y - Absolute block y.
