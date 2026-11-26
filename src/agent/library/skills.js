@@ -560,6 +560,39 @@ async function equipHighestAttack(bot) {
         await bot.equip(weapon, 'hand');
 }
 
+const CRAFTING_TABLE_RANGE = 16;
+const CRAFT_ITEM_MAX_ROUNDS = 8;
+const CRAFT_ITEM_MAX_DEPTH = 3;
+
+function craftingTableUsable(bot) {
+    return (world.getInventoryCounts(bot).crafting_table ?? 0) > 0 || world.getNearestBlock(bot, 'crafting_table', CRAFTING_TABLE_RANGE) !== null;
+}
+
+function recipeShortfall(requiredItems, held, executions = 1) {
+    return Object.fromEntries(Object.entries(requiredItems)
+        .filter(([name, count]) => (held[name] ?? 0) < count * executions)
+        .map(([name, count]) => [name, count * executions - (held[name] ?? 0)]));
+}
+
+// Whether the inventory alone can make at least `count` new items of itemName.
+function canCraftNow(bot, itemName, tableOK, count = 1) {
+    const id = mc.getItemId(itemName);
+    return (bot.recipesFor(id, null, count, null)?.length ?? 0) > 0 || (tableOK && (bot.recipesFor(id, null, count, true)?.length ?? 0) > 0);
+}
+
+// The recipes of itemName, nearest to the inventory first: the smallest total shortfall for the executions
+// `executionsFor(craftedCount)` asks, then the most missing ingredients the inventory can already craft, then recipe order.
+function rankCraftingRecipes(bot, itemName, executionsFor, tableOK) {
+    const held = world.getInventoryCounts(bot);
+    return (mc.getItemCraftingRecipes(itemName) ?? []).map(([requiredItems, { craftedCount, requiresTable }], index) => {
+        const executions = executionsFor(craftedCount);
+        const missingItems = recipeShortfall(requiredItems, held, executions);
+        return { requiredItems, requiresTable, executions, index, missingItems,
+            shortfall: Object.values(missingItems).reduce((sum, count) => sum + count, 0),
+            craftableMissing: Object.keys(missingItems).filter(name => canCraftNow(bot, name, tableOK)).length };
+    }).sort((a, b) => a.shortfall - b.shortfall || b.craftableMissing - a.craftableMissing || a.index - b.index);
+}
+
 export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
     /**
      * Attempt to craft the given item name from a recipe. May craft many items.
@@ -582,16 +615,19 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
     }
 
     return craftingSync.run(bot, async (craft) => {
+    // Pick among recipes that make the whole requested quantity from the inventory when one does, so a recipe the
+    // inventory can only run once is not chosen over one that finishes; otherwise the nearest recipe runs as many times as it can.
+    const itemId = mc.getItemId(itemName);
+    const resultCount = [nativeOptions?.quantity ?? 1, 1].find(count => bot.recipesFor(itemId, null, count, null)?.length > 0 || bot.recipesFor(itemId, null, count, true)?.length > 0) ?? 1;
     // get recipes that don't require a crafting table
-    let recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, null); 
+    let recipes = bot.recipesFor(itemId, null, resultCount, null);
     let craftingTable = null;
-    const craftingTableRange = 16;
     placeTable: if (!recipes || recipes.length === 0) {
-        recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, true);
+        recipes = bot.recipesFor(itemId, null, resultCount, true);
         if(!recipes || recipes.length === 0) break placeTable; //Don't bother going to the table if we don't have the required resources.
 
         // Look for crafting table
-        craftingTable = world.getNearestBlock(bot, 'crafting_table', craftingTableRange);
+        craftingTable = world.getNearestBlock(bot, 'crafting_table', CRAFTING_TABLE_RANGE);
         if (craftingTable === null){
 
             // Try to place crafting table
@@ -599,9 +635,9 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
             if (hasTable) {
                 let pos = world.getNearestFreeSpace(bot, 1, 6);
                 await withSkillPhase('preparation', () => placeBlock(bot, 'crafting_table', pos.x, pos.y, pos.z));
-                craftingTable = world.getNearestBlock(bot, 'crafting_table', craftingTableRange);
+                craftingTable = world.getNearestBlock(bot, 'crafting_table', CRAFTING_TABLE_RANGE);
                 if (craftingTable) {
-                    recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, craftingTable);
+                    recipes = bot.recipesFor(itemId, null, resultCount, craftingTable);
                     placedTable = true;
                 } else {
                     return failSkill(bot, 'confirmation_failed', `Could not confirm a crafting table after placement; refusing to use the inventory grid for ${itemName}.`);
@@ -612,21 +648,19 @@ export async function craftRecipe(bot, itemName, num=1, nativeOptions=null) {
             }
         }
         else {
-            recipes = bot.recipesFor(mc.getItemId(itemName), null, 1, craftingTable);
+            recipes = bot.recipesFor(itemId, null, resultCount, craftingTable);
         }
     }
     if (!recipes || recipes.length === 0) {
         if (placedTable) {
             await withSkillPhase('cleanup', () => collectBlock(bot, 'crafting_table', 1));
         }
-        const requiredItems = mc.getItemCraftingRecipes(itemName)[0][0];
-        const held = world.getInventoryCounts(bot);
-        const missingItems = Object.fromEntries(Object.entries(requiredItems)
-            .filter(([name, count]) => (held[name] ?? 0) < count)
-            .map(([name, count]) => [name, count - (held[name] ?? 0)]));
+        const [{ requiredItems, missingItems, executions }] = rankCraftingRecipes(bot, itemName,
+            craftedCount => nativeOptions?.quantity == null ? num : Math.ceil(nativeOptions.quantity / craftedCount), craftingTableUsable(bot));
+        const totalItems = Object.entries(requiredItems).map(([key, value]) => `${key}: ${value * executions}`).join(', ');
         return failSkill(bot, 'missing_ingredients',
-            `You do not have the resources to craft a ${itemName}. It requires: ${Object.entries(requiredItems).map(([key, value]) => `${key}: ${value}`).join(', ')}.`,
-            { requiredItems, missingItems });
+            `You do not have the resources to craft ${itemName}${executions > 1 ? ` ${executions} times` : ''}. It requires: ${totalItems}.`,
+            { requiredItems, missingItems, executions });
     }
     
     if (craftingTable) {
@@ -689,9 +723,68 @@ function stallSurroundings(bot) {
     return cells;
 }
 
+// The failure the latest SDK call made under the running skill reported where it stopped.
+function lastChildFailure() {
+    const call = operationCallContext();
+    return operationContext()?.calls.findLast(entry => entry.parentCallId === call?.id)?.result ?? null;
+}
+
 export async function craftItem(bot, itemName, quantity=1) {
     if (!Number.isSafeInteger(quantity) || quantity < 1) throw new TypeError('craftItem quantity must be a positive safe integer');
-    return craftRecipe(bot, itemName, 1, { details: true, quantity });
+    const before = world.getInventoryCounts(bot);
+    const craftedIntermediates = [];
+    let madeItems = 0;
+
+    const craftRecipeOnce = async (name, count, intermediate) => {
+        const result = await craftRecipe(bot, name, 1, { details: true, quantity: count });
+        const confirmed = result?.confirmedQuantity ?? 0;
+        if (intermediate && confirmed > 0) {
+            madeItems += confirmed;
+            const entry = craftedIntermediates.find(crafted => crafted.itemName === name);
+            if (entry) entry.confirmedQuantity += confirmed;
+            else craftedIntermediates.push({ itemName: name, confirmedQuantity: confirmed });
+        }
+        return result;
+    };
+
+    // Greedy: crafts the table and the missing materials of the nearest recipe one level at a time and retries,
+    // without searching for a complete plan. The recipe runs at once only when the inventory makes the whole `count`;
+    // otherwise the shortfall for the whole count is made first, and only when that makes no progress is what the
+    // inventory can make crafted. Only the target (stack empty) calls craftRecipe for a failure result,
+    // so the retries of an intermediate do not record the same missing_ingredients again.
+    const autoCraft = async (name, count, stack) => {
+        const target = stack.length === 0;
+        const chain = [...stack, name];
+        for (let round = 0; round < CRAFT_ITEM_MAX_ROUNDS; round++) {
+            const tableOK = craftingTableUsable(bot);
+            if (canCraftNow(bot, name, tableOK, count)) return craftRecipeOnce(name, count, !target);
+            if (stack.length >= CRAFT_ITEM_MAX_DEPTH) break;
+            const [recipe] = rankCraftingRecipes(bot, name, craftedCount => Math.ceil(count / craftedCount), tableOK);
+            if (!recipe) break;
+            const madeBefore = madeItems;
+            if (recipe.requiresTable && !tableOK) await autoCraft('crafting_table', 1, chain);
+            const missing = recipeShortfall(recipe.requiredItems, world.getInventoryCounts(bot), recipe.executions);
+            for (const [material, shortfall] of Object.entries(missing)) {
+                if (!(mc.getItemCraftingRecipes(material)?.length > 0) || mc.isLoopingItem(material) || chain.includes(material)) continue;
+                await autoCraft(material, shortfall, chain);
+            }
+            if (madeItems === madeBefore) break;
+        }
+        if (target) return craftRecipeOnce(name, count, false);
+        return canCraftNow(bot, name, craftingTableUsable(bot)) ? craftRecipeOnce(name, count, true) : null;
+    };
+
+    const result = await autoCraft(itemName, quantity, []);
+    const after = world.getInventoryCounts(bot);
+    const consumedItems = Object.fromEntries(Object.entries(before)
+        .filter(([name, count]) => name !== itemName && (after[name] ?? 0) < count)
+        .map(([name, count]) => [name, count - (after[name] ?? 0)]));
+    const outcome = result === false
+        ? { itemName, requestedQuantity: quantity, confirmedQuantity: 0, remainingQuantity: quantity, ...lastChildFailure(), ok: false, status: 'failed' }
+        : result;
+    const final = { ...outcome, craftedIntermediates, consumedItems };
+    if (!final.ok) reportSkillOutcome(final);
+    return final;
 }
 
 export async function wait(bot, milliseconds) {

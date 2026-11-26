@@ -168,7 +168,7 @@ async function setupNavigationFixture(root) {
   await write(root, 'src/agent/library/crafting_sync.js', await readFile(path.join(repo, 'src/agent/library/crafting_sync.js')))
   await write(root, 'src/agent/library/native_sdk.js', await readFile(path.join(repo, 'src/agent/library/native_sdk.js')))
   await write(root, 'src/agent/library/item_handoff.js', await readFile(path.join(repo, 'src/agent/library/item_handoff.js')))
-  await write(root, 'src/utils/mcdata.js', 'export function mustCollectManually(name) { return name === "wheat"; } export function isHostile(entity) { return entity?.type === "hostile"; } export function getBlockId() { return 1; } export function getItemId(name) { return ({ oak_log: 1, oak_planks: 36, crafting_table: 300, wooden_pickaxe: 820, stone_pickaxe: 825, stick: 848 })[name] ?? null; } export function getItemCraftingRecipes(name) { return name === "oak_planks" || name === "stone_pickaxe" ? [[{}]] : []; } export function ingredientsFromPrismarineRecipe(recipe) { return recipe.requiredItems || {}; } export function calculateLimitingResource() { return { num: 1, limitingResource: "cobblestone" }; }')
+  await write(root, 'src/utils/mcdata.js', 'export function mustCollectManually(name) { return name === "wheat"; } export function isHostile(entity) { return entity?.type === "hostile"; } export function getBlockId() { return 1; } export function getItemId(name) { return globalThis.craftItemIds?.[name] ?? ({ oak_log: 1, oak_planks: 36, crafting_table: 300, wooden_pickaxe: 820, stone_pickaxe: 825, stick: 848 })[name] ?? null; } export function getItemCraftingRecipes(name) { return globalThis.craftRecipesFixture?.[name] ?? (name === "oak_planks" || name === "stone_pickaxe" ? [[{}, { craftedCount: 1, requiresTable: false }]] : []); } export function isLoopingItem() { return false; } export function ingredientsFromPrismarineRecipe(recipe) { return recipe.requiredItems || {}; } export function calculateLimitingResource(available, required) { let num = Infinity, limitingResource = null; for (const [name, count] of Object.entries(required)) { const fit = Math.floor((available[name] ?? 0) / count); if (fit < num) { num = fit; limitingResource = name; } } return { num, limitingResource }; }')
   await write(root, 'src/agent/library/world.js', `
 export function getNearestBlock(bot) { return bot.navigation.block || null; }
 export function inspectBlockAt(bot, x, y, z) {
@@ -215,7 +215,7 @@ class GoalCompositeAll {
   heuristic(node) { return Math.max(...this.goals.map(goal => goal.heuristic(node))); }
 }
 class GoalLookAtBlock { constructor(position, world, options) { this.position = position; this.world = world; this.options = options; } heuristic(node) { return Math.hypot(this.position.x - node.x, this.position.z - node.z) + Math.abs(this.position.y - node.y); } }
-export default { goals: { GoalNear, GoalNearXZ, GoalFollow, GoalInvert, GoalCompositeAll, GoalLookAtBlock }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } static isWaterFilled(block) { return block?.name === 'water'; } } };
+export default { goals: { GoalNear, GoalNearXZ, GoalFollow, GoalInvert, GoalCompositeAll, GoalLookAtBlock }, Movements: class { constructor() { this.blocksCantBreak = new Set(); } safeToBreak() { return true; } static isWaterFilled(block) { return block?.name === 'water'; } } };
 `)
 }
 
@@ -1013,6 +1013,7 @@ async function main() {
     'place_rpc.test.cjs',
     'block_placement.test.cjs',
     'targeted_sdk.test.cjs',
+    'crafting_recipes.test.cjs',
     'chest_transfer.test.cjs',
     'place_actions.test.cjs',
     'place_agent.test.cjs',
