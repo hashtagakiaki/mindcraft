@@ -2485,12 +2485,12 @@ export async function takeFromChest(bot, itemName, num=-1, options={}) {
 
 export async function approachBlock(bot, x, y, z) {
     /**
-     * Move to a standing position with a reachable surface aim point for one absolute block, without digging or placing. Center visibility is not required.
+     * Move to a standing position with a reachable surface aim point for one absolute block. Like other native movement, the route may dig and place and leave dirt/cobblestone scaffolds; the target block itself is never dug. Center visibility is not required.
      * @param {MinecraftBot} bot - Pass bot first.
      * @param {number} x - Absolute block x.
      * @param {number} y - Absolute block y.
      * @param {number} z - Absolute block z.
-     * @returns {Promise<object>} status ready/unknown/blocked and fresh target with interaction aim/face/distance; movement is not interaction success. No sampled aim is not proof that every surface point is occluded.
+     * @returns {Promise<object>} status ready/unknown/blocked and fresh target with interaction aim/face/distance; movement is not interaction success. A blocked reason names a missing scaffold supply. No sampled aim is not proof that every surface point is occluded.
      * @example
      * log(bot, JSON.stringify(await skills.approachBlock(bot, 10, 64, -3)));
      **/
@@ -2501,25 +2501,26 @@ export async function approachBlock(bot, x, y, z) {
     if (!target.loaded) return { status: 'unknown', target, reason: 'Target is not loaded; no navigation started.' };
     if (ready(target)) return { status: 'ready', target };
     if (target.interaction.status === 'unknown') return { status: 'unknown', target, reason: target.interaction.reason };
-    const previousMovements = bot.pathfinder.movements;
-    const movements = new pf.Movements(bot);
-    movements.canDig = false;
-    movements.canPlaceOn = false;
-    movements.allow1by1towers = false;
-    movements.allowFreeMotion = false;
-    movements.scafoldingBlocks = [];
-    // Without digging or placing, a long drop into water has no way back up.
-    movements.infiniteLiquidDropdownDistance = false;
     const block = bot.blockAt(new Vec3(x, y, z).floored());
     const goal = makeBlockInteractionGoal(bot, block.position);
+    const editPolicy = navigationPolicy();
+    const policy = editPolicy
+        ? { allowDig: editPolicy.allowDig === true, allowScaffold: editPolicy.scaffold !== 'forbid',
+            scaffoldBlocks: [...(editPolicy.scaffoldBlocks ?? [])] }
+        : { allowDig: true, allowScaffold: true, scaffoldBlocks: ['dirt', 'cobblestone'] };
+    const startsInWater = isWaterFilled(bot.blockAt(bot.entity.position));
+    const surfaceSwimming = startsInWater && isWaterFilled(bot.blockAt(bot.entity.position.floored().offset(0, -1, 0)));
+    const positionRoute = { target: block.position.clone(), onSearch: () => {}, interaction: true,
+        policy: { ...policy, safeWater: true, surfaceSwimming },
+        arrived: () => ready(world.inspectBlockAt(bot, x, y, z)) };
     let navigationError = null;
     try {
-        await goToGoal(bot, goal, movements);
+        const run = () => goToGoal(bot, goal, null, { positionRoute });
+        await (editPolicy ? run() : runWithNavigationPolicy(bot, { allowDig: true, scaffold: 'leave',
+            scaffoldBlocks: ['dirt', 'cobblestone'] }, run));
     } catch (error) {
         requireActiveTarget(bot);
         navigationError = String(error);
-    } finally {
-        if (previousMovements) bot.pathfinder.setMovements(previousMovements);
     }
     requireActiveTarget(bot);
     target = world.inspectBlockAt(bot, x, y, z);
@@ -3007,8 +3008,8 @@ async function recoverInterruptedNavigation(bot, goal, movements, hazard) {
     }
 }
 
-export async function goToGoal(bot, goal, movementOverride = null) {
-    return navigate(bot, goal, { movementOverride });
+export async function goToGoal(bot, goal, movementOverride = null, options = {}) {
+    return navigate(bot, goal, { movementOverride, positionRoute: options?.positionRoute ?? null });
 }
 
 function navigationFailure(code, reason, detail = {}) {
@@ -3052,7 +3053,16 @@ async function runStaticNavigation(bot, goal, movementOverride, positionRoute) {
     };
     const previousMovements = bot.pathfinder.movements;
     const explicit = movementOverride && typeof movementOverride === 'object';
-    let movements = routeMovements(bot, movementOverride, positionRoute?.policy);
+    const routeMovementsFor = policy => {
+        const built = routeMovements(bot, movementOverride, policy);
+        // An interaction target is something to reach, not to dig through.
+        if (positionRoute?.interaction) {
+            const targetBlock = positionRoute.target.floored();
+            built.exclusionAreasBreak.push(block => block.position.equals(targetBlock) ? Infinity : 0);
+        }
+        return built;
+    };
+    let movements = routeMovementsFor(positionRoute?.policy);
     const ownedMovements = new Set([movements]);
     const attempts = new Map();
     const unconfirmed = new Map();
@@ -3069,7 +3079,7 @@ async function runStaticNavigation(bot, goal, movementOverride, positionRoute) {
                 throw navigationFailure('unsafe_state', 'Hazard egress reached air; the requested feet block is still under water.',
                     { hazard: before, currentHazard: hazardEvidence(bot, kind) });
             }
-            movements = routeMovements(bot, movementOverride, { ...positionRoute.policy, safeWater: true, surfaceSwimming: true });
+            movements = routeMovementsFor({ ...positionRoute.policy, safeWater: true, surfaceSwimming: true });
             ownedMovements.add(movements);
         }
     };
@@ -3098,7 +3108,7 @@ async function runStaticNavigation(bot, goal, movementOverride, positionRoute) {
                             active();
                             if (loaded) continue;
                         }
-                        const targetBlocker = reachPositionTargetBlocker(bot, positionRoute.target, movements.canDig);
+                        const targetBlocker = positionRoute.interaction ? null : reachPositionTargetBlocker(bot, positionRoute.target, movements.canDig);
                         const code = hasUnconfirmedNavigationCell(bot, unconfirmed) ? 'no_progress' : targetBlocker?.code ??
                             (['partial', 'timeout'].includes(path.status) ? 'search_limit' : 'route_not_found');
                         // An allowed scaffold with none in inventory is a cause the caller can fix by gathering.

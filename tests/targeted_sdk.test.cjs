@@ -233,9 +233,8 @@ async function main() {
     assert.equal(bot.pathfinder.movements,original)
     const movement = bot.state.moves.at(-1)
     assert.equal(movement.goal.constructor.name,'GoalLookAtBlock')
-    assert.equal(movement.movements.canDig,false)
-    assert.equal(movement.movements.canPlaceOn,false)
-    assert.equal(movement.movements.allow1by1towers,false)
+    assert.equal(movement.movements.canDig,true,'approach follows the shared native route policy')
+    assert.equal(movement.movements.exclusionBreak({position:new Vec3(0,64,0)}),Infinity,'the approach target is never dug')
     bot.state.visible = false; bot.state.route = 'occluded'
     const partial = await skills.approachBlock(bot,0,64,0)
     assert.equal(partial.status,'blocked'); assert.equal(partial.target.visible,false)
@@ -244,12 +243,64 @@ async function main() {
     assert.equal(bot.state.digs.length,0)
     bot.state.route = 'unreachable'
     const unreachable = await skills.inspectChestAt(bot,0,64,0)
-    assert.equal(unreachable.status,'blocked'); assert.match(unreachable.reason,/No path to target/)
+    assert.equal(unreachable.status,'blocked'); assert.match(unreachable.reason,/Path search ended noPath/)
     for (const direction of ['takeFromChest', 'putInChest']) {
       const transfer = await skills[direction](bot,'iron_ingot',1,{chestPosition:{x:0,y:64,z:0},details:true})
       assert.equal(transfer.status,'blocked')
       assert.equal(transfer.confirmedQuantity,0)
-      assert.match(transfer.reason,/No path to target/,'transfer preserves the actionable navigation failure')
+      assert.match(transfer.reason,/Path search ended noPath/,'transfer preserves the actionable navigation failure')
+    }
+    {
+      // A chest on a stone pillar six blocks above the bot's feet: the approach needs the shared
+      // dig/dirt-scaffold route, and its failure names the missing scaffold supply.
+      const original = { blockAt: bot.blockAt, getPathFromTo: bot.pathfinder.getPathFromTo, goto: bot.pathfinder.goto,
+        items: bot.inventory.items, position: bot.entity.position }
+      const pillar = new Set(Array.from({ length: 6 }, (_, i) => [0, 1].map(x => `${x},${64 + i},0`)).flat())
+      bot.blockAt = position => {
+        const p = position.floored()
+        const name = pillar.has(key(p)) ? 'stone' : p.x === 0 && p.y === 70 && p.z === 0 ? 'chest' : p.y < 64 ? 'grass_block' : 'air'
+        const block = Block.fromStateId(registry.blocksByName[name].defaultState, 0); block.position = p
+        return block
+      }
+      bot.entity.position = new Vec3(4.5, 64, 0.5)
+      let searches = []
+      bot.pathfinder.getPathFromTo = function (movements, start) {
+        searches.push(movements)
+        const result = bot.state.route === 'unreachable' ? { status: 'noPath', path: [] }
+          : { status: 'success', path: [{ x: 4, y: 64, z: 0, hash: '4,64,0' }, { x: 1, y: 70, z: 0, hash: '1,70,0' }] }
+        return (function* () { yield { result } })()
+      }
+      const moves = []
+      bot.pathfinder.goto = async function (goal) {
+        moves.push({ goal, movements: this.movements })
+        bot.entity.position = new Vec3(1.5, 70, 0.5)
+      }
+      try {
+        bot.state.route = 'unreachable'
+        const dry = await skills.approachBlock(bot, 0, 70, 0)
+        assert.equal(dry.status, 'blocked')
+        assert.match(dry.reason, /No scaffold blocks \(dirt\/cobblestone\)/)
+        assert.equal(moves.length, 0)
+        bot.state.route = 'ready'; searches = []
+        const dirt = registry.itemsByName.dirt.id
+        bot.inventory.items = () => [{ name: 'dirt', type: dirt, count: 8 }]
+        bot.entity.position = new Vec3(4.5, 64, 0.5)
+        const climbed = await skills.approachBlock(bot, 0, 70, 0)
+        assert.equal(climbed.status, 'ready')
+        assert.ok(bot.entity.position.y >= 70, 'the stub route put the bot on the pillar')
+        assert.ok(searches.length > 0)
+        for (const movements of [...searches, ...moves.map(move => move.movements)]) {
+          assert.equal(movements.canDig, true)
+          assert.deepEqual(movements.scafoldingBlocks, [dirt, registry.itemsByName.cobblestone.id], 'allowed dirt/cobblestone scaffolds')
+          assert.equal(movements.allow1by1towers, true)
+          assert.equal(movements.exclusionBreak({ position: new Vec3(0, 70, 0) }), Infinity)
+          assert.equal(movements.exclusionBreak({ position: new Vec3(1, 69, 0) }), 0)
+        }
+      } finally {
+        Object.assign(bot, { blockAt: original.blockAt }); bot.inventory.items = original.items
+        Object.assign(bot.pathfinder, { getPathFromTo: original.getPathFromTo, goto: original.goto })
+        bot.entity.position = original.position
+      }
     }
     const opens = bot.state.opened.length
     bot.state.route = 'ready'; bot.state.visible = true

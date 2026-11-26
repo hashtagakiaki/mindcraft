@@ -87,10 +87,14 @@ function scene({ feet = new Vec3(-2.9, 64, -2.1), name = 'spruce_log', obstructi
   }
   bot.pathfinder = { movements: { original:true }, setMovements(m){ this.movements=m },
     bestHarvestTool:()=>null, getPathTo:()=>({status:'success'}),
+    getPathFromTo(_movements,start) {
+      const result={status:'success',path:[{x:Math.floor(start.x),y:Math.floor(start.y),z:Math.floor(start.z)},{x:0,y:64,z:-3,hash:'0,64,-3'}]}
+      return (function*(){ yield {result} })()
+    },
     async goto(goal) {
       bot.moves.push(goal)
-      assert.equal(this.movements.canDig,false); assert.equal(this.movements.canPlaceOn,false)
-      assert.equal(this.movements.allow1by1towers,false)
+      assert.equal(this.movements.canDig,true,'approach follows the shared native route policy')
+      assert.equal(this.movements.exclusionBreak({position:target}),Infinity,'the approach target is never dug')
       if(bot.onGoto) await bot.onGoto(goal)
       else bot.entity.position=new Vec3(.5,64,-2.5)
     }, stop(){} }
@@ -281,7 +285,7 @@ async function main() {
     for(const outcome of ['ready','unchanged','unloaded','changed']) {
       const bot=scene({feet:new Vec3(-8.5,64,.5),obstruction:false})
       bot.onGoto=()=>{
-        assert.equal(bot.pathfinder.movements.infiniteLiquidDropdownDistance,false,'an approach without edits takes no long drop into water')
+        assert.equal(bot.pathfinder.movements.infiniteLiquidDropdownDistance,false,'an approach takes no long drop into water')
         if(outcome==='unchanged') return
         bot.entity.position=new Vec3(.5,64,-2.5)
         if(outcome==='unloaded') bot.missing.add(key(target))
