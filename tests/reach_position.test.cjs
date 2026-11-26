@@ -1449,6 +1449,44 @@ async function main() {
       assert.equal(lava.testState.edits.some(edit => edit.block === 'lava'), false, 'hazard blocks are never excavated')
     }
 
+    if (runPart(3)) {
+      // approachBlock on a chest atop a stone pillar, with the installed world observation and the real
+      // A* planner: the planned route places dirt and never digs the chest; with no dirt it is blocked.
+      const approachRoot = await mkdtemp(path.join(os.tmpdir(), 'mc-approach-pillar-'))
+      try {
+        await setup(approachRoot)
+        await write(approachRoot, 'src/agent/settings.js', 'export default {};')
+        for (const name of ['world', 'block_interaction']) {
+          await write(approachRoot, `src/agent/library/${name}.js`, await readFile(path.join(repo, `src/agent/library/${name}.js`)))
+        }
+        const approachSkills = await import(pathToFileURL(path.join(approachRoot, 'src/agent/library/skills.js')))
+        const chestAt = new Vec3(3, 70, 0)
+        const pillar = [{ x: 3, y: 70, z: 0, name: 'chest' }]
+        for (let y = 64; y < 70; y++) pillar.push({ x: 3, y, z: 0, name: 'stone' })
+        for (const [carried, expected] of [[16, 'ready'], [0, 'blocked']]) {
+          const bot = makeBot({ solidBlocks: pillar, scaffoldInventory: carried ? { dirt: carried } : {} })
+          const result = await approachSkills.approachBlock(bot, chestAt.x, chestAt.y, chestAt.z)
+          const { edits, paths } = bot.testState
+          assert.equal(result.status, expected, JSON.stringify({ result, edits }))
+          assert.equal(edits.some(edit => key(edit.position) === key(chestAt)), false, 'the approached chest is never edited')
+          assert.equal(bot.blockAt(chestAt).name, 'chest')
+          if (expected === 'ready') {
+            const placed = paths.flatMap(route => route.path).filter(node => node.toPlace?.length)
+            assert.ok(placed.length > 0, 'the planned route places scaffolds')
+            const placements = edits.filter(edit => edit.kind === 'server_place')
+            assert.ok(placements.length > 0 && placements.every(edit => edit.block === 'dirt'), JSON.stringify(edits))
+            assert.ok(bot.entity.position.y > 64, 'the bot climbed toward the chest')
+          } else {
+            assert.deepEqual(result.scaffold, { allowed: ['dirt', 'cobblestone'], inInventory: 0 })
+            assert.match(result.reason, /No scaffold blocks \(dirt\/cobblestone\) are in inventory/, result.reason)
+            assert.equal(edits.some(edit => edit.kind === 'server_place'), false, 'nothing to place without dirt')
+          }
+        }
+      } finally {
+        await rm(approachRoot, { recursive: true, force: true })
+      }
+    }
+
 
     console.log(`reachPosition real pathfinder movement/A* fixtures passed${part ? ` (part ${part})` : ''} (open, mining, scaffolded routes, hazards, server confirmation, cancellation, chunk progression, native scope and restoration)`)
   } finally {
