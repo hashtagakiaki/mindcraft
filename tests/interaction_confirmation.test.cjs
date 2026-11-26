@@ -531,8 +531,6 @@ async function main() {
     const after = { ..._bot.navigation.inventory }  // world.getInventoryCounts returns a fresh object per call
     for (const [name, used] of Object.entries(recipe.requiredItems)) after[name] -= used
     for (const [name, made] of Object.entries(recipe.produces ?? {})) after[name] = (after[name] ?? 0) + made
-    // A crafted table stands for one placed beside the bot, as craftRecipe leaves it for the next craft.
-    if (recipe.produces?.crafting_table && _bot.navigation.craftedTableBlock) _bot.navigation.block = _bot.navigation.craftedTableBlock
     _bot.navigation.inventory = after
     return 1
   })
@@ -569,7 +567,9 @@ async function main() {
       .filter(([required, { requiresTable }]) => (grid || !requiresTable) && Object.entries(required).every(([item, count]) => (bot.navigation.inventory[item] ?? 0) >= count))
       .map(([required, { craftedCount, requiresTable }]) => ({ result: { id: itemId, count: craftedCount }, requiredItems: required, produces: { [name]: craftedCount }, requiresTable }))
   }
-  const craftBot = ({ table = null, includeTableItem = false, interaction = null, disappearOnBlockRead = 0, held = null, wood = false } = {}) => {
+  // placeable: the bot stands on stone and the server places a crafting_table item on request and removes it on dig,
+  // so craftRecipe places, uses and collects the table it crafted itself.
+  const craftBot = ({ table = null, includeTableItem = false, interaction = null, disappearOnBlockRead = 0, held = null, wood = false, placeable = false } = {}) => {
     const items = [
       { name: 'cobblestone', type: 35, count: 3 },
       { name: 'stick', type: 848, count: 2 },
@@ -578,11 +578,13 @@ async function main() {
     ]
     const inventory = {
       items: () => items,
-      findInventoryItem: name => items.find(item => item.name === name) || null
+      findInventoryItem: name => wood
+        ? (bot.navigation.inventory[name] ?? 0) > 0 ? { name, type: woodItemIds[name], count: bot.navigation.inventory[name] } : null
+        : items.find(item => item.name === name) || null
     }
-    const bot = {
+    const bot = Object.assign(new EventEmitter(), {
       output: '',
-      navigation: { block: table, interaction, inventory: held ?? { cobblestone: 3, stick: 2, oak_log: 1, crafting_table: includeTableItem ? 1 : 0 } },
+      navigation: { block: table, blocks: table ? [table] : [], interaction, inventory: held ?? { cobblestone: 3, stick: 2, oak_log: 1, crafting_table: includeTableItem ? 1 : 0 } },
       inventory,
       game: { gameMode: 'survival' },
       entity: { position: makePosition(0, 0, 0) },
@@ -601,6 +603,7 @@ async function main() {
             ? makeBlock('stone', position)
             : standing
         }
+        if (placeable && position.y < 0) return makeBlock('stone', position)
         return makeBlock('air', position, { type: 0 })
       },
       pathfinder: {
@@ -611,8 +614,32 @@ async function main() {
       async equip() {},
       async lookAt() {},
       armorManager: { async equipAll() {} }
-    }
+    })
     bot.entity.position.distanceTo = () => 0
+    if (placeable) {
+      bot.placed = []
+      bot.dug = []
+      bot.registry = { itemsByName: {}, blocksByName: {} }
+      bot.tool = { async equipForBlock() {} }
+      bot.nearestEntity = () => null
+      bot.inventory.emptySlotCount = () => 1
+      bot.placeBlock = async (reference, face) => {
+        const position = makePosition(reference.position.x + face.x, reference.position.y + face.y, reference.position.z + face.z)
+        const placedBlock = makeBlock('crafting_table', position)
+        bot.navigation.inventory = { ...bot.navigation.inventory, crafting_table: bot.navigation.inventory.crafting_table - 1 }
+        bot.navigation.block = placedBlock
+        bot.navigation.blocks = [placedBlock]
+        bot.placed.push(placedBlock)
+        bot.emit('blockUpdate', makeBlock('air', position, { type: 0 }), placedBlock)
+      }
+      bot.dig = async dugBlock => {
+        bot.navigation.inventory = { ...bot.navigation.inventory, crafting_table: bot.navigation.inventory.crafting_table + 1 }
+        bot.navigation.block = null
+        bot.navigation.blocks = []
+        bot.dug.push(dugBlock)
+        bot.emit('blockUpdate', dugBlock, makeBlock('air', dugBlock.position, { type: 0 }))
+      }
+    }
     return bot
   }
   try {
@@ -675,11 +702,10 @@ async function main() {
     assert.equal(craftCalls.length, craftCallsBeforeRejectedTable,
       'cancellation does not invoke the craft callback')
     // craftItem crafts the planks, sticks and table the inventory can make, without a failed target craft along the way.
-    const runCraftItem = async (itemName, held, options = {}) => {
-      const bot = craftBot({ held: { crafting_table: 0, ...held }, wood: true, ...options })
-      bot.navigation.craftedTableBlock = tableBlock
+    const runCraftItem = async (itemName, held, options = {}, quantity = 1) => {
+      const bot = craftBot({ held: { crafting_table: 0, ...held }, wood: true, placeable: true, ...options })
       const operation = ownership.createOperationContext({ id: `craft-item-${itemName}`, controller: new AbortController() }, { bot }, { intentEpoch: 0 })
-      const result = await ownership.runOwnedOperation(operation, () => createNativeSdk({ bot, skills }).skills.craftItem({ itemName }))
+      const result = await ownership.runOwnedOperation(operation, () => createNativeSdk({ bot, skills }).skills.craftItem({ itemName, quantity }))
       const failedCrafts = ownership.operationResult(operation).skillResults
         .filter(call => call.skill === 'skills.craftRecipe' && (call.status === 'returned_false' || call.result?.ok === false))
       return { bot, result, failedCrafts, held: bot.navigation.inventory }
@@ -690,6 +716,9 @@ async function main() {
     assert.deepEqual(oakCraft.result.craftedIntermediates, [
       { itemName: 'oak_planks', confirmedQuantity: 12 }, { itemName: 'crafting_table', confirmedQuantity: 1 }, { itemName: 'stick', confirmedQuantity: 4 }])
     assert.deepEqual(oakCraft.result.consumedItems, { oak_log: 3 })
+    assert.deepEqual([oakCraft.bot.placed.length, oakCraft.bot.dug.length], [1, 1], 'the crafted table is placed and collected once, through the server-confirmed placement and dig')
+    assert.deepEqual([oakCraft.bot.placed[0].name, oakCraft.bot.dug[0], oakCraft.bot.navigation.block], ['crafting_table', oakCraft.bot.placed[0], null], 'the table is gone after the craft')
+    assert.equal(oakCraft.held.crafting_table, 1, 'the table returns to the inventory')
     const spruceCraft = await runCraftItem('wooden_pickaxe', { spruce_log: 3 })
     assert.deepEqual([spruceCraft.result.ok, spruceCraft.held.wooden_pickaxe, spruceCraft.failedCrafts.length], [true, 1, 0],
       'the wood type held is used, not the first recipe')
@@ -704,6 +733,13 @@ async function main() {
       { itemName: 'oak_planks', confirmedQuantity: 8 }, { itemName: 'crafting_table', confirmedQuantity: 1 }, { itemName: 'stick', confirmedQuantity: 4 }])
     assert.deepEqual(shortCraft.result.consumedItems, { oak_log: 2 })
     assert.deepEqual([shortCraft.held.oak_planks, shortCraft.held.stick, shortCraft.held.crafting_table], [2, 4, 1], 'the intermediates stay in the inventory')
+    // The shortage is for the whole quantity: two executions need twice the recipe, minus what is held.
+    const twoPickaxes = await runCraftItem('stone_pickaxe', { cobblestone: 1, stick: 2 }, { table: tableBlock }, 2)
+    assert.equal(twoPickaxes.result.code, 'missing_ingredients')
+    assert.deepEqual(twoPickaxes.result.requiredItems, { cobblestone: 3, stick: 2 }, 'requiredItems stays one recipe execution')
+    assert.equal(twoPickaxes.result.executions, 2)
+    assert.deepEqual(twoPickaxes.result.missingItems, { cobblestone: 5, stick: 2 })
+    assert.match(twoPickaxes.failedCrafts[0].result.reason, /cobblestone: 6, stick: 4/, 'the message gives the totals')
     const noStoneCraft = await runCraftItem('stone_pickaxe', { oak_log: 3 })
     assert.equal(noStoneCraft.result.code, 'missing_ingredients')
     assert.equal(noStoneCraft.result.missingItems.cobblestone, 3)
