@@ -28,6 +28,7 @@ function createBot(scenario) {
     await scenario.collect(block, bot)
     scenario.collectBlocks.shift()
   }
+  bot.entities = {}
   bot.nearestEntity = () => null
   bot.blockAt = position => scenario.currentAir
     ? { name: 'air', type: 0, position }
@@ -57,6 +58,11 @@ function droppedItem(type = 10, x = 1.5) {
 function spawnAndPickup(bot, entity = droppedItem()) {
   bot.emit('itemDrop', entity)
   bot.emit('playerCollect', bot.entity, entity)
+}
+
+// bot.entities as pickupNearbyItems reads it: an item is present while the fixture still reports it.
+function entitiesOf(listItems) {
+  return new Proxy({}, { get: (_, id) => listItems().find(item => item && String(item.id) === id) })
 }
 
 function scenarioFor(block, collect) {
@@ -389,7 +395,9 @@ async function main() {
   {
     const scenario = scenarioFor(ore(), async () => { scenario.currentAir = true })
     const bot = createBot(scenario)
-    bot.nearestEntity = () => ({ name: 'item', position: { x: 2, y: 0, z: 0 } })
+    const unreachable = { id: 80, name: 'item', position: { x: 2, y: 0, z: 0 } }
+    bot.nearestEntity = () => unreachable
+    bot.entities = entitiesOf(() => [unreachable])
     bot.pathfinder.goto = async goal => {
       if (goal.constructor.name === 'GoalFollow') throw new Error('item is unreachable')
     }
@@ -401,7 +409,9 @@ async function main() {
   for (const [boundingBox, range] of [['empty', 0], ['block', 1]]) {
     const scenario = scenarioFor(ore(), async () => {})
     const bot = createBot(scenario)
-    bot.nearestEntity = () => ({ name: 'item', position: { x: 2, y: 0.9375, z: 0 } })
+    const resting = { id: 81, name: 'item', position: { x: 2, y: 0.9375, z: 0 } }
+    bot.nearestEntity = () => resting
+    bot.entities = entitiesOf(() => [resting])
     bot.blockAt = position => ({ name: 'farmland', type: 60, position, boundingBox })
     // Only the goal choice matters here; the fixture goal cannot run a route.
     await pickupNearbyItems(bot).catch(() => {})
@@ -412,7 +422,9 @@ async function main() {
   {
     const scenario = scenarioFor(ore(), async () => {})
     const bot = createBot(scenario)
-    bot.nearestEntity = () => ({ name: 'item', position: { x: 1.5, y: 5.2, z: 0.5 } })
+    const high = { id: 82, name: 'item', position: { x: 1.5, y: 5.2, z: 0.5 } }
+    bot.nearestEntity = () => high
+    bot.entities = entitiesOf(() => [high])
     bot.blockAt = position => ({ name: position.y < 0 ? 'stone' : 'air', type: 0, position, boundingBox: position.y < 0 ? 'block' : 'empty' })
     await pickupNearbyItems(bot).catch(() => {})
     assert.deepEqual(scenario.followYs, [0], 'the pickup route targets the cell the drop lands in')
@@ -422,13 +434,137 @@ async function main() {
     const scenario = scenarioFor(ore(), async () => {})
     scenario.routableFollow = true
     const bot = createBot(scenario)
-    const item = { name: 'item', position: { x: 1.5, y: 5.2, z: 0.5 } }
+    const item = { id: 83, name: 'item', position: { x: 1.5, y: 5.2, z: 0.5 } }
     let landed = false
     bot.nearestEntity = () => landed ? null : item
+    bot.entities = entitiesOf(() => landed ? [] : [item])
     bot.blockAt = position => ({ name: position.y < 0 ? 'stone' : 'air', type: 0, position, boundingBox: position.y < 0 ? 'block' : 'empty' })
-    bot.pathfinder.goto = async () => { setTimeout(() => { landed = true }, 1200) }
+    bot.pathfinder.goto = async () => { setTimeout(() => { bot.emit('playerCollect', bot.entity, item); landed = true }, 1200) }
     assert.equal(await pickupNearbyItems(bot), true)
     assert.match(bot.output, /Picked up 1 items/, 'a drop still falling onto the bot is picked up')
+  }
+  // A drop that rolls to the next cell lower while the bot walks is routed to again at its new landing cell.
+  {
+    const scenario = scenarioFor(ore(), async () => {})
+    scenario.routableFollow = true
+    const bot = createBot(scenario)
+    const item = { id: 90, name: 'item', position: { x: 1.5, y: 0.5, z: 0.5 } }
+    let floorY = 0
+    let gone = false
+    const goals = []
+    bot.nearestEntity = () => gone ? null : item
+    bot.entities = entitiesOf(() => gone ? [] : [item])
+    bot.blockAt = position => ({ name: position.y < floorY ? 'stone' : 'air', type: 0, position, boundingBox: position.y < floorY ? 'block' : 'empty' })
+    bot.pathfinder.goto = async goal => {
+      goals.push(goal.entity.position)
+      if (goals.length === 1) {
+        floorY = -1
+        item.position = { x: 2.5, y: -0.5, z: 0.5 }
+      } else {
+        bot.emit('playerCollect', bot.entity, item)
+        gone = true
+      }
+    }
+    assert.equal(await pickupNearbyItems(bot), true)
+    assert.deepEqual(goals.map(position => [position.x, position.y]), [[1.5, 0], [2.5, -1]], 'the second route targets the new landing cell')
+    assert.match(bot.output, /Picked up 1 items/)
+  }
+  // An item that stays put after its route is skipped once, and the next item is still picked up.
+  {
+    const scenario = scenarioFor(ore(), async () => {})
+    scenario.routableFollow = true
+    const bot = createBot(scenario)
+    bot.entity.position.distanceTo = () => 1
+    const stuck = { id: 91, name: 'item', position: { x: 1.5, y: 0.5, z: 0.5 } }
+    const other = { id: 92, name: 'item', position: { x: 3.5, y: 0.5, z: 0.5 } }
+    const picked = new Set()
+    const goals = []
+    bot.nearestEntity = predicate => [stuck, other].find(item => !picked.has(item) && predicate(item))
+    bot.entities = entitiesOf(() => [stuck, other].filter(item => !picked.has(item)))
+    bot.blockAt = position => ({ name: position.y < 0 ? 'stone' : 'air', type: 0, position, boundingBox: position.y < 0 ? 'block' : 'empty' })
+    bot.pathfinder.goto = async goal => {
+      goals.push(goal.entity.position.x)
+      if (goal.entity.position.x === other.position.x) { bot.emit('playerCollect', bot.entity, other); picked.add(other) }
+    }
+    assert.equal(await pickupNearbyItems(bot), true)
+    assert.deepEqual(goals, [1.5, 3.5], 'the stuck item is routed to once, then the next item')
+    assert.match(bot.output, /Picked up 1 items\. Skipped 1 unreachable items/)
+  }
+  // Another item becoming the nearer one does not mean the one routed to was picked up: it is routed to again
+  // where it rolled to, and the other item is collected afterwards.
+  {
+    const scenario = scenarioFor(ore(), async () => {})
+    scenario.routableFollow = true
+    const bot = createBot(scenario)
+    bot.entity.position.distanceTo = () => 1
+    const first = { id: 93, name: 'item', position: { x: 1.5, y: 0.5, z: 0.5 } }
+    const second = { id: 94, name: 'item', position: { x: 5.5, y: 0.5, z: 0.5 } }
+    const gone = new Set()
+    let secondNearer = false
+    const live = () => [first, second].filter(item => !gone.has(item))
+    const take = item => { bot.emit('playerCollect', bot.entity, item); gone.add(item) }
+    bot.entities = entitiesOf(live)
+    bot.nearestEntity = predicate => (secondNearer ? [second, first] : [first, second]).find(item => !gone.has(item) && predicate(item))
+    const goals = []
+    bot.pathfinder.goto = async goal => {
+      goals.push(goal.entity.position.x)
+      if (goals.length === 1) {
+        // The first item stays through the wait but rolled on, and the second is now the nearer one.
+        secondNearer = true
+        first.position = { x: 3.5, y: 0.5, z: 0.5 }
+      } else if (goal.entity.position.x === first.position.x) take(first)
+      else take(second)
+    }
+    bot.blockAt = position => ({ name: position.y < 0 ? 'stone' : 'air', type: 0, position, boundingBox: position.y < 0 ? 'block' : 'empty' })
+    assert.equal(await pickupNearbyItems(bot), true)
+    assert.deepEqual(goals, [1.5, 3.5, 5.5], 'the first item is followed to where it rolled before the second is routed to')
+    assert.match(bot.output, /Picked up 2 items\.(?! Skipped)/)
+    assert.equal(bot.listenerCount('playerCollect'), 0)
+  }
+  // An item vanishing without the bot's collect packet (despawn, another player) is not counted as a pickup.
+  for (const collector of ['none', 'other-player']) {
+    const scenario = scenarioFor(ore(), async () => {})
+    scenario.routableFollow = true
+    const bot = createBot(scenario)
+    bot.entity.position.distanceTo = () => 1
+    const item = { id: 95, name: 'item', position: { x: 1.5, y: 0.5, z: 0.5 } }
+    let gone = false
+    bot.entities = entitiesOf(() => gone ? [] : [item])
+    bot.nearestEntity = predicate => (gone ? undefined : [item].find(predicate))
+    bot.blockAt = position => ({ name: position.y < 0 ? 'stone' : 'air', type: 0, position, boundingBox: position.y < 0 ? 'block' : 'empty' })
+    bot.pathfinder.goto = async () => {
+      if (collector === 'other-player') bot.emit('playerCollect', { id: 2 }, item)
+      gone = true
+    }
+    assert.equal(await pickupNearbyItems(bot), true)
+    assert.match(bot.output, /Picked up 0 items/, collector)
+    assert.equal(bot.listenerCount('playerCollect'), 0)
+  }
+  // An interrupt arriving as the item vanishes ends the pickup before another item is routed to.
+  {
+    const scenario = scenarioFor(ore(), async () => {})
+    scenario.routableFollow = true
+    const bot = createBot(scenario)
+    bot.entity.position.distanceTo = () => 1
+    const first = { id: 96, name: 'item', position: { x: 1.5, y: 0.5, z: 0.5 } }
+    const second = { id: 97, name: 'item', position: { x: 3.5, y: 0.5, z: 0.5 } }
+    const gone = new Set()
+    bot.entities = entitiesOf(() => [first, second].filter(item => !gone.has(item)))
+    bot.nearestEntity = predicate => [first, second].find(item => !gone.has(item) && predicate(item))
+    bot.blockAt = position => ({ name: position.y < 0 ? 'stone' : 'air', type: 0, position, boundingBox: position.y < 0 ? 'block' : 'empty' })
+    const goals = []
+    bot.pathfinder.goto = async goal => {
+      goals.push(goal.entity.position.x)
+      // Both land while the pickup waits for the item.
+      setTimeout(() => {
+        bot.emit('playerCollect', bot.entity, first)
+        gone.add(first)
+        bot.interrupt_code = true
+      }, 20)
+    }
+    assert.equal(await pickupNearbyItems(bot), true)
+    assert.deepEqual(goals, [1.5], 'no route is drawn to the second item after the interrupt')
+    assert.match(bot.output, /Picked up 1 items/)
   }
   // The block is re-read after the approach, so a state change does not reach dig as a stale target.
   {
@@ -520,7 +656,9 @@ async function main() {
       scenario.currentAir = true
     })
     const bot = createBot(scenario)
-    bot.nearestEntity = () => ({ name: 'item', position: { x: 1.5, y: -1, z: 0.5 } })
+    const hole = { id: 84, name: 'item', position: { x: 1.5, y: -1, z: 0.5 } }
+    bot.nearestEntity = () => hole
+    bot.entities = entitiesOf(() => [hole])
     assert.equal(await collectBlock(bot, 'iron_ore'), true)
     assert.deepEqual(scenario.followRanges, [0])
   }
@@ -592,7 +730,9 @@ async function main() {
     bot.registry.items[99] = { name: 'dirt' }
     Object.assign(bot.registry.itemsByName, { raw_iron: { id: 10 }, dirt: { id: 99 } })
     let dropLeft = true
-    bot.nearestEntity = () => scenario.currentAir && dropLeft ? { name: 'item', position: { x: 1.5, y: 0, z: 0.5 } } : null
+    const drop = { id: 85, name: 'item', position: { x: 1.5, y: 0, z: 0.5 } }
+    bot.nearestEntity = () => scenario.currentAir && dropLeft ? drop : null
+    bot.entities = entitiesOf(() => scenario.currentAir && dropLeft ? [drop] : [])
     const routes = []
     let active
     bot.pathfinder.setMovements = movements => { active = movements }
