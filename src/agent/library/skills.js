@@ -1733,49 +1733,60 @@ export async function pickupNearbyItems(bot, movements = null) {
     const getNearestItem = bot => bot.nearestEntity(entity => entity.name === 'item' && !skippedItemIds.has(entity.id)
         && bot.entity.position.distanceTo(entity.position) < distance);
     const sameBlock = (a, b) => Math.floor(a.x) === Math.floor(b.x) && Math.floor(a.y) === Math.floor(b.y) && Math.floor(a.z) === Math.floor(b.z);
-    let nearestItem = getNearestItem(bot);
-    let pickedUp = 0;
-    pickup: while (nearestItem) {
-        const item = nearestItem;
-        let landing = dropLandingPosition(bot, item);
-        for (;;) {
-            // Range 1 can stop at the rim of a mined hole, outside the pickup box of
-            // an item at its bottom, so enter the item's own cell. An item resting on
-            // a partial block (farmland, slab) shares that block's cell; standing on
-            // top is within range 1, while range 0 would dig the block out.
-            const itemCellBlocked = bot.blockAt(landing)?.boundingBox === 'block';
-            routeCounts.set(item.id, (routeCounts.get(item.id) ?? 0) + 1);
-            // collectBlock passes its movements so pickups do not scaffold with the collected item either.
-            await goToGoal(bot, new pf.goals.GoalFollow({ position: landing }, itemCellBlocked ? 1 : 0), movements);
-            // A fresh drop cannot be picked up for its first 10 ticks, and the route to its landing
-            // cell can finish while it is still falling there.
-            const pickupDeadline = Date.now() + ITEM_PICKUP_WAIT_MS;
-            const fallDeadline = Date.now() + DROP_FALL_WAIT_MS;
-            // Another item becoming the nearer one says nothing about this one, so wait for it to vanish.
-            do {
-                await new Promise(resolve => setTimeout(resolve, 50));
-            } while (bot.entities[item.id] && !bot.interrupt_code && (Date.now() < pickupDeadline
-                || (item.position.y > landing.y + 0.5 && Date.now() < fallDeadline)));
-            if (!bot.entities[item.id]) {
-                pickedUp++;
+    // An item entity also vanishes when it despawns or another player takes it; only the bot's own collect packet is a pickup.
+    const collectedItemIds = new Set();
+    const onPlayerCollect = (collector, collected) => {
+        if (bot.entity?.id != null && collector?.id === bot.entity.id && collected?.id != null) collectedItemIds.add(collected.id);
+    };
+    bot.on('playerCollect', onPlayerCollect);
+    try {
+        let nearestItem = getNearestItem(bot);
+        let pickedUp = 0;
+        pickup: while (nearestItem) {
+            const item = nearestItem;
+            let landing = dropLandingPosition(bot, item);
+            for (;;) {
+                // Range 1 can stop at the rim of a mined hole, outside the pickup box of
+                // an item at its bottom, so enter the item's own cell. An item resting on
+                // a partial block (farmland, slab) shares that block's cell; standing on
+                // top is within range 1, while range 0 would dig the block out.
+                const itemCellBlocked = bot.blockAt(landing)?.boundingBox === 'block';
+                routeCounts.set(item.id, (routeCounts.get(item.id) ?? 0) + 1);
+                // collectBlock passes its movements so pickups do not scaffold with the collected item either.
+                await goToGoal(bot, new pf.goals.GoalFollow({ position: landing }, itemCellBlocked ? 1 : 0), movements);
+                // A fresh drop cannot be picked up for its first 10 ticks, and the route to its landing
+                // cell can finish while it is still falling there.
+                const pickupDeadline = Date.now() + ITEM_PICKUP_WAIT_MS;
+                const fallDeadline = Date.now() + DROP_FALL_WAIT_MS;
+                // Another item becoming the nearer one says nothing about this one, so wait for it to vanish.
+                do {
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                } while (bot.entities[item.id] && !bot.interrupt_code && (Date.now() < pickupDeadline
+                    || (item.position.y > landing.y + 0.5 && Date.now() < fallDeadline)));
+                const vanished = !bot.entities[item.id];
+                if (vanished && collectedItemIds.has(item.id)) pickedUp++;
+                if (bot.interrupt_code) break pickup;
+                if (vanished) {
+                    nearestItem = getNearestItem(bot);
+                    break;
+                }
+                // The drop rolled on while the bot walked to where it first came to rest: route to its cell now.
+                const moved = dropLandingPosition(bot, item);
+                if (!sameBlock(moved, landing) && routeCounts.get(item.id) < PICKUP_RETARGET_LIMIT) {
+                    landing = moved;
+                    continue;
+                }
+                skippedItemIds.add(item.id);
+                log(bot, `Could not pick up the item at (${item.position.x.toFixed(1)}, ${item.position.y.toFixed(1)}, ${item.position.z.toFixed(1)}).`);
                 nearestItem = getNearestItem(bot);
                 break;
             }
-            if (bot.interrupt_code) break pickup;
-            // The drop rolled on while the bot walked to where it first came to rest: route to its cell now.
-            const moved = dropLandingPosition(bot, item);
-            if (!sameBlock(moved, landing) && routeCounts.get(item.id) < PICKUP_RETARGET_LIMIT) {
-                landing = moved;
-                continue;
-            }
-            skippedItemIds.add(item.id);
-            log(bot, `Could not pick up the item at (${item.position.x.toFixed(1)}, ${item.position.y.toFixed(1)}, ${item.position.z.toFixed(1)}).`);
-            nearestItem = getNearestItem(bot);
-            break;
         }
+        log(bot, `Picked up ${pickedUp} items.${skippedItemIds.size ? ` Skipped ${skippedItemIds.size} unreachable items.` : ''}`);
+        return true;
+    } finally {
+        bot.removeListener('playerCollect', onPlayerCollect);
     }
-    log(bot, `Picked up ${pickedUp} items.${skippedItemIds.size ? ` Skipped ${skippedItemIds.size} unreachable items.` : ''}`);
-    return true;
 }
 
 
