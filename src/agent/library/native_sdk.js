@@ -95,7 +95,7 @@ s('placeBlock', {
     facing: optional(enumeration(['north', 'south', 'east', 'west', 'up', 'down'])),
     axis: optional(enumeration(['x', 'y', 'z'])), half: optional(enumeration(['top', 'bottom'])),
     attachTo: optional(enumeration(['top', 'bottom', 'north', 'south', 'east', 'west'])),
-}, 'Place a block at absolute position and verify its resulting server block state for every placement. facing/axis/half/attachTo use intended block state; attachTo is the side containing support. Supports are selected internally unless attachTo is specified. If facing is omitted, the bot may stand on any side of the target and the facing of the placed block is not verified. A same-named existing block fails with code:"already_present" because its state is not verified.', a => {
+}, 'Place a block at absolute position and verify its resulting server block state for every placement. facing/axis/half/attachTo use intended block state; attachTo is the side containing support. Supports are selected internally unless attachTo is specified. For furnaces, chests, observers, stairs, and other blocks without an attachTo support side, omitting facing lets the bot stand on any side of the target and the placed facing is not verified; doors, beds, and wall-mounted blocks still use the facing fixed by their default or attachTo. A same-named existing block fails with code:"already_present" because its state is not verified.', a => {
     const orientation = Object.fromEntries(['facing', 'axis', 'half', 'attachTo'].filter(key => has(a, key)).map(key => [key, a[key]]));
     return [a.blockType, ...coords(a), orientation, false];
 }, { constraint: (a, fail) => {

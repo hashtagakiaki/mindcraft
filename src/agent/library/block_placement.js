@@ -206,13 +206,13 @@ export function makePlacementGoal(bot, request, targets = expectedBlocks(request
     // Pathfinder 2.4.5 reverses the horizontal direction in checkFacing.
     const facing = HORIZONTAL.includes(heading) ? OPPOSITE[heading] : heading;
     const goalOptions = { faces, range: PLACEMENT_RANGE, LOS: true };
-    if (heading !== undefined) Object.assign(goalOptions, { facing, facing3D: request.family === 'six-way' });
+    Object.assign(goalOptions, heading === undefined ? { facing3D: false } : { facing, facing3D: request.family === 'six-way' });
     const goal = new pf.goals.GoalPlaceBlock(request.position, bot.world, goalOptions);
     if (request.family === 'stairs' || request.family === 'slab') {
         // Pathfinder's half filter rejects a floor's top face for bottom
         // placement. Only side clicks need a cursor-height constraint.
         const sideGoal = new pf.goals.GoalPlaceBlock(request.position, bot.world, {
-            faces: faces.filter(direction => direction.y === 0), ...(heading !== undefined && { facing }),
+            faces: faces.filter(direction => direction.y === 0), ...(heading === undefined ? { facing3D: false } : { facing, facing3D: false }),
             half: request.half, range: PLACEMENT_RANGE, LOS: true,
         });
         goal.facesPos = goal.facesPos.filter(([direction]) => direction.y !== 0).concat(sideGoal.facesPos);

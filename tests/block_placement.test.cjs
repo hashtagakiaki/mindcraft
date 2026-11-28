@@ -226,17 +226,17 @@ async function main() {
     assert.equal(offsetGoal.isEnd(offsetNode.offset(0, 1, 0)), false, 'the pathfinder phantom node one block above the actual position is not already at goal')
 
     // A one-block-wide east-west corridor: stone north and south of the target, open to the west and east.
-    const corridorBot = (item, result) => {
+    const corridorBot = (item, result, northSouth = false) => {
       const corridor = makeBot({ item, result })
-      corridor.state.world.set('0,65,-1', block('stone', new Vec3(0, 65, -1)))
-      corridor.state.world.set('0,65,1', block('stone', new Vec3(0, 65, 1)))
+      const walls = northSouth ? [[-1, 0], [1, 0]] : [[0, -1], [0, 1]]
+      for (const [x, z] of walls) corridor.state.world.set(`${x},65,${z}`, block('stone', new Vec3(x, 65, z)))
       corridor.entity.position = new Vec3(-0.5, 65, 0.5)
       return corridor
     }
     const westNode = new Vec3(-1, 65, 0)
     const eastNode = new Vec3(1, 65, 0)
-    const goalFor = (name, options) => {
-      const corridor = corridorBot(name, { name, properties: {} })
+    const goalFor = (name, options, northSouth = false) => {
+      const corridor = corridorBot(name, { name, properties: {} }, northSouth)
       return makePlacementGoal(corridor, normalizePlacement(corridor, name, { x: 0, y: 65, z: 0 }, options))
     }
     for (const [name, options, requested] of [
@@ -248,8 +248,16 @@ async function main() {
     assert.equal(omitted.state.packets.filter(([packet]) => packet === 'block_place').length, 1)
     assert.equal(goalFor('furnace', {}).isEnd(westNode), true, 'omitted facing accepts the west side')
     assert.equal(goalFor('furnace', {}).isEnd(eastNode), true, 'omitted facing accepts the east side')
-    assert.equal(goalFor('furnace', { facing: 'south' }).isEnd(westNode), false, 'facing south needs the north side, which is stone')
-    assert.equal(goalFor('furnace', { facing: 'south' }).isEnd(eastNode), false)
+    assert.equal(goalFor('furnace', { facing: 'south' }).isEnd(westNode), false, 'facing south rejects the west side')
+    assert.equal(goalFor('furnace', { facing: 'south' }).isEnd(eastNode), false, 'facing south rejects the east side')
+    const southNode = new Vec3(0, 65, 1)
+    const northNode = new Vec3(0, 65, -1)
+    assert.equal(goalFor('furnace', { facing: 'south' }, true).isEnd(southNode), true, 'facing south accepts the south side')
+    assert.equal(goalFor('furnace', { facing: 'south' }, true).isEnd(northNode), false, 'facing south rejects the north side')
+    assert.equal(goalFor('furnace', { facing: 'north' }, true).isEnd(northNode), true, 'facing north accepts the north side')
+    assert.equal(goalFor('furnace', { facing: 'north' }, true).isEnd(southNode), false, 'facing north rejects the south side')
+    assert.equal(goalFor('furnace', {}).options.facing3D, false, 'omitted facing sets facing3D false')
+    assert.equal(goalFor('oak_stairs', {}).options.facing3D, false, 'omitted stairs facing sets facing3D false')
     assert.equal(goalFor('furnace', { facing: 'west' }).isEnd(westNode), true, 'a furnace facing west is placed from the west side')
     assert.equal(goalFor('furnace', { facing: 'west' }).isEnd(eastNode), false)
     for (const [name, constrained] of [['observer', { facing: 'north' }], ['oak_stairs', { facing: 'south' }]]) {
