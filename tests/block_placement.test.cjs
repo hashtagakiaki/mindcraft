@@ -225,6 +225,41 @@ async function main() {
     assert.equal(offsetGoal.isEnd(offsetNode), false, 'an invalid actual start position is not reported already at goal')
     assert.equal(offsetGoal.isEnd(offsetNode.offset(0, 1, 0)), false, 'the pathfinder phantom node one block above the actual position is not already at goal')
 
+    // A one-block-wide east-west corridor: stone north and south of the target, open to the west and east.
+    const corridorBot = (item, result) => {
+      const corridor = makeBot({ item, result })
+      corridor.state.world.set('0,65,-1', block('stone', new Vec3(0, 65, -1)))
+      corridor.state.world.set('0,65,1', block('stone', new Vec3(0, 65, 1)))
+      corridor.entity.position = new Vec3(-0.5, 65, 0.5)
+      return corridor
+    }
+    const westNode = new Vec3(-1, 65, 0)
+    const eastNode = new Vec3(1, 65, 0)
+    const goalFor = (name, options) => {
+      const corridor = corridorBot(name, { name, properties: {} })
+      return makePlacementGoal(corridor, normalizePlacement(corridor, name, { x: 0, y: 65, z: 0 }, options))
+    }
+    for (const [name, options, requested] of [
+      ['furnace', {}, false], ['furnace', { facing: 'south' }, true], ['observer', {}, false], ['oak_stairs', {}, false],
+      ['oak_door', {}, false], ['white_bed', {}, false], ['ladder', {}, true], ['torch', { attachTo: 'north' }, true]
+    ]) assert.equal(normalizePlacement(makeBot(), name, { x: 0, y: 65, z: 0 }, options).facingRequested, requested, `${name} ${JSON.stringify(options)} facingRequested`)
+    const omitted = corridorBot('furnace', { name: 'furnace', properties: {} })
+    assert.equal(await invoke(omitted, 'furnace', {}), true, 'furnace without facing is placed from the open side of the corridor')
+    assert.equal(omitted.state.packets.filter(([packet]) => packet === 'block_place').length, 1)
+    assert.equal(goalFor('furnace', {}).isEnd(westNode), true, 'omitted facing accepts the west side')
+    assert.equal(goalFor('furnace', {}).isEnd(eastNode), true, 'omitted facing accepts the east side')
+    assert.equal(goalFor('furnace', { facing: 'south' }).isEnd(westNode), false, 'facing south needs the north side, which is stone')
+    assert.equal(goalFor('furnace', { facing: 'south' }).isEnd(eastNode), false)
+    assert.equal(goalFor('furnace', { facing: 'west' }).isEnd(westNode), true, 'a furnace facing west is placed from the west side')
+    assert.equal(goalFor('furnace', { facing: 'west' }).isEnd(eastNode), false)
+    for (const [name, constrained] of [['observer', { facing: 'north' }], ['oak_stairs', { facing: 'south' }]]) {
+      assert.equal(goalFor(name, {}).isEnd(westNode), true, `${name} omitted facing accepts the west side`)
+      assert.equal(goalFor(name, constrained).isEnd(westNode), false, `${name} with facing keeps its constraint`)
+    }
+    for (const name of ['oak_door', 'white_bed']) {
+      assert.equal(goalFor(name, {}).isEnd(westNode), false, `${name} keeps the default facing constraint`)
+    }
+
     let bot = makeBot({ initial: { name: 'furnace', properties: { facing: 'north' } }, item: null, support: false })
     let ownedResult = await owned(bot, () => invoke(bot))
     assert.equal(ownedResult.value, true, 'existing requested state is a no-op even without item/support')

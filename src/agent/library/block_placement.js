@@ -94,7 +94,7 @@ export function normalizePlacement(bot, blockType, position, options) {
         if (!state?.values?.includes(value)) throw new Error(`${name} does not support ${key}=${value}.`);
     }
     return { name, item, family, position: new Vec3(Math.floor(position.x), Math.floor(position.y), Math.floor(position.z)),
-        properties, attachTo, facing: properties.facing ?? 'north',
+        properties, attachTo, facing: properties.facing ?? 'north', facingRequested: properties.facing !== undefined,
         axis: properties.axis ?? (['east', 'west'].includes(attachTo) ? 'x' : ['north', 'south'].includes(attachTo) ? 'z' : 'y'),
         half: options.half ?? (attachTo === 'top' ? 'top' : 'bottom') };
 }
@@ -187,6 +187,8 @@ function supportDirections(request) {
 }
 
 function headingFor(request) {
+    // Without a requested facing the bot may stand on any side of the target.
+    if (['horizontal', 'six-way', 'stairs'].includes(request.family) && !request.facingRequested) return undefined;
     if (request.name === 'observer') return request.facing;
     if (['horizontal', 'six-way'].includes(request.family)) return OPPOSITE[request.facing];
     if (request.family === 'mount' && request.properties.face === 'wall') return undefined;
@@ -203,15 +205,14 @@ export function makePlacementGoal(bot, request, targets = expectedBlocks(request
     const heading = headingFor(request);
     // Pathfinder 2.4.5 reverses the horizontal direction in checkFacing.
     const facing = HORIZONTAL.includes(heading) ? OPPOSITE[heading] : heading;
-    const goal = new pf.goals.GoalPlaceBlock(request.position, bot.world, {
-        faces, facing, facing3D: request.family === 'six-way',
-        range: PLACEMENT_RANGE, LOS: true,
-    });
+    const goalOptions = { faces, range: PLACEMENT_RANGE, LOS: true };
+    if (heading !== undefined) Object.assign(goalOptions, { facing, facing3D: request.family === 'six-way' });
+    const goal = new pf.goals.GoalPlaceBlock(request.position, bot.world, goalOptions);
     if (request.family === 'stairs' || request.family === 'slab') {
         // Pathfinder's half filter rejects a floor's top face for bottom
         // placement. Only side clicks need a cursor-height constraint.
         const sideGoal = new pf.goals.GoalPlaceBlock(request.position, bot.world, {
-            faces: faces.filter(direction => direction.y === 0), facing,
+            faces: faces.filter(direction => direction.y === 0), ...(heading !== undefined && { facing }),
             half: request.half, range: PLACEMENT_RANGE, LOS: true,
         });
         goal.facesPos = goal.facesPos.filter(([direction]) => direction.y !== 0).concat(sideGoal.facesPos);
